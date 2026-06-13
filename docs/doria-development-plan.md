@@ -1,5 +1,35 @@
 # Doria compiler plan for Codex
 
+## Architecture correction
+
+Doria is not primarily a language that compiles to PHP.
+
+Doria is a compiled programming language whose long-term goal is native machine code and standalone executables. The compiler must be designed around a backend-independent pipeline:
+
+```text
+Doria source
+→ lexer
+→ parser
+→ AST
+→ semantic analysis
+→ type checker
+→ readonly/writable checker
+→ borrow/lifetime analysis later
+→ Doria IR
+→ backend
+```
+
+Backends may include:
+
+```text
+1. Native backend
+2. PHP backend
+3. Debug/interpreter backend
+4. WebAssembly backend
+```
+
+The native backend is the primary long-term target. A PHP backend may exist as a compatibility feature, migration tool, debugging aid, or transpilation target, but it must not shape the core compiler architecture.
+
 ## Project name
 
 **Doria**
@@ -17,7 +47,7 @@ Doria is a PHP-shaped, C-like, compiled language inspired by PHP syntax but with
 - Future: generics, borrow checker, async/await, native backend
 ```
 
-The first target should be a **Doria-to-PHP compiler**, not a native compiler. The compiler should reject invalid Doria code before outputting PHP.
+The first implementation slice may include a PHP backend because it is easy to inspect and run locally, but Doria must be designed as a compiled language with a backend-independent IR and a native backend as the primary long-term target. The compiler should reject invalid Doria code before lowering to IR or emitting any backend output.
 
 ---
 
@@ -302,7 +332,7 @@ It should define:
 7. Class syntax
 8. Function syntax
 9. Collection aliases
-10. PHP backend behavior
+10. IR and backend behavior
 11. Future features
 ```
 
@@ -718,7 +748,7 @@ class Person
 
 ---
 
-# Phase 6: PHP code generator
+# Phase 6: Backend emission and PHP backend
 
 The first backend should emit PHP.
 
@@ -985,9 +1015,9 @@ For a PHP backend, this could eventually lower to a Doria runtime built on Fiber
 
 ---
 
-# Phase 11: Native backend later
+# Phase 11: Native backend foundation
 
-After the PHP backend works, design a Doria IR.
+Doria IR belongs in the core compiler pipeline before backend emission. As the language matures, evolve the initial IR into explicit HIR/MIR phases that can support the native backend.
 
 Possible future pipeline:
 
@@ -1094,7 +1124,7 @@ Start by implementing:
 3. Parser for variable declarations, functions, classes, properties, methods, constructor params, echo, return, foreach, assignments, function calls, method calls, property access, literals, arrays/dictionaries.
 4. AST structs/enums.
 5. Semantic checker for symbol declarations and readonly/writable rules.
-6. PHP code generator.
+6. Backend abstraction and PHP backend.
 7. Tests for success and failure cases.
 
 Definition of done:

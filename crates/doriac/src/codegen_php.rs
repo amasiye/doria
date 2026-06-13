@@ -1,4 +1,4 @@
-use crate::ast::*;
+use crate::ir::*;
 use crate::types::TypeRef;
 
 pub fn generate(program: &Program) -> String {

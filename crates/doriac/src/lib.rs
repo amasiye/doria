@@ -1,7 +1,10 @@
 pub mod ast;
+pub mod backend;
 pub mod codegen_php;
 pub mod diagnostics;
+pub mod ir;
 pub mod lexer;
+pub mod lowering;
 pub mod parser;
 pub mod semantics;
 pub mod source;
@@ -9,6 +12,7 @@ pub mod symbols;
 pub mod types;
 
 use ast::Program;
+use backend::BackendTarget;
 use diagnostics::{Diagnostic, DiagnosticResult};
 use source::SourceFile;
 
@@ -36,8 +40,30 @@ pub fn compile_source_to_php(
     path: impl Into<String>,
     text: impl Into<String>,
 ) -> DiagnosticResult<String> {
+    compile_source(path, text, BackendTarget::Php)
+}
+
+pub fn lower_source(
+    path: impl Into<String>,
+    text: impl Into<String>,
+) -> DiagnosticResult<ir::Program> {
     let program = check_source(path, text)?;
-    Ok(codegen_php::generate(&program))
+    Ok(lowering::lower_program(&program))
+}
+
+pub fn compile_source(
+    path: impl Into<String>,
+    text: impl Into<String>,
+    target: BackendTarget,
+) -> Result<String, Vec<Diagnostic>> {
+    let ir = lower_source(path, text)?;
+    backend::emit(&ir, target).map_err(|error| {
+        vec![Diagnostic::new(
+            "B0001",
+            error,
+            crate::source::Span::default(),
+        )]
+    })
 }
 
 pub fn parse_source_file(source: &SourceFile) -> DiagnosticResult<Program> {

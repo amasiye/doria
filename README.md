@@ -1,18 +1,23 @@
 # Doria
 
-Doria is a new PHP-shaped programming language. It uses familiar PHP syntax such as `$variables`, classes, functions, visibility modifiers, constructor property promotion, and C-like blocks, but it is statically checked before it runs.
+Doria is a new PHP-shaped compiled programming language. It uses familiar PHP syntax such as `$variables`, classes, functions, visibility modifiers, constructor property promotion, and C-like blocks, but it is statically checked before it runs.
 
-The compiler is called `doriac` and is implemented in Rust. The first backend emits PHP.
+The compiler is called `doriac` and is implemented in Rust. Doria's long-term primary target is native machine code and standalone executables. PHP is a compatibility, migration, debugging, and transpilation backend; it must not shape the core compiler architecture.
 
 ```text
 Doria source
 -> lexer
 -> parser
 -> AST
--> semantic checker / type checker
+-> semantic analysis
+-> type checker
 -> readonly/writable checker
--> PHP code generator
+-> borrow/lifetime analysis later
+-> Doria IR
+-> backend
 ```
+
+Planned backends include native, PHP, debug/interpreter, and WebAssembly. The current working backend is PHP.
 
 ## Current status
 
@@ -22,7 +27,8 @@ This repository contains the first working vertical slice of `doriac`:
 - Parses a small subset of declarations, classes, functions, statements, and expressions.
 - Builds an AST.
 - Checks undeclared assignment and readonly/writable mutation rules for locals, properties, `$this`, and writable methods.
-- Emits PHP for supported syntax.
+- Lowers the checked AST to a small backend-independent Doria IR.
+- Emits PHP for supported syntax through the PHP backend.
 - Provides CLI commands and integration tests.
 
 It is intentionally not a complete language yet. The implementation should grow in small, tested compiler increments.
@@ -45,7 +51,7 @@ doriac compile <file> --target php --out <file>
 doriac run <file>
 ```
 
-`doriac run` compiles to a temporary PHP file and runs it with the local `php` binary.
+`doriac run` is currently a convenience command for the PHP backend: it compiles to a temporary PHP file and runs it with the local `php` binary.
 
 ## Language principles
 
@@ -56,7 +62,7 @@ doriac run <file>
 - Bindings, properties, parameters, and `$this` are readonly by default.
 - Intentional mutation uses `writable`.
 - Collection aliases are `List<T>`, `Dictionary<K, V>`, and `Set<T>`.
-- The compiler must reject invalid Doria before emitting PHP.
+- The compiler must reject invalid Doria before lowering to IR or emitting backend output.
 
 ## Repository layout
 

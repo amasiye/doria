@@ -2,6 +2,9 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::str::FromStr;
+
+use doriac::backend::BackendTarget;
 
 fn main() -> ExitCode {
     match run() {
@@ -46,16 +49,17 @@ fn compile_command(args: &[String]) -> Result<(), String> {
     let input = args
         .first()
         .ok_or_else(|| "missing input file".to_string())?;
-    let mut target = "php".to_string();
+    let mut target = BackendTarget::Php;
     let mut out = None::<String>;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
             "--target" => {
-                target = args
+                let target_value = args
                     .get(index + 1)
                     .ok_or_else(|| "missing value for --target".to_string())?
                     .clone();
+                target = BackendTarget::from_str(&target_value)?;
                 index += 2;
             }
             "--out" => {
@@ -70,15 +74,17 @@ fn compile_command(args: &[String]) -> Result<(), String> {
         }
     }
 
-    if target != "php" {
+    if !target.is_available() {
         return Err(format!(
-            "unsupported target `{target}`; only `php` is available"
+            "target `{}` ({}) is planned but not implemented yet; only `php` is currently available",
+            target.name(),
+            target.description()
         ));
     }
 
     let out = out.ok_or_else(|| "missing --out <file>".to_string())?;
     let (path, text) = read_source(input)?;
-    let php = doriac::compile_source_to_php(path.clone(), text.clone())
+    let output = doriac::compile_source(path.clone(), text.clone(), target)
         .map_err(|diagnostics| doriac::render_diagnostics(path, text, &diagnostics))?;
 
     let out_path = PathBuf::from(out);
@@ -88,7 +94,8 @@ fn compile_command(args: &[String]) -> Result<(), String> {
                 .map_err(|error| format!("failed to create output directory: {error}"))?;
         }
     }
-    fs::write(&out_path, php).map_err(|error| format!("failed to write output file: {error}"))?;
+    fs::write(&out_path, output)
+        .map_err(|error| format!("failed to write output file: {error}"))?;
     println!("{}", out_path.display());
     Ok(())
 }

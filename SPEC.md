@@ -4,11 +4,35 @@ This document describes the v0.1 direction for Doria.
 
 ## 1. What Doria is
 
-Doria is a PHP-shaped, statically checked programming language. It keeps familiar PHP surface syntax where that helps migration, including `$variables`, classes, functions, visibility modifiers, constructor property promotion, arrays, and C-like blocks.
+Doria is a PHP-shaped, statically checked, compiled programming language. It keeps familiar PHP surface syntax where that helps migration, including `$variables`, classes, functions, visibility modifiers, constructor property promotion, arrays, and C-like blocks.
 
 Doria source files use the `.doria` extension and do not require `<?php` tags.
 
-The first compiler is `doriac`, implemented in Rust, and its first backend emits PHP.
+The compiler is `doriac`, implemented in Rust. Doria's long-term primary target is native machine code and standalone executables.
+
+The compiler architecture is backend-independent:
+
+```text
+Doria source
+-> lexer
+-> parser
+-> AST
+-> semantic analysis
+-> type checker
+-> readonly/writable checker
+-> borrow/lifetime analysis later
+-> Doria IR
+-> backend
+```
+
+Backends may include:
+
+- Native backend.
+- PHP backend.
+- Debug/interpreter backend.
+- WebAssembly backend.
+
+The PHP backend is a compatibility, migration, debugging, and transpilation target. It must not shape the core compiler architecture.
 
 ## 2. What Doria is not
 
@@ -18,7 +42,7 @@ Doria is PHP-shaped, not PHP-compatible at the parser level.
 
 Valid PHP should be easy to migrate to Doria, but Doria-specific syntax does not need to run directly in PHP.
 
-The v0.1 compiler is not a native compiler, package manager, reflection system, macro system, async runtime, or full standard library.
+The v0.1 compiler does not yet produce native executables, and it is not yet a package manager, reflection system, macro system, async runtime, or full standard library.
 
 ## 3. MVP syntax
 
@@ -176,16 +200,20 @@ Set<string>
 
 Do not use `Vec`.
 
-The first PHP backend lowers these aliases to PHP arrays, while the Doria type checker keeps them distinct.
+The PHP backend lowers these aliases to PHP arrays, while the Doria type checker keeps them distinct.
 
-## 10. PHP backend behavior
+## 10. IR and backend behavior
 
-The PHP backend emits `<?php` and lowers Doria-only syntax away:
+After semantic analysis, type checking, and readonly/writable checking, the compiler lowers the checked AST to Doria IR. Backends consume Doria IR rather than parser structures.
+
+The native backend is the primary long-term target. It should eventually lower Doria IR toward native machine code and standalone executables.
+
+The PHP backend is currently the first implemented backend. It emits `<?php` and lowers Doria-only syntax away:
 
 - `let` is removed.
 - `writable` is removed.
 - Collection aliases are emitted as `array`.
-- Doria readonly/writable rules are enforced before code generation, not at PHP runtime.
+- Doria readonly/writable rules are enforced before IR lowering and backend emission, not at PHP runtime.
 
 ## 11. Future features
 
@@ -196,6 +224,7 @@ Future work includes:
 - Full type inference for lists and dictionaries.
 - Interfaces, traits, and namespaces.
 - Async/await and structured concurrency.
-- A Doria IR.
+- Native backend design and implementation.
+- More explicit Doria IR phases.
 - Native code generation.
 - Package management.

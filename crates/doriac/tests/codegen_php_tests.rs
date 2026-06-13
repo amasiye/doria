@@ -1,3 +1,6 @@
+use doriac::backend::BackendTarget;
+use doriac::ir;
+
 #[test]
 fn emits_php_for_simple_program() {
     let php = doriac::compile_source_to_php(
@@ -14,6 +17,39 @@ echo $count;
     assert!(php.contains("$count = 0;"));
     assert!(php.contains("$count += 1;"));
     assert!(php.contains("echo $count;"));
+}
+
+#[test]
+fn lowers_checked_program_to_backend_independent_ir() {
+    let lowered = doriac::lower_source(
+        "test.doria",
+        r#"
+let $name = "Doria";
+echo $name;
+"#,
+    )
+    .expect("lowering should succeed");
+
+    assert!(matches!(
+        &lowered.items[0],
+        ir::Item::Statement(ir::Stmt::VarDecl(decl)) if decl.name == "name"
+    ));
+}
+
+#[test]
+fn recognizes_native_as_planned_backend() {
+    let err = doriac::compile_source(
+        "test.doria",
+        r#"
+let $name = "Doria";
+echo $name;
+"#,
+        BackendTarget::Native,
+    )
+    .expect_err("native backend is planned but not implemented yet");
+
+    assert_eq!(err[0].code, "B0001");
+    assert!(err[0].message.contains("backend `native`"));
 }
 
 #[test]
