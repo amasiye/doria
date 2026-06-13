@@ -8,7 +8,7 @@ Doria is a PHP-shaped, statically checked, compiled programming language. It kee
 
 Doria source files use the `.doria` extension and do not require `<?php` tags.
 
-The compiler is `doriac`, implemented in Rust. Doria's long-term primary target is native machine code and standalone executables.
+The compiler is `doriac`, implemented initially in Rust. Doria's long-term primary target is native machine code and standalone executables. A strategic goal is for `doriac` to become increasingly self-hosted in Doria over time.
 
 The compiler architecture is backend-independent:
 
@@ -43,7 +43,7 @@ Doria is PHP-shaped, not PHP-compatible at the parser level.
 
 Valid PHP should be easy to migrate to Doria, but Doria-specific syntax does not need to run directly in PHP.
 
-The v0.1 compiler does not yet produce native executables, and it is not yet a package manager, reflection system, macro system, async runtime, or full standard library.
+The v0.1 compiler does not yet produce native executables, and it is not yet a package manager, reflection system, macro system, async runtime, PHP migration converter, or full standard library.
 
 ## 3. MVP syntax
 
@@ -118,7 +118,7 @@ class Person
 }
 ```
 
-To assign to a property, both the object path and the property must be writable.
+To assign to a property, both the object path and the property must be writable, unless a constructor is initializing an uninitialized readonly property through constructor init access.
 
 Function parameters are readonly by default and become writable only with `writable`.
 
@@ -259,7 +259,32 @@ The intended direction is:
 
 See `docs/executable-initializers-and-attributes.md` for the detailed design notes.
 
-## 11. HIR, MIR, and backend behavior
+## 11. PHP interop and migration
+
+Doria supports two separate PHP-related directions:
+
+```text
+1. Doria -> PHP backend.
+2. PHP -> Doria migration converter.
+```
+
+The PHP backend is a planned compatibility/debugging backend.
+
+A PHP-to-Doria converter may eventually help migrate existing PHP codebases into Doria, but it must remain architecturally separate from the Doria parser and core compiler semantics.
+
+Recommended future shape:
+
+```bash
+doriac migrate php src --out migrated
+```
+
+The converter should initially produce conservative valid Doria, not perfect idiomatic Doria. It should use diagnostics for unsupported dynamic PHP features rather than pretending every valid PHP program can be automatically converted safely.
+
+Doria should avoid promising full bidirectional PHP/Doria compatibility.
+
+See `docs/php-interop-and-migration.md` for the detailed design notes.
+
+## 12. HIR, MIR, and backend behavior
 
 After semantic analysis, type checking, and readonly/writable checking, the compiler currently lowers the checked AST to HIR. HIR is still close to source structure and is not the final backend IR.
 
@@ -276,7 +301,7 @@ The PHP backend is currently the first implemented backend. It emits `<?php` and
 
 For Doria features that PHP cannot express directly, such as object construction in property initializers or richer attribute expressions, the PHP backend should lower to equivalent generated PHP where practical or produce a clear unsupported-feature diagnostic temporarily. PHP limitations must not define Doria semantics.
 
-## 12. Future features
+## 13. Future features
 
 Future work includes:
 
@@ -291,4 +316,6 @@ Future work includes:
 - Native backend design and implementation.
 - MIR implementation.
 - Native code generation.
+- Self-hosting path for writing more of `doriac` in Doria.
+- PHP-to-Doria migration tooling.
 - Package management.
