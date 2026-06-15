@@ -45,6 +45,8 @@ Valid PHP should be easy to migrate to Doria, but Doria-specific syntax does not
 
 The v0.1 compiler does not yet produce native executables, and it is not yet a package manager, reflection system, macro system, async runtime, PHP migration converter, or full standard library.
 
+Doria is not a Rust language. Rust is the current bootstrap implementation language for `doriac`, not the permanent identity of the compiler.
+
 ## 3. MVP syntax
 
 The MVP supports:

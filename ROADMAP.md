@@ -3,10 +3,12 @@
 ## Strategic Goals
 
 - Build Doria as a PHP-shaped compiled language with native machine code and standalone executables as the long-term target.
+- Support areas where PHP developers may want a PHP-like experience but PHP itself does not make complete sense, including native desktop applications, game tooling, game engines, graphics/media work, and C-library bindings such as raylib.
 - Keep PHP as a compatibility, migration, debugging, and transpilation backend only.
 - Move toward **self-hosting**: `doriac` is initially implemented in Rust, but an early language-development goal is to eventually write significant parts of `doriac` in Doria itself.
 - Support Doria language features that PHP cannot express directly, including executable property initializers and richer attribute/metadata expressions.
 - Eventually support PHP-to-Doria migration tooling, while keeping that tooling separate from the Doria parser and core compiler semantics.
+- Build a benchmark culture early: measure speed, memory, compile time, startup time, and artifact size before making performance claims.
 
 ## Current Slice
 
@@ -14,6 +16,7 @@
 - Treat the current lowered form as HIR, not final IR.
 - Keep PHP as a compatibility backend only.
 - Do not build PHP-to-Doria migration in the current v0.1 slice.
+- Do not start desktop, game engine, raylib, or FFI implementation work in the current v0.1 slice.
 
 ## Next Compiler Work
 
@@ -22,11 +25,21 @@
 - Add constructor init access for readonly properties.
 - Design MIR as a control-flow-oriented lowering target.
 - Add native backend experiments behind explicit targets.
+- Plan the path toward writing more of `doriac` in Doria itself.
 - Add string interpolation AST nodes independent of PHP behavior.
 - Emit precedence-aware backend expressions.
 - Add parser/AST support for attributes using `#[...]`.
 - Add shared call argument representation for positional and named arguments.
 - Preserve property initializer expressions in AST/HIR and later lower non-constant initializers correctly.
+- Add language/design support for `writable class` and `readonly class` as mutability ergonomics before considering shorter mutation keywords.
+
+## Performance and Native Application Path
+
+- Add a `benchmarks/` structure before making public performance claims.
+- Track runtime speed, compile time, startup time, memory, binary size, stripped binary size, compressed artifact size, and correctness output.
+- Include Doria-relevant benchmarks such as lexing, parsing, type checking, object construction, string operations, collections, and eventually small game-loop/FFI smoke tests.
+- Keep native desktop, game engine, and raylib goals visible when designing MIR, runtime, memory representation, and FFI.
+- Do not begin raylib bindings until native backend, FFI model, and basic runtime are ready.
 
 ## PHP Migration Path
 
