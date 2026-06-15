@@ -107,6 +107,8 @@ The VS Code extension looks for the server in this order:
 - Bare assignment never declares a variable.
 - Bindings, properties, parameters, and `$this` are readonly by default.
 - Intentional mutation uses `writable`.
+- Class members are externally accessible by default; use `internal` for implementation details that should not be accessed from outside the declaring class.
+- `writable` controls mutation. `internal` controls API surface.
 - Collection aliases are `List<T>`, `Dictionary<K, V>`, and `Set<T>`.
 - The compiler must reject invalid Doria before lowering to HIR/MIR or emitting backend output.
 - Doria may support features PHP cannot express directly, such as executable instance property initializers and richer attribute expressions.

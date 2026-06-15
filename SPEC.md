@@ -45,6 +45,8 @@ Doria syntax is familiar to developers coming from PHP-like and C-like languages
 
 Valid PHP should be easy to migrate to Doria, but Doria-specific syntax does not need to run directly in PHP.
 
+Doria does not use `public`, `protected`, or `private` as member visibility modifiers. Class members are externally accessible by default, and `internal` marks implementation details.
+
 The v0.1 compiler does not yet produce native executables, and it is not yet a package manager, reflection system, macro system, async runtime, PHP migration converter, or full standard library.
 
 Doria is not a Rust language. Rust is the current bootstrap implementation language for `doriac`, not the permanent identity of the compiler.
@@ -117,8 +119,8 @@ Properties are readonly by default:
 ```php
 class Person
 {
-    public string $id;
-    public writable string $name;
+    string $id;
+    writable string $name;
 }
 ```
 
@@ -128,7 +130,49 @@ Function parameters are readonly by default and become writable only with `writa
 
 Methods receive readonly `$this` by default. A method that mutates `$this` must be declared with `writable function`.
 
-## 6. Basic type system
+## 6. Member access
+
+Doria class members are accessible by default. Use `internal` only for implementation details that should not be accessed from outside the declaring class. Doria does not use visibility modifiers as boilerplate.
+
+`writable` and `internal` solve different problems:
+
+```text
+writable controls mutation.
+internal controls API surface.
+```
+
+Valid member declarations:
+
+```php
+class Parser
+{
+    string $name;
+    writable string $buffer;
+    internal string $slug;
+    internal writable int $position = 0;
+
+    function parse(): Ast
+    {
+        return $this->parseProgram();
+    }
+
+    internal function parseProgram(): Ast
+    {
+        return new Ast();
+    }
+
+    internal writable function advance(): void
+    {
+        $this->position = $this->position + 1;
+    }
+}
+```
+
+Internal members are accessible only from methods and constructors of the declaring class. They are not accessible from top-level code, free functions, or other classes. No inheritance or `protected` behavior is part of early Doria.
+
+Property hooks are planned later for validation and computed properties, but they are not part of the current implementation.
+
+## 7. Basic type system
 
 The MVP type names are:
 
@@ -155,25 +199,26 @@ let $name = "Doria"; // string
 let $person = new Person("Andrew"); // Person
 ```
 
-## 7. Class syntax
+## 8. Class syntax
 
 ```php
 class Person
 {
-    public function __construct(
-        public writable string $name,
-        public int $age,
+    function __construct(
+        writable string $name,
+        int $age,
     ) {
     }
 }
 ```
 
-Constructor property promotion is supported in the parser:
+Constructor property promotion is supported in the current vertical slice. Constructor parameters are promoted to externally accessible properties by default unless marked `internal`:
 
 ```php
-public function __construct(
-    public writable string $name,
-    public int $age = 10,
+function __construct(
+    writable string $name,
+    int $age = 10,
+    internal string $cacheKey = "person",
 ) {
 }
 ```
@@ -185,13 +230,13 @@ Doria should support richer instance property initializers than PHP:
 ```php
 class Office
 {
-    public Person $manager = new Person();
+    Person $manager = new Person();
 }
 ```
 
 Instance property initializer expressions run once per object construction. Each object gets its own initialized value. A property initializer counts as initialization for readonly properties.
 
-## 8. Function syntax
+## 9. Function syntax
 
 ```php
 function greet(string $name): void
@@ -209,7 +254,7 @@ function rename(writable Person $person, string $name): void
 }
 ```
 
-## 9. Collection aliases
+## 10. Collection aliases
 
 Doria uses:
 
@@ -223,7 +268,7 @@ Do not use `Vec`.
 
 The PHP backend lowers these aliases to PHP arrays, while the Doria type checker keeps them distinct.
 
-## 10. Attributes and metadata expressions
+## 11. Attributes and metadata expressions
 
 Doria should support attribute syntax using `#[...]`.
 
@@ -263,7 +308,7 @@ The intended direction is:
 
 See `docs/executable-initializers-and-attributes.md` for the detailed design notes.
 
-## 11. PHP interop and migration
+## 12. PHP interop and migration
 
 Doria supports two separate PHP-related directions:
 
@@ -288,7 +333,7 @@ Doria should avoid promising full bidirectional PHP/Doria compatibility.
 
 See `docs/php-interop-and-migration.md` for the detailed design notes.
 
-## 12. HIR, MIR, and backend behavior
+## 13. HIR, MIR, and backend behavior
 
 After semantic analysis, type checking, and readonly/writable checking, the compiler currently lowers the checked AST to HIR. HIR is still close to source structure and is not the final backend IR.
 
@@ -300,12 +345,13 @@ The PHP backend is currently the first implemented backend. It emits `<?php` and
 
 - `let` is removed.
 - `writable` is removed.
+- `internal` is enforced by Doria before backend emission and may lower to PHP `private` or another backend-specific representation.
 - Collection aliases are emitted as `array`.
 - Doria readonly/writable rules are enforced before HIR/MIR lowering and backend emission, not at PHP runtime.
 
 For Doria features that PHP cannot express directly, such as object construction in property initializers or richer attribute expressions, the PHP backend should lower to equivalent generated PHP where practical or produce a clear unsupported-feature diagnostic temporarily. PHP limitations must not define Doria semantics.
 
-## 13. Future features
+## 14. Future features
 
 Future work includes:
 

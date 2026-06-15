@@ -20,6 +20,8 @@ Doria may eventually include a PHP-to-Doria migration converter, but that conver
 - Do not describe Doria as a Rust language. Rust is only the bootstrap implementation language for the current `doriac`.
 - Preserve the backend-independent pipeline: lexer -> parser -> AST -> semantic analysis -> type checker -> readonly/writable checker -> borrow/lifetime analysis later -> HIR -> MIR later -> backend.
 - Do not let PHP backend needs leak into the parser, AST, semantic model, HIR, or MIR design.
+- Do not reintroduce `public`, `protected`, or `private` as Doria member visibility modifiers. Doria class members are externally accessible by default; use `internal` for implementation details.
+- Keep `writable` and `internal` separate: `writable` controls mutation, while `internal` controls API surface.
 - Keep self-hosting in mind when designing compiler APIs, diagnostics, source management, HIR/MIR, and the standard library.
 - Keep native desktop, game engine, C-library binding, and raylib goals visible when designing MIR, runtime, memory representation, FFI, and performance benchmarks.
 - Keep executable initializers and attribute expressions represented as Doria concepts, not PHP workarounds.

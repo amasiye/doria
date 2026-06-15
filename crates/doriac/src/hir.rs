@@ -1,7 +1,7 @@
 use crate::source::Span;
 use crate::types::TypeRef;
 
-pub use crate::ast::{AssignOp, BinaryOp, Visibility};
+pub use crate::ast::{AssignOp, BinaryOp, MemberAccess};
 
 /// High-level IR.
 ///
@@ -36,7 +36,7 @@ pub enum ClassMember {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertyDecl {
-    pub visibility: Visibility,
+    pub access: MemberAccess,
     pub writable: bool,
     pub ty: TypeRef,
     pub name: String,
@@ -46,7 +46,7 @@ pub struct PropertyDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDecl {
-    pub visibility: Option<Visibility>,
+    pub access: MemberAccess,
     pub writable_this: bool,
     pub name: String,
     pub params: Vec<Param>,
@@ -57,7 +57,7 @@ pub struct FunctionDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
-    pub promoted_visibility: Option<Visibility>,
+    pub promoted_access: Option<MemberAccess>,
     pub writable: bool,
     pub ty: TypeRef,
     pub name: String,

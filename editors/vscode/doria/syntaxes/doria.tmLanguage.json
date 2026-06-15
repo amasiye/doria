@@ -292,7 +292,7 @@
         },
         {
           "name": "storage.modifier.visibility.doria",
-          "match": "\\b(?:public|protected|private)\\b"
+          "match": "\\b(?:internal)\\b"
         },
         {
           "name": "keyword.declaration.variable.doria",
@@ -308,7 +308,7 @@
         },
         {
           "name": "keyword.other.reserved.doria",
-          "match": "\\b(?:async|await|spawn|scope|interface|trait|enum|match|try|catch|throw|Result|Option)\\b"
+          "match": "\\b(?:public|protected|private|async|await|spawn|scope|interface|trait|enum|match|try|catch|throw|Result|Option)\\b"
         }
       ]
     },

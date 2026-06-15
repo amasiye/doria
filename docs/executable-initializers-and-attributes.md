@@ -15,15 +15,15 @@ Doria should allow code like this:
 ```doria
 class Person
 {
-    public function __construct(
-        public string $name = "Unknown",
+    function __construct(
+        string $name = "Unknown",
     ) {
     }
 }
 
 class Office
 {
-    public Person $manager = new Person();
+    Person $manager = new Person();
 }
 ```
 
@@ -85,9 +85,9 @@ Doria should allow instance properties to be initialized with non-constant expre
 ```doria
 class Office
 {
-    public Person $manager = new Person();
-    public List<Person> $staff = [];
-    public Dictionary<string, string> $labels = Dictionary::new();
+    Person $manager = new Person();
+    List<Person> $staff = [];
+    Dictionary<string, string> $labels = Dictionary::new();
 }
 ```
 
@@ -123,7 +123,7 @@ A property initializer counts as initialization.
 ```doria
 class Office
 {
-    public Person $manager = new Person();
+    Person $manager = new Person();
 }
 ```
 
@@ -140,7 +140,7 @@ If a property is marked `writable`, the property can be reassigned later:
 ```doria
 class Office
 {
-    public writable Person $manager = new Person();
+    writable Person $manager = new Person();
 }
 
 let writable $office = new Office();
@@ -166,7 +166,7 @@ Possible future syntax:
 ```doria
 class Registry
 {
-    public static Dictionary<string, Handler> $handlers = Dictionary::new();
+    internal static Dictionary<string, Handler> $handlers = Dictionary::new();
 }
 ```
 
@@ -286,7 +286,7 @@ For property initializers like:
 ```doria
 class Office
 {
-    public Person $manager = new Person();
+    Person $manager = new Person();
 }
 ```
 
@@ -388,7 +388,7 @@ Example:
 ```doria
 class Office
 {
-    public Person $manager = "Andrew"; // error: string is not Person
+    Person $manager = "Andrew"; // error: string is not Person
 }
 ```
 

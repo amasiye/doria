@@ -93,7 +93,7 @@ For example, Doria may support:
 ```doria
 class Office
 {
-    public Person $manager = new Person();
+    Person $manager = new Person();
 }
 ```
 

@@ -43,7 +43,7 @@ Doria is a compiled programming language for native applications, command-line t
 - Variables declared only with let or explicit types
 - Everything readonly by default
 - writable keyword for intentional mutation
-- Classes, functions, methods, visibility, constructor promotion
+- Classes, functions, methods, default-public members, internal members, constructor promotion
 - Collection aliases: List<T>, Dictionary<K, V>, Set<T>
 - Future: generics, borrow checker, async/await, native backend
 ```
@@ -129,9 +129,9 @@ $x = 10; // Okay
 ```php
 class Person
 {
-    public string $id;
-    public writable string $name;
-    public writable int $age;
+    string $id;
+    writable string $name;
+    writable int $age;
 }
 ```
 
@@ -173,14 +173,14 @@ function rename(writable Person $person, string $name): void
 ```php
 class Person
 {
-    public writable string $name;
+    writable string $name;
 
-    public function getName(): string
+    function getName(): string
     {
         return $this->name;
     }
 
-    public function rename(string $name): void
+    function rename(string $name): void
     {
         $this->name = $name; // Error
     }
@@ -192,9 +192,9 @@ To mutate `$this`, the method must be marked `writable`:
 ```php
 class Person
 {
-    public writable string $name;
+    writable string $name;
 
-    public writable function rename(string $name): void
+    writable function rename(string $name): void
     {
         $this->name = $name;
     }
@@ -217,7 +217,43 @@ $person->rename("Lucy"); // Okay
 
 ---
 
-## 7. Collection aliases
+## 7. Member access uses default-public plus `internal`
+
+Doria class members are externally accessible by default. There is no need to write `public`.
+
+Use `internal` for implementation details that should not be accessed from outside the declaring class:
+
+```php
+class Person
+{
+    string $name;
+
+    function greet(): void
+    {
+        echo $this->message();
+    }
+
+    internal function message(): string
+    {
+        return "Hello";
+    }
+}
+```
+
+`writable` and `internal` solve different problems:
+
+```text
+writable answers: can this value/member be reassigned or can this method mutate `$this`?
+internal answers: can code outside the declaring class access this member?
+```
+
+Do not use `public`, `protected`, or `private` as Doria member modifiers. Doria does not include `protected` behavior in the early language.
+
+Property hooks are planned later for validation and computed properties, but they are not implemented in this slice.
+
+---
+
+## 8. Collection aliases
 
 Use these names:
 
@@ -329,12 +365,13 @@ It should define:
 3. MVP syntax
 4. Declaration rules
 5. Readonly/writable rules
-6. Basic type system
-7. Class syntax
-8. Function syntax
-9. Collection aliases
-10. HIR, MIR, and backend behavior
-11. Future features
+6. Member access
+7. Basic type system
+8. Class syntax
+9. Function syntax
+10. Collection aliases
+11. HIR, MIR, and backend behavior
+12. Future features
 ```
 
 Important wording:
@@ -355,9 +392,7 @@ Implement a lexer that recognizes:
 Keywords:
 class
 function
-public
-protected
-private
+internal
 static
 let
 writable
@@ -380,6 +415,11 @@ float
 string
 bool
 array
+
+Deprecated/reserved member modifiers:
+public
+protected
+private
 
 Future reserved:
 async
@@ -684,7 +724,7 @@ Okay.
 ```php
 class Person
 {
-    public string $name;
+    string $name;
 }
 
 let writable $person = new Person("Andrew");
@@ -696,7 +736,7 @@ Error because `name` is readonly.
 ```php
 class Person
 {
-    public writable string $name;
+    writable string $name;
 }
 
 let $person = new Person("Andrew");
@@ -708,7 +748,7 @@ Error because `$person` is readonly.
 ```php
 class Person
 {
-    public writable string $name;
+    writable string $name;
 }
 
 let writable $person = new Person("Andrew");
@@ -722,9 +762,9 @@ Okay.
 ```php
 class Person
 {
-    public writable string $name;
+    writable string $name;
 
-    public function rename(string $name): void
+    function rename(string $name): void
     {
         $this->name = $name;
     }
@@ -738,9 +778,9 @@ Correct:
 ```php
 class Person
 {
-    public writable string $name;
+    writable string $name;
 
-    public writable function rename(string $name): void
+    writable function rename(string $name): void
     {
         $this->name = $name;
     }
@@ -790,13 +830,11 @@ Doria class:
 ```php
 class Person
 {
-    public writable string $name;
-    public int $age;
-
-    public function __construct(string $name, int $age)
+    function __construct(
+        writable string $name,
+        int $age,
+    )
     {
-        $this->name = $name;
-        $this->age = $age;
     }
 }
 ```
@@ -808,18 +846,16 @@ PHP output:
 
 class Person
 {
-    public string $name;
-    public int $age;
-
-    public function __construct(string $name, int $age)
+    public function __construct(
+        public string $name,
+        public int $age,
+    )
     {
-        $this->name = $name;
-        $this->age = $age;
     }
 }
 ```
 
-The PHP output does not need to preserve `readonly` or `writable` semantics at runtime for v0.1. The Doria compiler enforces those rules before output.
+The PHP output does not need to preserve `readonly`, `writable`, or `internal` semantics at runtime for v0.1. The Doria compiler enforces those rules before output.
 
 ---
 
@@ -830,35 +866,35 @@ This file should compile and run:
 ```php
 class Person
 {
-    protected Dictionary<string, int> $items = [
+    internal Dictionary<string, int> $items = [
         'apples' => 5,
         'oranges' => 10,
     ];
 
-    public function __construct(
-        public writable string $name,
-        public int $age = 10,
+    function __construct(
+        writable string $name,
+        int $age = 10,
     ) {
     }
 
-    public function greet(): void
+    function greet(): void
     {
         echo $this->getGreetingMessage();
     }
 
-    public function displayInventory(): void
+    function displayInventory(): void
     {
         foreach ($this->items as string $name => int $quantity) {
             echo sprintf("%-20s %d\n", "{$name}:", $quantity);
         }
     }
 
-    public writable function rename(string $name): void
+    writable function rename(string $name): void
     {
         $this->name = $name;
     }
 
-    private function getGreetingMessage(): string
+    internal function getGreetingMessage(): string
     {
         return "Hello, my name is {$this->name} and I am {$this->age} years old!";
     }
@@ -921,7 +957,7 @@ Bad code:
 ```php
 class Person
 {
-    public string $name;
+    string $name;
 }
 
 let writable $person = new Person("Andrew");
@@ -934,7 +970,7 @@ Diagnostic:
 error[E0202]: cannot assign to readonly property `Person::$name`
 
 help: mark the property writable:
-  public writable string $name;
+  writable string $name;
 ```
 
 ---
@@ -1047,7 +1083,7 @@ Copy this into Codex:
 ```text
 You are helping build a new programming language called Doria.
 
-Doria is a compiled programming language for native applications, command-line tools, services, games, and systems software. It has syntax familiar to PHP-like and C-like language users, including `$variables`, classes, functions, visibility modifiers, constructor property promotion, and C-like blocks. However, it is strongly typed, compiled, readonly by default, and uses `writable` for intentional mutation.
+Doria is a compiled programming language for native applications, command-line tools, services, games, and systems software. It has syntax familiar to PHP-like and C-like language users, including `$variables`, classes, functions, default-public members, `internal` implementation details, constructor property promotion, and C-like blocks. However, it is strongly typed, compiled, readonly by default, and uses `writable` for intentional mutation.
 
 Build the first MVP compiler with Rust as the bootstrap implementation language.
 
@@ -1250,9 +1286,9 @@ Support:
 ```php
 class Person
 {
-    public writable string $name;
+    writable string $name;
 
-    public function greet(): void
+    function greet(): void
     {
         echo $this->name;
     }
@@ -1281,7 +1317,7 @@ Catch:
 ```php
 class Person
 {
-    public string $name;
+    string $name;
 }
 
 let writable $person = new Person("Andrew");
@@ -1293,9 +1329,9 @@ Catch:
 ```php
 class Person
 {
-    public writable string $name;
+    writable string $name;
 
-    public function rename(string $name): void
+    function rename(string $name): void
     {
         $this->name = $name;
     }

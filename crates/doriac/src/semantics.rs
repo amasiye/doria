@@ -89,6 +89,7 @@ impl<'program> Checker<'program> {
                             info.methods.insert(
                                 method.name.clone(),
                                 MethodInfo {
+                                    access: method.access.clone(),
                                     writable_this: method.writable_this,
                                 },
                             );
@@ -96,7 +97,7 @@ impl<'program> Checker<'program> {
 
                         if method.name == "__construct" {
                             for param in &method.params {
-                                if param.promoted_visibility.is_some() {
+                                if param.promoted_access.is_some() {
                                     self.declare_promoted_property(
                                         &mut info,
                                         &class_decl.name,
@@ -148,6 +149,7 @@ impl<'program> Checker<'program> {
         info.properties.insert(
             property.name.clone(),
             PropertyInfo {
+                access: property.access.clone(),
                 writable: property.writable,
                 ty: property.ty.clone(),
             },
@@ -170,6 +172,10 @@ impl<'program> Checker<'program> {
         info.properties.insert(
             param.name.clone(),
             PropertyInfo {
+                access: param
+                    .promoted_access
+                    .clone()
+                    .unwrap_or(MemberAccess::External),
                 writable: param.writable,
                 ty: param.ty.clone(),
             },
@@ -395,6 +401,7 @@ impl<'program> Checker<'program> {
                 property,
                 span,
             } => {
+                self.check_expr(object, scopes, method_context);
                 let writable_path = self.is_writable_object_path(object, scopes, method_context);
                 if !writable_path {
                     let message = match object.as_ref() {
@@ -423,7 +430,7 @@ impl<'program> Checker<'program> {
                                 *span,
                             )
                             .with_help(format!(
-                                "mark the property writable: `public writable {} ${property};`",
+                                "mark the property writable: `writable {} ${property};`",
                                 property_info.ty
                             )),
                         );
@@ -465,6 +472,16 @@ impl<'program> Checker<'program> {
             ));
             return;
         };
+
+        if matches!(method_info.access, MemberAccess::Internal)
+            && !self.can_access_internal_member(&class_name, method_context)
+        {
+            self.diagnostics.push(Diagnostic::new(
+                "E0307",
+                format!("method `{class_name}::{method}` is internal"),
+                span,
+            ));
+        }
 
         if method_info.writable_this
             && !self.is_writable_object_path(object, scopes, method_context)
@@ -538,7 +555,28 @@ impl<'program> Checker<'program> {
             return None;
         };
 
-        Some((class_name, property_info.clone()))
+        let property_info = property_info.clone();
+        if matches!(property_info.access, MemberAccess::Internal)
+            && !self.can_access_internal_member(&class_name, method_context)
+        {
+            self.diagnostics.push(Diagnostic::new(
+                "E0306",
+                format!("property `{class_name}::${property}` is internal"),
+                span,
+            ));
+        }
+
+        Some((class_name, property_info))
+    }
+
+    fn can_access_internal_member(
+        &self,
+        declaring_class: &str,
+        method_context: Option<&MethodContext>,
+    ) -> bool {
+        method_context
+            .map(|context| context.class_name == declaring_class)
+            .unwrap_or(false)
     }
 
     fn infer_expr_type(

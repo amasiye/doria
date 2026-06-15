@@ -31,6 +31,7 @@
 - Add parser/AST support for attributes using `#[...]`.
 - Add shared call argument representation for positional and named arguments.
 - Preserve property initializer expressions in AST/HIR and later lower non-constant initializers correctly.
+- Add property hooks later for validation and computed properties without changing the default-public plus `internal` member model.
 - Add language/design support for `writable class` and `readonly class` as mutability ergonomics before considering shorter mutation keywords.
 
 ## Performance and Native Application Path
