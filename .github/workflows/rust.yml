@@ -2,9 +2,9 @@ name: Rust CI
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "develop"]
   pull_request:
-    branches: ["main"]
+    branches: ["main", "develop"]
   workflow_dispatch:
 
 permissions:
@@ -51,7 +51,7 @@ jobs:
         run: cargo test --workspace --all-targets --locked --verbose
 
       - name: Smoke check Doria example
-        run: cargo run -p doriac -- check examples/person.doria
+        run: cargo run --locked -p doriac -- check examples/person.doria
 
       - name: Smoke compile Doria example to PHP
-        run: cargo run -p doriac -- compile examples/person.doria --target php --out build/person.php
+        run: cargo run --locked -p doriac -- compile examples/person.doria --target php --out build/person.php
