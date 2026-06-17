@@ -594,6 +594,7 @@ impl Parser {
             TokenKind::StringType => "string".to_string(),
             TokenKind::BoolType => "bool".to_string(),
             TokenKind::ArrayType => "array".to_string(),
+            TokenKind::Null => "null".to_string(),
             TokenKind::Identifier(name) => name,
             other => {
                 self.error(
@@ -697,6 +698,7 @@ impl Parser {
                 | TokenKind::StringType
                 | TokenKind::BoolType
                 | TokenKind::ArrayType
+                | TokenKind::Null
                 | TokenKind::Identifier(_)
         )
     }

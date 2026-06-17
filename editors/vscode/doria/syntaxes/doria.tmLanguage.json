@@ -342,7 +342,7 @@
         },
         {
           "name": "storage.type.primitive.doria",
-          "match": "\\b(?:void|int|float|string|bool|mixed|array|Unknown)\\b"
+          "match": "\\b(?:void|int|float|string|bool|mixed|object|resource|array)\\b"
         },
         {
           "name": "support.type.collection.doria",

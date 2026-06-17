@@ -579,12 +579,35 @@ string
 bool
 null
 mixed
+object
+resource
 List<T>
 Dictionary<K, V>
 Set<T>
 ClassType
-Unknown
 ```
+
+Keep parsed type syntax separate from resolved semantic types:
+
+```text
+TypeRef      parsed source spelling, such as `List<int>` or `Person`
+TypeId       resolved semantic type identity
+TypeKind     resolved semantic type shape
+```
+
+The semantic model also has an internal `Unknown` recovery type for diagnostics and error recovery; it is not the normal spelling for user-authored type declarations.
+
+Lowercase primitive names are type-position names: `int`, `float`, `string`, `bool`, `object`, and `resource`. PascalCase names such as `Int`, `Float`, `String`, `Bool`, `Object`, and `Resource` are future expression-level companion/helper APIs, not primitive type spellings. Primitive type names are not namespaces, so do not model `int::parse(...)` as valid Doria.
+
+Validate collection alias arity while resolving `TypeRef` into semantic types:
+
+```text
+List<T>
+Dictionary<K, V>
+Set<T>
+```
+
+Assignment compatibility, return type checking, and constructor argument checking should come after this foundation.
 
 Support nullable types later:
 

@@ -463,3 +463,167 @@ class Parser
 
     assert!(err.iter().any(|diagnostic| diagnostic.code == "E0202"));
 }
+
+#[test]
+fn resolves_lowercase_primitive_types() {
+    doriac::check_source(
+        "test.doria",
+        r#"
+function accept(
+    int $id,
+    float $ratio,
+    string $name,
+    bool $active,
+    mixed $payload,
+    object $instance,
+    resource $handle,
+    null $empty,
+): void
+{
+}
+"#,
+    )
+    .expect("semantic check should succeed");
+}
+
+#[test]
+fn resolves_null_typed_declarations() {
+    doriac::check_source(
+        "test.doria",
+        r#"
+null $empty = null;
+
+function clear(): void
+{
+    null $value = null;
+}
+"#,
+    )
+    .expect("semantic check should succeed");
+}
+
+#[test]
+fn resolves_declared_class_types() {
+    doriac::check_source(
+        "test.doria",
+        r#"
+class Person {}
+
+function greet(Person $person): void
+{
+}
+"#,
+    )
+    .expect("semantic check should succeed");
+}
+
+#[test]
+fn reports_unknown_explicit_type_names() {
+    let err = doriac::check_source(
+        "test.doria",
+        r#"
+UnknownThing $value = 1;
+"#,
+    )
+    .expect_err("semantic check should fail");
+
+    assert!(err.iter().any(|diagnostic| {
+        diagnostic.code == "E0401" && diagnostic.message.contains("UnknownThing")
+    }));
+}
+
+#[test]
+fn resolves_collection_alias_types() {
+    doriac::check_source(
+        "test.doria",
+        r#"
+function accept(
+    List<int> $ids,
+    Dictionary<string, int> $counts,
+    Set<string> $names,
+    List<Dictionary<string, int>> $nested,
+): void
+{
+}
+"#,
+    )
+    .expect("semantic check should succeed");
+}
+
+#[test]
+fn resolves_types_across_declaration_sites() {
+    doriac::check_source(
+        "test.doria",
+        r#"
+class Person {}
+
+class Office
+{
+    Person $manager;
+
+    function __construct(Person $owner)
+    {
+    }
+
+    function index(List<Person> $people): Dictionary<string, Person>
+    {
+        foreach ($people as Person $person) {
+            echo $person;
+        }
+
+        return [];
+    }
+}
+"#,
+    )
+    .expect("semantic check should succeed");
+}
+
+#[test]
+fn rejects_invalid_collection_type_argument_counts() {
+    for source in [
+        "function accept(List<int, string> $value): void {}",
+        "function accept(Dictionary<string> $value): void {}",
+        "function accept(Dictionary<string, int, bool> $value): void {}",
+        "function accept(Set<string, int> $value): void {}",
+    ] {
+        let err =
+            doriac::check_source("test.doria", source).expect_err("semantic check should fail");
+
+        assert!(err.iter().any(|diagnostic| diagnostic.code == "E0402"));
+    }
+}
+
+#[test]
+fn rejects_empty_collection_type_argument_list_as_parse_error() {
+    doriac::parse_source("test.doria", "function accept(List<> $value): void {}")
+        .expect_err("empty collection type arguments should not parse");
+}
+
+#[test]
+fn pascal_case_primitive_companion_names_are_not_primitive_types() {
+    let err = doriac::check_source(
+        "test.doria",
+        r#"
+Int $value = 1;
+"#,
+    )
+    .expect_err("semantic check should fail");
+
+    assert!(err
+        .iter()
+        .any(|diagnostic| diagnostic.code == "E0401" && diagnostic.message.contains("Int")));
+}
+
+#[test]
+fn pascal_case_type_names_resolve_when_declared_as_classes() {
+    doriac::check_source(
+        "test.doria",
+        r#"
+class Int {}
+
+Int $value = new Int();
+"#,
+    )
+    .expect("semantic check should succeed");
+}

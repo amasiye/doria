@@ -336,11 +336,12 @@ fn completion_items() -> Value {
         "string",
         "bool",
         "mixed",
+        "object",
+        "resource",
         "array",
         "List",
         "Dictionary",
         "Set",
-        "Unknown",
     ];
 
     let mut items = Vec::new();
@@ -414,7 +415,8 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "Dictionary" => Some("Key-value collection alias: `Dictionary<K, V>`."),
             "Set" => Some("Unique-value collection alias: `Set<T>`."),
             "mixed" => Some("Dynamic escape-hatch type."),
-            "Unknown" => Some("Internal unknown type used by the current checker."),
+            "object" => Some("Primitive object type."),
+            "resource" => Some("Primitive resource type."),
             _ => None,
         },
         TokenKind::Variable(_) => Some("Doria variable. Variables must be declared before use."),
