@@ -1158,11 +1158,10 @@ impl<'program> Checker<'program> {
             BinaryOp::Equal
             | BinaryOp::StrictEqual
             | BinaryOp::NotEqual
-            | BinaryOp::NotStrictEqual
-            | BinaryOp::Less
-            | BinaryOp::LessEqual
-            | BinaryOp::Greater
-            | BinaryOp::GreaterEqual => self.types.intern(TypeKind::Bool),
+            | BinaryOp::NotStrictEqual => self.types.intern(TypeKind::Bool),
+            BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual => {
+                self.infer_relational_binary_type(left_ty, right_ty)
+            }
             BinaryOp::And | BinaryOp::Or => self.infer_logical_binary_type(left_ty, right_ty),
             BinaryOp::Coalesce => self.infer_coalesce_binary_type(left_ty, right_ty),
         }
@@ -1204,6 +1203,21 @@ impl<'program> Checker<'program> {
         let right_kind = self.types.kind(right).clone();
         match (left_kind, right_kind) {
             (TypeKind::Bool, TypeKind::Bool) => self.types.intern(TypeKind::Bool),
+            _ => self.types.intern(TypeKind::Heterogeneous),
+        }
+    }
+
+    fn infer_relational_binary_type(&mut self, left: TypeId, right: TypeId) -> TypeId {
+        if let Some(recovery) = self.recovery_binary_type(left, right) {
+            return recovery;
+        }
+
+        let left_kind = self.types.kind(left).clone();
+        let right_kind = self.types.kind(right).clone();
+        match (left_kind, right_kind) {
+            (TypeKind::Int, TypeKind::Int)
+            | (TypeKind::Float, TypeKind::Float)
+            | (TypeKind::String, TypeKind::String) => self.types.intern(TypeKind::Bool),
             _ => self.types.intern(TypeKind::Heterogeneous),
         }
     }

@@ -129,6 +129,8 @@ int $sum = 1 + 2;
 float $total = 1.5 + 2.5;
 string $message = "hello" . " world";
 bool $less = 1 < 2;
+bool $floatLess = 1.5 <= 2.5;
+bool $stringLess = "a" < "b";
 bool $same = "a" == "b";
 bool $logic = true && false;
 string $name = null ?? "Andrew";
@@ -139,6 +141,9 @@ string $name = null ?? "Andrew";
     for source in [
         r#"string $value = 1 + 2;"#,
         r#"int $value = "x" . "y";"#,
+        r#"bool $value = 1 < "2";"#,
+        r#"bool $value = "2" >= 1;"#,
+        r#"bool $value = true <= false;"#,
         r#"bool $value = 1 && 2;"#,
         r#"bool $value = "x" || "y";"#,
         r#"
