@@ -379,13 +379,24 @@ impl<'program> Checker<'program> {
                 {
                     match assignment.op {
                         AssignOp::Assign => {
-                            self.check_expr_assignable(
+                            let target_ty = target.ty;
+                            let assignment_ok = self.check_expr_assignable(
                                 target.ty,
                                 &assignment.value,
                                 scopes,
                                 method_context,
                                 target.destination,
                             );
+                            if assignment_ok {
+                                let value_ty =
+                                    self.infer_expr_type(&assignment.value, scopes, method_context);
+                                self.narrow_empty_collection_assignment(
+                                    &assignment.target,
+                                    target_ty,
+                                    value_ty,
+                                    scopes,
+                                );
+                            }
                         }
                         AssignOp::AddAssign | AssignOp::SubAssign => {
                             let value_ty =
@@ -936,15 +947,42 @@ impl<'program> Checker<'program> {
         scopes: &ScopeStack,
         method_context: Option<&MethodContext>,
         destination: AssignmentDestination,
-    ) {
+    ) -> bool {
         let value = self.infer_expr_type(value_expr, scopes, method_context);
         if self.is_expr_assignable(target, value_expr, scopes, method_context)
             || self.is_assignable(target, value)
         {
-            return;
+            return true;
         }
 
         self.check_assignable(target, value, value_expr.span(), destination);
+        false
+    }
+
+    fn narrow_empty_collection_assignment(
+        &self,
+        target: &Expr,
+        target_ty: TypeId,
+        value_ty: TypeId,
+        scopes: &mut ScopeStack,
+    ) {
+        if !matches!(self.types.kind(target_ty), TypeKind::EmptyCollection)
+            || !self.is_non_empty_collection_like_type(value_ty)
+        {
+            return;
+        }
+
+        let Expr::Variable { name, .. } = target else {
+            return;
+        };
+
+        let Some(binding) = scopes.lookup_mut(name) else {
+            return;
+        };
+
+        if matches!(self.types.kind(binding.ty), TypeKind::EmptyCollection) {
+            binding.ty = value_ty;
+        }
     }
 
     fn is_expr_assignable(
@@ -1335,6 +1373,13 @@ impl<'program> Checker<'program> {
                 | TypeKind::Dictionary(_, _)
                 | TypeKind::Set(_)
                 | TypeKind::EmptyCollection
+        )
+    }
+
+    fn is_non_empty_collection_like_type(&self, ty: TypeId) -> bool {
+        matches!(
+            self.types.kind(ty),
+            TypeKind::Array | TypeKind::List(_) | TypeKind::Dictionary(_, _) | TypeKind::Set(_)
         )
     }
 

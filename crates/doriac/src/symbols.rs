@@ -64,4 +64,11 @@ impl ScopeStack {
     pub fn lookup(&self, name: &str) -> Option<&Binding> {
         self.scopes.iter().rev().find_map(|scope| scope.get(name))
     }
+
+    pub fn lookup_mut(&mut self, name: &str) -> Option<&mut Binding> {
+        self.scopes
+            .iter_mut()
+            .rev()
+            .find_map(|scope| scope.get_mut(name))
+    }
 }

@@ -89,7 +89,11 @@ $total += 2.5;
 
 let writable $items = [];
 $items = [1];
-$items = ["apples" => 5];
+List<int> $numbers = $items;
+
+let writable $counts = [];
+$counts = ["apples" => 5];
+Dictionary<string, int> $inventory = $counts;
 "#,
     )
     .expect("semantic check should succeed");
@@ -114,6 +118,16 @@ $count += "two";
         r#"
 let writable $items = [];
 $items = 1;
+"#,
+        r#"
+let writable $items = [];
+$items = ["oops"];
+List<int> $numbers = $items;
+"#,
+        r#"
+let writable $items = [];
+$items = [1];
+$items = ["apples" => 5];
 "#,
     ] {
         assert_type_mismatch(source);
