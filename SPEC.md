@@ -423,6 +423,7 @@ The PHP backend is currently the first implemented backend. It emits `<?php` and
 - `writable` is removed.
 - `internal` is enforced by Doria before backend emission and may lower to PHP `private` or another backend-specific representation.
 - Collection aliases are emitted as `array`.
+- `resource` is emitted as `mixed` because PHP cannot declare `resource` type hints.
 - Doria readonly/writable rules are enforced before Doria IR lowering and backend emission, not at PHP runtime.
 
 For Doria features that PHP cannot express directly, such as object construction in property initializers or richer attribute expressions, the PHP backend should lower to equivalent generated PHP where practical or produce a clear unsupported-feature diagnostic temporarily. PHP limitations must not define Doria semantics.
