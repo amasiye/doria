@@ -112,6 +112,8 @@ string $name = null ?? "Andrew";
     for source in [
         r#"string $value = 1 + 2;"#,
         r#"int $value = "x" . "y";"#,
+        r#"bool $value = 1 && 2;"#,
+        r#"bool $value = "x" || "y";"#,
         r#"
 writable int $value = 0;
 $value = "x" . "y";

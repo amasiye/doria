@@ -1141,9 +1141,8 @@ impl<'program> Checker<'program> {
             | BinaryOp::Less
             | BinaryOp::LessEqual
             | BinaryOp::Greater
-            | BinaryOp::GreaterEqual
-            | BinaryOp::And
-            | BinaryOp::Or => self.types.intern(TypeKind::Bool),
+            | BinaryOp::GreaterEqual => self.types.intern(TypeKind::Bool),
+            BinaryOp::And | BinaryOp::Or => self.infer_logical_binary_type(left_ty, right_ty),
             BinaryOp::Coalesce => self.infer_coalesce_binary_type(left_ty, right_ty),
         }
     }
@@ -1171,6 +1170,19 @@ impl<'program> Checker<'program> {
         let right_kind = self.types.kind(right).clone();
         match (left_kind, right_kind) {
             (TypeKind::String, TypeKind::String) => self.types.intern(TypeKind::String),
+            _ => self.types.intern(TypeKind::Heterogeneous),
+        }
+    }
+
+    fn infer_logical_binary_type(&mut self, left: TypeId, right: TypeId) -> TypeId {
+        if let Some(recovery) = self.recovery_binary_type(left, right) {
+            return recovery;
+        }
+
+        let left_kind = self.types.kind(left).clone();
+        let right_kind = self.types.kind(right).clone();
+        match (left_kind, right_kind) {
+            (TypeKind::Bool, TypeKind::Bool) => self.types.intern(TypeKind::Bool),
             _ => self.types.intern(TypeKind::Heterogeneous),
         }
     }
