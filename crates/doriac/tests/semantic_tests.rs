@@ -129,6 +129,93 @@ class Person
 }
 
 #[test]
+fn infers_call_return_types_for_assignment_compatibility() {
+    doriac::check_source(
+        "test.doria",
+        r#"
+function age(): int
+{
+    return 37;
+}
+
+class Person
+{
+    function age(): int
+    {
+        return 37;
+    }
+}
+
+int $fromFunction = age();
+let $person = new Person();
+int $fromMethod = $person->age();
+int $fromStatic = Person::age();
+"#,
+    )
+    .expect("semantic check should succeed");
+
+    for source in [
+        r#"
+function age(): int
+{
+    return 37;
+}
+
+string $name = age();
+"#,
+        r#"
+class Person
+{
+    function age(): int
+    {
+        return 37;
+    }
+}
+
+let $person = new Person();
+string $name = $person->age();
+"#,
+        r#"
+class Person
+{
+    function age(): int
+    {
+        return 37;
+    }
+}
+
+string $name = Person::age();
+"#,
+        r#"
+class Person
+{
+    string $name = Person::age();
+
+    function age(): int
+    {
+        return 37;
+    }
+}
+"#,
+        r#"
+class Person
+{
+    function age(): int
+    {
+        return 37;
+    }
+}
+
+function greet(string $name = Person::age()): void
+{
+}
+"#,
+    ] {
+        assert_type_mismatch(source);
+    }
+}
+
+#[test]
 fn rejects_readonly_property_assignment() {
     let err = doriac::check_source(
         "test.doria",

@@ -26,6 +26,7 @@ pub struct PropertyInfo {
 pub struct MethodInfo {
     pub access: MemberAccess,
     pub writable_this: bool,
+    pub return_ty: TypeId,
 }
 
 #[derive(Debug, Default)]

@@ -19,6 +19,7 @@ pub fn check_program(program: &Program) -> DiagnosticResult<()> {
 struct Checker<'program> {
     program: &'program Program,
     classes: HashMap<String, ClassInfo>,
+    functions: HashMap<String, TypeId>,
     types: TypeRegistry,
     diagnostics: Vec<Diagnostic>,
 }
@@ -48,6 +49,7 @@ impl<'program> Checker<'program> {
         Self {
             program,
             classes: HashMap::new(),
+            functions: HashMap::new(),
             types: TypeRegistry::new(),
             diagnostics: Vec::new(),
         }
@@ -55,6 +57,7 @@ impl<'program> Checker<'program> {
 
     fn check(&mut self) {
         self.collect_classes();
+        self.collect_functions();
 
         let mut scopes = ScopeStack::new();
         for item in &self.program.items {
@@ -115,11 +118,13 @@ impl<'program> Checker<'program> {
                                 method.span,
                             ));
                         } else {
+                            let return_ty = self.resolve_function_return_type(method);
                             info.methods.insert(
                                 method.name.clone(),
                                 MethodInfo {
                                     access: method.access.clone(),
                                     writable_this: method.writable_this,
+                                    return_ty,
                                 },
                             );
                         }
@@ -141,6 +146,25 @@ impl<'program> Checker<'program> {
 
             self.classes.insert(class_decl.name.clone(), info);
         }
+    }
+
+    fn collect_functions(&mut self) {
+        for item in &self.program.items {
+            let Item::Function(function) = item else {
+                continue;
+            };
+
+            let return_ty = self.resolve_function_return_type(function);
+            self.functions.insert(function.name.clone(), return_ty);
+        }
+    }
+
+    fn resolve_function_return_type(&mut self, function: &FunctionDecl) -> TypeId {
+        function
+            .return_type
+            .as_ref()
+            .map(|return_type| self.resolve_type_ref(return_type, function.span))
+            .unwrap_or_else(|| self.types.unknown())
     }
 
     fn check_class(&mut self, class_decl: &ClassDecl) {
@@ -267,9 +291,6 @@ impl<'program> Checker<'program> {
 
     fn check_function(&mut self, function: &FunctionDecl, method_context: Option<MethodContext>) {
         let mut scopes = ScopeStack::new();
-        if let Some(return_type) = &function.return_type {
-            self.resolve_type_ref(return_type, function.span);
-        }
         for param in &function.params {
             let ty = self.resolve_type_ref(&param.ty, param.span);
             if let Some(default) = &param.default {
@@ -1057,6 +1078,29 @@ impl<'program> Checker<'program> {
                     .map(|property| property.ty)
                     .unwrap_or_else(|| self.types.unknown())
             }
+            Expr::MethodCall { object, method, .. } => {
+                let Some(class_name) = self.expr_class_name(object, scopes, method_context) else {
+                    return self.types.unknown();
+                };
+                self.classes
+                    .get(&class_name)
+                    .and_then(|class_info| class_info.methods.get(method))
+                    .map(|method| method.return_ty)
+                    .unwrap_or_else(|| self.types.unknown())
+            }
+            Expr::FunctionCall { name, .. } => self
+                .functions
+                .get(name)
+                .copied()
+                .unwrap_or_else(|| self.types.unknown()),
+            Expr::StaticCall {
+                class_name, method, ..
+            } => self
+                .classes
+                .get(class_name)
+                .and_then(|class_info| class_info.methods.get(method))
+                .map(|method| method.return_ty)
+                .unwrap_or_else(|| self.types.unknown()),
             Expr::Binary {
                 left, op, right, ..
             } => self.infer_binary_type(left, op, right, scopes, method_context),
