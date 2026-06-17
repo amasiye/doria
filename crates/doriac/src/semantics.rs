@@ -4,7 +4,7 @@ use crate::ast::*;
 use crate::diagnostics::{Diagnostic, DiagnosticResult};
 use crate::source::Span;
 use crate::symbols::{Binding, ClassInfo, MethodInfo, PropertyInfo, ScopeStack};
-use crate::types::TypeRef;
+use crate::types::{TypeId, TypeKind, TypeRef, TypeRegistry};
 
 pub fn check_program(program: &Program) -> DiagnosticResult<()> {
     let mut checker = Checker::new(program);
@@ -19,6 +19,7 @@ pub fn check_program(program: &Program) -> DiagnosticResult<()> {
 struct Checker<'program> {
     program: &'program Program,
     classes: HashMap<String, ClassInfo>,
+    types: TypeRegistry,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -33,6 +34,7 @@ impl<'program> Checker<'program> {
         Self {
             program,
             classes: HashMap::new(),
+            types: TypeRegistry::new(),
             diagnostics: Vec::new(),
         }
     }
@@ -51,6 +53,8 @@ impl<'program> Checker<'program> {
     }
 
     fn collect_classes(&mut self) {
+        let mut declared_classes = Vec::new();
+
         for item in &self.program.items {
             let Item::Class(class_decl) = item else {
                 continue;
@@ -65,6 +69,17 @@ impl<'program> Checker<'program> {
                 continue;
             }
 
+            self.classes.insert(
+                class_decl.name.clone(),
+                ClassInfo {
+                    properties: HashMap::new(),
+                    methods: HashMap::new(),
+                },
+            );
+            declared_classes.push(class_decl);
+        }
+
+        for class_decl in declared_classes {
             let mut info = ClassInfo {
                 properties: HashMap::new(),
                 methods: HashMap::new(),
@@ -146,12 +161,13 @@ impl<'program> Checker<'program> {
             return;
         }
 
+        let ty = self.resolve_type_ref(&property.ty, property.span);
         info.properties.insert(
             property.name.clone(),
             PropertyInfo {
                 access: property.access.clone(),
                 writable: property.writable,
-                ty: property.ty.clone(),
+                ty,
             },
         );
     }
@@ -169,6 +185,7 @@ impl<'program> Checker<'program> {
             return;
         }
 
+        let ty = self.resolve_type_ref(&param.ty, param.span);
         info.properties.insert(
             param.name.clone(),
             PropertyInfo {
@@ -177,7 +194,7 @@ impl<'program> Checker<'program> {
                     .clone()
                     .unwrap_or(MemberAccess::External),
                 writable: param.writable,
-                ty: param.ty.clone(),
+                ty,
             },
         );
     }
@@ -200,13 +217,17 @@ impl<'program> Checker<'program> {
 
     fn check_function(&mut self, function: &FunctionDecl, method_context: Option<MethodContext>) {
         let mut scopes = ScopeStack::new();
+        if let Some(return_type) = &function.return_type {
+            self.resolve_type_ref(return_type, function.span);
+        }
         for param in &function.params {
+            let ty = self.resolve_type_ref(&param.ty, param.span);
             self.declare_binding(
                 &mut scopes,
                 param.name.clone(),
                 Binding {
                     writable: param.writable,
-                    ty: param.ty.clone(),
+                    ty,
                 },
                 param.span,
             );
@@ -236,9 +257,10 @@ impl<'program> Checker<'program> {
         match statement {
             Stmt::VarDecl(decl) => {
                 self.check_expr(&decl.initializer, scopes, method_context);
-                let ty = decl.ty.clone().unwrap_or_else(|| {
-                    self.infer_expr_type(&decl.initializer, scopes, method_context)
-                });
+                let ty = match &decl.ty {
+                    Some(ty) => self.resolve_type_ref(ty, decl.span),
+                    None => self.infer_expr_type(&decl.initializer, scopes, method_context),
+                };
                 self.declare_binding(
                     scopes,
                     decl.name.clone(),
@@ -265,22 +287,33 @@ impl<'program> Checker<'program> {
                 self.check_expr(&foreach.iterable, scopes, method_context);
                 scopes.push();
                 if let Some(key) = &foreach.key {
+                    let ty = key
+                        .ty
+                        .as_ref()
+                        .map(|ty| self.resolve_type_ref(ty, foreach.span))
+                        .unwrap_or_else(|| self.types.unknown());
                     self.declare_binding(
                         scopes,
                         key.name.clone(),
                         Binding {
                             writable: false,
-                            ty: key.ty.clone().unwrap_or_else(TypeRef::unknown),
+                            ty,
                         },
                         foreach.span,
                     );
                 }
+                let value_ty = foreach
+                    .value
+                    .ty
+                    .as_ref()
+                    .map(|ty| self.resolve_type_ref(ty, foreach.span))
+                    .unwrap_or_else(|| self.types.unknown());
                 self.declare_binding(
                     scopes,
                     foreach.value.name.clone(),
                     Binding {
                         writable: false,
-                        ty: foreach.value.ty.clone().unwrap_or_else(TypeRef::unknown),
+                        ty: value_ty,
                     },
                     foreach.span,
                 );
@@ -442,7 +475,7 @@ impl<'program> Checker<'program> {
                             )
                             .with_help(format!(
                                 "mark the property writable: `writable {} ${property};`",
-                                property_info.ty
+                                self.types.display(property_info.ty)
                             )),
                         );
                     }
@@ -543,7 +576,7 @@ impl<'program> Checker<'program> {
     }
 
     fn is_writable_object_path(
-        &self,
+        &mut self,
         expr: &Expr,
         scopes: &ScopeStack,
         method_context: Option<&MethodContext>,
@@ -625,58 +658,157 @@ impl<'program> Checker<'program> {
             .unwrap_or(false)
     }
 
+    fn resolve_type_ref(&mut self, ty: &TypeRef, span: Span) -> TypeId {
+        match ty.name.as_str() {
+            "void" => self.resolve_zero_arg_type(ty, span, TypeKind::Void),
+            "int" => self.resolve_zero_arg_type(ty, span, TypeKind::Int),
+            "float" => self.resolve_zero_arg_type(ty, span, TypeKind::Float),
+            "string" => self.resolve_zero_arg_type(ty, span, TypeKind::String),
+            "bool" => self.resolve_zero_arg_type(ty, span, TypeKind::Bool),
+            "null" => self.resolve_zero_arg_type(ty, span, TypeKind::Null),
+            "mixed" => self.resolve_zero_arg_type(ty, span, TypeKind::Mixed),
+            "object" => self.resolve_zero_arg_type(ty, span, TypeKind::Object),
+            "resource" => self.resolve_zero_arg_type(ty, span, TypeKind::Resource),
+            "array" => self.resolve_zero_arg_type(ty, span, TypeKind::Array),
+            "List" => {
+                if !self.expect_type_arg_count(ty, 1, span) {
+                    for arg in &ty.args {
+                        self.resolve_type_ref(arg, span);
+                    }
+                    return self.types.unknown();
+                }
+                let element = self.resolve_type_ref(&ty.args[0], span);
+                self.types.intern(TypeKind::List(element))
+            }
+            "Dictionary" => {
+                if !self.expect_type_arg_count(ty, 2, span) {
+                    for arg in &ty.args {
+                        self.resolve_type_ref(arg, span);
+                    }
+                    return self.types.unknown();
+                }
+                let key = self.resolve_type_ref(&ty.args[0], span);
+                let value = self.resolve_type_ref(&ty.args[1], span);
+                self.types.intern(TypeKind::Dictionary(key, value))
+            }
+            "Set" => {
+                if !self.expect_type_arg_count(ty, 1, span) {
+                    for arg in &ty.args {
+                        self.resolve_type_ref(arg, span);
+                    }
+                    return self.types.unknown();
+                }
+                let element = self.resolve_type_ref(&ty.args[0], span);
+                self.types.intern(TypeKind::Set(element))
+            }
+            name if self.classes.contains_key(name) => {
+                if !self.expect_type_arg_count(ty, 0, span) {
+                    for arg in &ty.args {
+                        self.resolve_type_ref(arg, span);
+                    }
+                }
+                self.types.intern(TypeKind::Class(name.to_string()))
+            }
+            name => {
+                for arg in &ty.args {
+                    self.resolve_type_ref(arg, span);
+                }
+                self.diagnostics.push(Diagnostic::new(
+                    "E0401",
+                    format!("unknown type `{name}`"),
+                    span,
+                ));
+                self.types.unknown()
+            }
+        }
+    }
+
+    fn resolve_zero_arg_type(&mut self, ty: &TypeRef, span: Span, kind: TypeKind) -> TypeId {
+        self.expect_type_arg_count(ty, 0, span);
+        for arg in &ty.args {
+            self.resolve_type_ref(arg, span);
+        }
+        self.types.intern(kind)
+    }
+
+    fn expect_type_arg_count(&mut self, ty: &TypeRef, expected: usize, span: Span) -> bool {
+        let found = ty.args.len();
+        if found == expected {
+            return true;
+        }
+
+        self.diagnostics.push(Diagnostic::new(
+            "E0402",
+            format!(
+                "type `{}` expects {} type argument{}, found {}",
+                ty.name,
+                expected,
+                if expected == 1 { "" } else { "s" },
+                found
+            ),
+            span,
+        ));
+        false
+    }
+
     fn infer_expr_type(
-        &self,
+        &mut self,
         expr: &Expr,
         scopes: &ScopeStack,
         method_context: Option<&MethodContext>,
-    ) -> TypeRef {
+    ) -> TypeId {
         match expr {
-            Expr::String { .. } => TypeRef::named("string"),
-            Expr::Int { .. } => TypeRef::named("int"),
-            Expr::Float { .. } => TypeRef::named("float"),
-            Expr::Bool { .. } => TypeRef::named("bool"),
-            Expr::Null { .. } => TypeRef::named("null"),
-            Expr::New { class_name, .. } => TypeRef::named(class_name.clone()),
+            Expr::String { .. } => self.types.intern(TypeKind::String),
+            Expr::Int { .. } => self.types.intern(TypeKind::Int),
+            Expr::Float { .. } => self.types.intern(TypeKind::Float),
+            Expr::Bool { .. } => self.types.intern(TypeKind::Bool),
+            Expr::Null { .. } => self.types.intern(TypeKind::Null),
+            Expr::New { class_name, .. } => self.types.intern(TypeKind::Class(class_name.clone())),
             Expr::Array { elements, .. } => {
                 if elements.iter().any(|element| element.key.is_some()) {
-                    TypeRef::generic("Dictionary", vec![TypeRef::unknown(), TypeRef::unknown()])
+                    let unknown_key = self.types.unknown();
+                    let unknown_value = self.types.unknown();
+                    self.types
+                        .intern(TypeKind::Dictionary(unknown_key, unknown_value))
                 } else {
-                    TypeRef::generic("List", vec![TypeRef::unknown()])
+                    let unknown = self.types.unknown();
+                    self.types.intern(TypeKind::List(unknown))
                 }
             }
             Expr::Variable { name, .. } => scopes
                 .lookup(name)
-                .map(|binding| binding.ty.clone())
-                .unwrap_or_else(TypeRef::unknown),
+                .map(|binding| binding.ty)
+                .unwrap_or_else(|| self.types.unknown()),
             Expr::This { .. } => method_context
-                .map(|context| TypeRef::named(context.class_name.clone()))
-                .unwrap_or_else(TypeRef::unknown),
+                .map(|context| {
+                    self.types
+                        .intern(TypeKind::Class(context.class_name.clone()))
+                })
+                .unwrap_or_else(|| self.types.unknown()),
             Expr::PropertyAccess {
                 object, property, ..
             } => {
                 let Some(class_name) = self.expr_class_name(object, scopes, method_context) else {
-                    return TypeRef::unknown();
+                    return self.types.unknown();
                 };
                 self.classes
                     .get(&class_name)
                     .and_then(|class_info| class_info.properties.get(property))
-                    .map(|property| property.ty.clone())
-                    .unwrap_or_else(TypeRef::unknown)
+                    .map(|property| property.ty)
+                    .unwrap_or_else(|| self.types.unknown())
             }
-            _ => TypeRef::unknown(),
+            _ => self.types.unknown(),
         }
     }
 
     fn expr_class_name(
-        &self,
+        &mut self,
         expr: &Expr,
         scopes: &ScopeStack,
         method_context: Option<&MethodContext>,
     ) -> Option<String> {
-        self.infer_expr_type(expr, scopes, method_context)
-            .as_class_name()
-            .map(ToOwned::to_owned)
+        let ty = self.infer_expr_type(expr, scopes, method_context);
+        self.types.class_name(ty).map(ToOwned::to_owned)
     }
 
     fn undeclared_variable(&mut self, name: &str, span: Span) {

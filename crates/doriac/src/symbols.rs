@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
 use crate::ast::MemberAccess;
-use crate::types::TypeRef;
+use crate::types::TypeId;
 
 #[derive(Debug, Clone)]
 pub struct Binding {
     pub writable: bool,
-    pub ty: TypeRef,
+    pub ty: TypeId,
 }
 
 #[derive(Debug, Clone)]
@@ -19,7 +19,7 @@ pub struct ClassInfo {
 pub struct PropertyInfo {
     pub access: MemberAccess,
     pub writable: bool,
-    pub ty: TypeRef,
+    pub ty: TypeId,
 }
 
 #[derive(Debug, Clone)]

@@ -237,11 +237,32 @@ string
 bool
 null
 mixed
+object
+resource
 List<T>
 Dictionary<K, V>
 Set<T>
 ClassType
-Unknown
+```
+
+The compiler keeps parsed type syntax and semantic types separate:
+
+```text
+TypeRef      parsed source spelling, such as `List<int>` or `Person`
+TypeId       resolved semantic type identity
+TypeKind     resolved semantic type shape
+```
+
+The semantic model also has an internal `Unknown` recovery type for diagnostics and error recovery; it is not the normal spelling for user-authored type declarations.
+
+Lowercase primitive names are type-position names: `int`, `float`, `string`, `bool`, `object`, and `resource`. PascalCase names such as `Int`, `Float`, `String`, `Bool`, `Object`, and `Resource` are reserved for future expression-level standard-library/helper APIs. They are not primitive type spellings, and primitive type names are not namespaces. Future code should prefer APIs such as `Int::parse(...)`, but companion semantics are not part of the current implementation.
+
+Collection aliases have fixed arity:
+
+```text
+List<T>
+Dictionary<K, V>
+Set<T>
 ```
 
 `let` declarations infer simple literal and constructor types:
@@ -320,6 +341,8 @@ Set<string>
 Do not use `Vec`.
 
 The PHP backend lowers these aliases to PHP arrays, while the Doria type checker keeps them distinct.
+
+The current type foundation resolves explicit annotations and reports unknown type names and invalid collection alias arity. Assignment compatibility, return type checking, and constructor argument checking come later.
 
 ## 11. Attributes and metadata expressions
 
