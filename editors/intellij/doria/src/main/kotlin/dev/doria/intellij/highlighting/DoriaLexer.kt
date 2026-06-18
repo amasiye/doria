@@ -70,7 +70,7 @@ class DoriaLexer : LexerBase() {
             current == '/' && peek(1) == '*' -> scanBlockComment()
             current == '"' && doubleQuoteStartsInterpolatedString -> {
                 mode = MODE_DOUBLE_STRING
-                scanDoubleStringToken()
+                scanDoubleStringToken(contentStart = tokenStart + 1)
             }
             current == '"' -> scanString(current)
             current == '\'' -> scanString(current)
@@ -205,15 +205,8 @@ class DoriaLexer : LexerBase() {
         tokenType = DoriaTokenTypes.STRING
     }
 
-    private fun scanDoubleStringToken() {
-        if (buffer[tokenStart] == '{' && peek(1) == '$') {
-            tokenEnd = tokenStart + 1
-            tokenType = DoriaTokenTypes.STRING
-            mode = MODE_INTERPOLATION
-            return
-        }
-
-        tokenEnd = tokenStart
+    private fun scanDoubleStringToken(contentStart: Int = tokenStart) {
+        tokenEnd = contentStart
         var escaped = false
         while (tokenEnd < endOffset) {
             val char = buffer[tokenEnd]
@@ -228,7 +221,7 @@ class DoriaLexer : LexerBase() {
                 continue
             }
             if (char == '{' && tokenEnd + 1 < endOffset && buffer[tokenEnd + 1] == '$') {
-                if (tokenEnd == tokenStart) {
+                if (tokenEnd == contentStart) {
                     tokenEnd++
                     tokenType = DoriaTokenTypes.STRING
                     mode = MODE_INTERPOLATION
