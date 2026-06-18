@@ -110,7 +110,7 @@ class DoriaLexer : LexerBase() {
             while (tokenEnd < endOffset && isIdentifierPart(buffer[tokenEnd])) {
                 tokenEnd++
             }
-            tokenType = if (sliceEquals("$this")) DoriaTokenTypes.THIS else DoriaTokenTypes.VARIABLE
+            tokenType = if (sliceEquals("\$this")) DoriaTokenTypes.THIS else DoriaTokenTypes.VARIABLE
         } else {
             tokenType = DoriaTokenTypes.OPERATOR
         }
