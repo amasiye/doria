@@ -361,7 +361,7 @@
         },
         {
           "name": "keyword.control.doria",
-          "match": "\\b(?:return|foreach|as|if|else|while|for|when|finally)\\b"
+          "match": "\\b(?:return|foreach|as|if|else|while|for)\\b"
         },
         {
           "name": "storage.modifier.mutability.doria",

@@ -298,7 +298,7 @@ class DoriaLexer : LexerBase() {
         tokenType = when (text) {
             "class", "function", "let", "return", "echo", "new", "foreach", "as",
             "if", "else", "while", "for", "static", "async", "await", "spawn", "scope",
-            "interface", "trait", "enum", "match", "try", "catch", "throw", "when", "finally" -> DoriaTokenTypes.KEYWORD
+            "interface", "trait", "enum", "match", "try", "catch", "throw" -> DoriaTokenTypes.KEYWORD
 
             "writable", "readonly", "internal" -> DoriaTokenTypes.MODIFIER
 

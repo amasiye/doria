@@ -26,15 +26,13 @@ class DoriaVariableUsageAnnotator : Annotator {
             .mapTo(mutableSetOf()) { it.name }
 
         for (occurrence in occurrences) {
-            val attributes = if (occurrence.name in referencedNames) {
-                DoriaSyntaxHighlighter.THIS
-            } else {
-                DoriaSyntaxHighlighter.UNUSED_VARIABLE
+            if (occurrence.name in referencedNames) {
+                continue
             }
 
             holder.newSilentAnnotation(HighlightSeverity.INFORMATION)
                 .range(occurrence.range)
-                .textAttributes(attributes)
+                .textAttributes(DoriaSyntaxHighlighter.UNUSED_VARIABLE)
                 .create()
         }
     }
