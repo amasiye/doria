@@ -4,6 +4,7 @@
 **/.gradle/
 **/.kotlin/
 **/out/
+editors/intellij/doria/bin/
 /.DS_Store
 **/.DS_Store
 *.php

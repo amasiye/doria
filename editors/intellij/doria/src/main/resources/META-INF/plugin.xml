@@ -9,7 +9,7 @@
   ]]></description>
 
   <depends>com.intellij.modules.platform</depends>
-  <depends>com.intellij.modules.lsp</depends>
+  <depends optional="true" config-file="doria-lsp.xml">com.intellij.modules.lsp</depends>
 
   <applicationService serviceImplementation="dev.doria.intellij.settings.DoriaSettings" />
 
@@ -25,9 +25,17 @@
       language="Doria"
       implementationClass="dev.doria.intellij.highlighting.DoriaSyntaxHighlighterFactory" />
 
+    <lang.parserDefinition
+      language="Doria"
+      implementationClass="dev.doria.intellij.psi.DoriaParserDefinition" />
+
     <lang.commenter
       language="Doria"
       implementationClass="dev.doria.intellij.DoriaCommenter" />
+
+    <annotator
+      language="Doria"
+      implementationClass="dev.doria.intellij.highlighting.DoriaVariableUsageAnnotator" />
 
     <applicationConfigurable
       parentId="language"
@@ -35,6 +43,5 @@
       id="dev.doria.intellij.settings"
       displayName="Doria" />
 
-    <lsp.serverSupportProvider implementation="dev.doria.intellij.lsp.DoriaLspServerSupportProvider" />
   </extensions>
 </idea-plugin>

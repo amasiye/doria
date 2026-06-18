@@ -5,7 +5,7 @@ This directory contains first-pass Doria support for IntelliJ-based IDEs.
 It provides:
 
 - `.doria` file recognition.
-- Basic syntax highlighting for Doria keywords, variables, types, strings, comments, numbers, operators, and punctuation.
+- Basic syntax highlighting for Doria keywords, variables, types, strings, string interpolation, comments, numbers, operators, and punctuation.
 - A Doria settings page for configuring the language server path.
 - `doria-lsp` integration through the IntelliJ Platform LSP API.
 
@@ -24,16 +24,16 @@ cargo build -p doriac --bin doria-lsp
 From this directory:
 
 ```bash
-gradle buildPlugin
+./gradlew buildPlugin
 ```
 
-From the repository root:
+On Windows PowerShell or Command Prompt:
 
-```bash
-gradle -p editors/intellij/doria buildPlugin
+```powershell
+.\gradlew.bat buildPlugin
 ```
 
-If Gradle reports `Task 'buildPlugin' not found in root project 'doria'`, it loaded the outer repository instead of this plugin build. Run `gradle projects` from `editors/intellij/doria`; it should report root project `doria-intellij`.
+Use the checked-in Gradle wrapper instead of a system Gradle installation. The wrapper pins the Gradle distribution used by the IntelliJ Platform Gradle Plugin, so local builds and CI do not depend on whichever `gradle` happens to be installed globally.
 
 The packaged plugin will be written under:
 
@@ -41,16 +41,38 @@ The packaged plugin will be written under:
 build/distributions/
 ```
 
+## Enable in RustRover or another JetBrains IDE
+
+Install the packaged plugin from disk:
+
+```text
+Settings/Preferences -> Plugins -> gear icon -> Install Plugin from Disk...
+```
+
+Select the ZIP from `build/distributions/`, then restart the IDE when prompted. After restart, `.doria` files should be associated with the Doria file type and use the Doria syntax highlighter automatically.
+
+If a `.doria` file still opens without highlighting, check:
+
+```text
+Settings/Preferences -> Editor -> File Types
+```
+
+Make sure `*.doria` is listed under `Doria`, and remove it from `Text` or `Plain Text` if the IDE previously learned that association.
+
+The syntax highlighter, file type registration, comments, and settings page only require the IntelliJ Platform module. `doria-lsp` integration is enabled when the IDE also provides JetBrains' LSP module.
+
+Double-quoted string interpolation such as `{$this->name}` keeps the string text green while colorizing the variable reference. Single-quoted strings are treated as literal strings.
+
 ## Run in a sandbox IDE
 
 ```bash
-gradle runIde
+./gradlew runIde
 ```
 
-or, from the repository root:
+On Windows PowerShell or Command Prompt:
 
-```bash
-gradle -p editors/intellij/doria runIde
+```powershell
+.\gradlew.bat runIde
 ```
 
 ## Language server path resolution

@@ -133,19 +133,16 @@
               "begin": "(\\{)(?=\\$)",
               "beginCaptures": {
                 "1": {
-                  "name": "punctuation.section.interpolation.begin.doria"
+                  "name": "string.quoted.double.doria"
                 }
               },
               "end": "\\}",
               "endCaptures": {
                 "0": {
-                  "name": "punctuation.section.interpolation.end.doria"
+                  "name": "string.quoted.double.doria"
                 }
               },
               "patterns": [
-                {
-                  "include": "#accessors"
-                },
                 {
                   "include": "#variables"
                 }
@@ -217,7 +214,7 @@
           "match": "(->)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
           "captures": {
             "1": {
-              "name": "punctuation.accessor.doria"
+              "name": "keyword.operator.accessor.doria"
             },
             "2": {
               "name": "entity.name.function.method.call.doria"
@@ -228,7 +225,7 @@
           "match": "(->)\\s*([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": {
-              "name": "punctuation.accessor.doria"
+              "name": "keyword.operator.accessor.doria"
             },
             "2": {
               "name": "variable.other.property.doria"
@@ -389,7 +386,7 @@
       "patterns": [
         {
           "name": "keyword.operator.doria",
-          "match": "===|!==|==|!=|<=|>=|&&|\\|\\||\\?\\?|=>|\\+=|-=|[=+\\-*/%.<>!?:]"
+          "match": "===|!==|==|!=|<=|>=|&&|\\|\\||\\?\\?|=>|->|::|\\+=|-=|[=+\\-*/%.<>!?:]"
         }
       ]
     },

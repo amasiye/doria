@@ -10,6 +10,7 @@ class DoriaLexer : LexerBase() {
     private var tokenStart: Int = 0
     private var tokenEnd: Int = 0
     private var tokenType: IElementType? = null
+    private var mode: Int = MODE_NORMAL
 
     override fun start(buffer: CharSequence, startOffset: Int, endOffset: Int, initialState: Int) {
         this.buffer = buffer
@@ -17,10 +18,11 @@ class DoriaLexer : LexerBase() {
         this.endOffset = endOffset
         this.tokenStart = startOffset
         this.tokenEnd = startOffset
+        this.mode = initialState
         advance()
     }
 
-    override fun getState(): Int = 0
+    override fun getState(): Int = mode
 
     override fun getTokenType(): IElementType? = tokenType
 
@@ -40,13 +42,33 @@ class DoriaLexer : LexerBase() {
             return
         }
 
+        when (mode) {
+            MODE_DOUBLE_STRING -> {
+                scanDoubleStringToken()
+                return
+            }
+            MODE_INTERPOLATION -> {
+                scanInterpolationToken()
+                return
+            }
+        }
+
+        scanCodeToken(doubleQuoteStartsInterpolatedString = true)
+    }
+
+    private fun scanCodeToken(doubleQuoteStartsInterpolatedString: Boolean) {
         val current = buffer[tokenStart]
         when {
             current.isWhitespace() -> scanWhitespace()
             current == '/' && peek(1) == '/' -> scanLineComment()
             current == '#' && peek(1) != '[' -> scanLineComment()
             current == '/' && peek(1) == '*' -> scanBlockComment()
-            current == '"' || current == '\'' -> scanString(current)
+            current == '"' && doubleQuoteStartsInterpolatedString -> {
+                mode = MODE_DOUBLE_STRING
+                scanDoubleStringToken()
+            }
+            current == '"' -> scanString(current)
+            current == '\'' -> scanString(current)
             current == '$' -> scanVariable()
             current.isDigit() -> scanNumber()
             isIdentifierStart(current) -> scanIdentifierLike()
@@ -99,6 +121,69 @@ class DoriaLexer : LexerBase() {
             if (char == quote) {
                 break
             }
+        }
+        tokenType = DoriaTokenTypes.STRING
+    }
+
+    private fun scanDoubleStringToken() {
+        if (buffer[tokenStart] == '{' && peek(1) == '$') {
+            tokenEnd = tokenStart + 1
+            tokenType = DoriaTokenTypes.STRING
+            mode = MODE_INTERPOLATION
+            return
+        }
+
+        tokenEnd = tokenStart
+        var escaped = false
+        while (tokenEnd < endOffset) {
+            val char = buffer[tokenEnd]
+            if (escaped) {
+                escaped = false
+                tokenEnd++
+                continue
+            }
+            if (char == '\\') {
+                escaped = true
+                tokenEnd++
+                continue
+            }
+            if (char == '{' && tokenEnd + 1 < endOffset && buffer[tokenEnd + 1] == '$') {
+                if (tokenEnd == tokenStart) {
+                    tokenEnd++
+                    tokenType = DoriaTokenTypes.STRING
+                    mode = MODE_INTERPOLATION
+                } else {
+                    tokenType = DoriaTokenTypes.STRING
+                }
+                return
+            }
+            tokenEnd++
+            if (char == '"') {
+                mode = MODE_NORMAL
+                tokenType = DoriaTokenTypes.STRING
+                return
+            }
+        }
+
+        tokenType = DoriaTokenTypes.STRING
+    }
+
+    private fun scanInterpolationToken() {
+        if (buffer[tokenStart] == '}') {
+            tokenEnd = tokenStart + 1
+            tokenType = DoriaTokenTypes.STRING
+            mode = MODE_DOUBLE_STRING
+            return
+        }
+
+        if (buffer[tokenStart] == '$') {
+            scanVariable()
+            return
+        }
+
+        tokenEnd = tokenStart + 1
+        while (tokenEnd < endOffset && buffer[tokenEnd] != '$' && buffer[tokenEnd] != '}') {
+            tokenEnd++
         }
         tokenType = DoriaTokenTypes.STRING
     }
@@ -195,6 +280,10 @@ class DoriaLexer : LexerBase() {
     private fun isIdentifierPart(char: Char): Boolean = char == '_' || char.isLetterOrDigit()
 
     companion object {
+        private const val MODE_NORMAL = 0
+        private const val MODE_DOUBLE_STRING = 1
+        private const val MODE_INTERPOLATION = 2
+
         private val THREE_CHAR_OPERATORS = setOf("===", "!==")
         private val TWO_CHAR_OPERATORS = setOf("==", "!=", "<=", ">=", "&&", "||", "??", "=>", "+=", "-=", "->", "::")
     }
