@@ -1,6 +1,17 @@
 /target/
 /build/
+**/build/
+**/.gradle/
+**/.kotlin/
+**/out/
+editors/intellij/doria/bin/
 /.DS_Store
 **/.DS_Store
 *.php
 !examples/**/*.php
+node_modules/
+vendor/
+*.log
+*.vsix
+.idea
+.intellijPlatform
