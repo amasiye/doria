@@ -285,9 +285,7 @@ impl<'source> Lexer<'source> {
             "bool" => TokenKind::BoolType,
             "array" => TokenKind::ArrayType,
             "async" | "await" | "spawn" | "scope" | "interface" | "trait" | "enum" | "match"
-            | "try" | "catch" | "throw" | "when" | "finally" => {
-                TokenKind::Reserved(text.to_string())
-            }
+            | "try" | "catch" | "throw" => TokenKind::Reserved(text.to_string()),
             _ => TokenKind::Identifier(text.to_string()),
         };
 

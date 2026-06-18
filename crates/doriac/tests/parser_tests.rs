@@ -135,6 +135,27 @@ class Parser
 }
 
 #[test]
+fn parses_planned_control_flow_words_as_declaration_names() {
+    let program = doriac::parse_source(
+        "test.doria",
+        r#"
+function when(): void {}
+class finally {}
+"#,
+    )
+    .expect("parse should succeed");
+
+    assert!(matches!(
+        &program.items[0],
+        Item::Function(function) if function.name == "when"
+    ));
+    assert!(matches!(
+        &program.items[1],
+        Item::Class(class_decl) if class_decl.name == "finally"
+    ));
+}
+
+#[test]
 fn rejects_unsupported_visibility_member_syntax() {
     for source in [
         "class Person { public string $name; }",
