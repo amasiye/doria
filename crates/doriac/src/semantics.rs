@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::diagnostics::{Diagnostic, DiagnosticResult};
 use crate::source::Span;
 use crate::symbols::{
-    Binding, ClassInfo, FunctionInfo, MethodInfo, ParamInfo, PropertyInfo, ScopeStack,
+    Binding, ClassInfo, FunctionInfo, MethodInfo, ParamInfo, PropertyInfo, PropertyInitState,
+    ScopeStack,
 };
 use crate::types::{TypeId, TypeKind, TypeRef, TypeRegistry};
 
@@ -32,6 +33,19 @@ struct MethodContext {
     class_name: String,
     writable_this: bool,
     this_available: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ConstructorInitContext {
+    class_name: String,
+    initialized: HashSet<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConstructorInitDecision {
+    Allowed,
+    Rejected,
+    NotApplicable,
 }
 
 #[derive(Debug, Clone)]
@@ -122,7 +136,7 @@ impl<'program> Checker<'program> {
         for item in &self.program.items {
             match item {
                 Item::Statement(statement) => {
-                    self.check_statement(statement, &mut scopes, None, None);
+                    self.check_statement(statement, &mut scopes, None, None, None);
                 }
                 Item::Function(function) => self.check_function(function, None),
                 Item::Class(class_decl) => self.check_class(class_decl),
@@ -298,11 +312,16 @@ impl<'program> Checker<'program> {
                     self.check_property_initializer(&class_decl.name, property);
                 }
                 ClassMember::Method(method) => {
+                    let writable_this = if method.name == "__construct" {
+                        false
+                    } else {
+                        method.writable_this
+                    };
                     self.check_function(
                         method,
                         Some(MethodContext {
                             class_name: class_decl.name.clone(),
-                            writable_this: method.writable_this,
+                            writable_this,
                             this_available: true,
                         }),
                     );
@@ -366,6 +385,11 @@ impl<'program> Checker<'program> {
                 access: property.access.clone(),
                 writable: property.writable,
                 ty,
+                init_state: if property.initializer.is_some() {
+                    PropertyInitState::HasInitializer
+                } else {
+                    PropertyInitState::Uninitialized
+                },
             },
         );
     }
@@ -393,6 +417,7 @@ impl<'program> Checker<'program> {
                     .unwrap_or(MemberAccess::External),
                 writable: param.writable,
                 ty,
+                init_state: PropertyInitState::PromotedParameter,
             },
         );
     }
@@ -448,10 +473,18 @@ impl<'program> Checker<'program> {
                 param.span,
             );
         }
+        let mut constructor_init_context = method_context.as_ref().and_then(|context| {
+            (function.name == "__construct").then(|| ConstructorInitContext {
+                class_name: context.class_name.clone(),
+                initialized: HashSet::new(),
+            })
+        });
+
         self.check_block(
             &function.body,
             &mut scopes,
             method_context.as_ref(),
+            constructor_init_context.as_mut(),
             Some(&return_context),
         );
         self.check_missing_final_return(function, &return_context);
@@ -534,11 +567,18 @@ impl<'program> Checker<'program> {
         block: &Block,
         scopes: &mut ScopeStack,
         method_context: Option<&MethodContext>,
+        mut constructor_init_context: Option<&mut ConstructorInitContext>,
         return_context: Option<&ReturnContext>,
     ) {
         scopes.push();
         for statement in &block.statements {
-            self.check_statement(statement, scopes, method_context, return_context);
+            self.check_statement(
+                statement,
+                scopes,
+                method_context,
+                constructor_init_context.as_deref_mut(),
+                return_context,
+            );
         }
         scopes.pop();
     }
@@ -548,6 +588,7 @@ impl<'program> Checker<'program> {
         statement: &Stmt,
         scopes: &mut ScopeStack,
         method_context: Option<&MethodContext>,
+        mut constructor_init_context: Option<&mut ConstructorInitContext>,
         return_context: Option<&ReturnContext>,
     ) {
         match statement {
@@ -580,9 +621,13 @@ impl<'program> Checker<'program> {
             }
             Stmt::Assignment(assignment) => {
                 self.check_expr(&assignment.value, scopes, method_context);
-                if let Some(target) =
-                    self.check_assignment_target(&assignment.target, scopes, method_context)
-                {
+                if let Some(target) = self.check_assignment_target(
+                    &assignment.target,
+                    &assignment.op,
+                    scopes,
+                    method_context,
+                    constructor_init_context.as_deref_mut(),
+                ) {
                     match assignment.op {
                         AssignOp::Assign => {
                             let target_ty = target.ty;
@@ -667,7 +712,13 @@ impl<'program> Checker<'program> {
                     foreach.span,
                 );
                 for statement in &foreach.body.statements {
-                    self.check_statement(statement, scopes, method_context, return_context);
+                    self.check_statement(
+                        statement,
+                        scopes,
+                        method_context,
+                        constructor_init_context.as_deref_mut(),
+                        return_context,
+                    );
                 }
                 scopes.pop();
             }
@@ -909,8 +960,10 @@ impl<'program> Checker<'program> {
     fn check_assignment_target(
         &mut self,
         target: &Expr,
+        op: &AssignOp,
         scopes: &ScopeStack,
         method_context: Option<&MethodContext>,
+        constructor_init_context: Option<&mut ConstructorInitContext>,
     ) -> Option<AssignmentTarget> {
         match target {
             Expr::Variable { name, span } => match scopes.lookup(name) {
@@ -943,38 +996,58 @@ impl<'program> Checker<'program> {
                 span,
             } => {
                 self.check_expr(object, scopes, method_context);
-                let writable_path = self.is_writable_object_path(object, scopes, method_context);
-                if !writable_path {
-                    let message = match object.as_ref() {
-                        Expr::This { .. } => {
-                            "cannot mutate `$this` in a readonly method".to_string()
-                        }
-                        Expr::Variable { name, .. } => {
-                            format!("cannot write through readonly variable `${name}`")
-                        }
-                        _ => "cannot write through readonly object path".to_string(),
-                    };
-                    self.diagnostics
-                        .push(Diagnostic::new("E0201", message, object.span()));
-                }
-
                 if let Some((class_name, property_info)) =
                     self.lookup_property(object, property, *span, scopes, method_context)
                 {
-                    if !property_info.writable {
-                        self.diagnostics.push(
-                            Diagnostic::new(
-                                "E0202",
-                                format!(
-                                    "cannot assign to readonly property `{class_name}::${property}`"
-                                ),
-                                *span,
-                            )
-                            .with_help(format!(
-                                "mark the property writable: `writable {} ${property};`",
-                                self.types.display(property_info.ty)
-                            )),
-                        );
+                    let constructor_init_decision = if matches!(object.as_ref(), Expr::This { .. })
+                    {
+                        self.check_constructor_init_assignment(
+                            &class_name,
+                            property,
+                            &property_info,
+                            op,
+                            *span,
+                            constructor_init_context,
+                        )
+                    } else {
+                        ConstructorInitDecision::NotApplicable
+                    };
+
+                    if matches!(
+                        constructor_init_decision,
+                        ConstructorInitDecision::NotApplicable
+                    ) {
+                        let writable_path =
+                            self.is_writable_object_path(object, scopes, method_context);
+                        if !writable_path {
+                            let message = match object.as_ref() {
+                                Expr::This { .. } => {
+                                    "cannot mutate `$this` in a readonly method".to_string()
+                                }
+                                Expr::Variable { name, .. } => {
+                                    format!("cannot write through readonly variable `${name}`")
+                                }
+                                _ => "cannot write through readonly object path".to_string(),
+                            };
+                            self.diagnostics
+                                .push(Diagnostic::new("E0201", message, object.span()));
+                        }
+
+                        if !property_info.writable {
+                            self.diagnostics.push(
+                                Diagnostic::new(
+                                    "E0202",
+                                    format!(
+                                        "cannot assign to readonly property `{class_name}::${property}`"
+                                    ),
+                                    *span,
+                                )
+                                .with_help(format!(
+                                    "mark the property writable: `writable {} ${property};`",
+                                    self.types.display(property_info.ty)
+                                )),
+                            );
+                        }
                     }
                     Some(AssignmentTarget {
                         ty: property_info.ty,
@@ -996,6 +1069,85 @@ impl<'program> Checker<'program> {
                 None
             }
         }
+    }
+
+    fn check_constructor_init_assignment(
+        &mut self,
+        class_name: &str,
+        property: &str,
+        property_info: &PropertyInfo,
+        op: &AssignOp,
+        span: Span,
+        constructor_init_context: Option<&mut ConstructorInitContext>,
+    ) -> ConstructorInitDecision {
+        let Some(context) = constructor_init_context else {
+            return ConstructorInitDecision::NotApplicable;
+        };
+
+        if context.class_name != class_name {
+            return ConstructorInitDecision::NotApplicable;
+        }
+
+        if !matches!(op, AssignOp::Assign) {
+            self.diagnostics.push(Diagnostic::new(
+                "E0413",
+                "constructor init access only applies to simple `$this->property = value` assignments",
+                span,
+            ));
+            return ConstructorInitDecision::Rejected;
+        }
+
+        if property_info.writable {
+            return ConstructorInitDecision::Allowed;
+        }
+
+        match property_info.init_state {
+            PropertyInitState::HasInitializer => {
+                self.report_readonly_property_already_initialized(
+                    class_name,
+                    property,
+                    "is already initialized by its property initializer",
+                    span,
+                );
+                ConstructorInitDecision::Rejected
+            }
+            PropertyInitState::PromotedParameter => {
+                self.report_readonly_property_already_initialized(
+                    class_name,
+                    property,
+                    "is already initialized by constructor promotion",
+                    span,
+                );
+                ConstructorInitDecision::Rejected
+            }
+            PropertyInitState::Uninitialized => {
+                if !context.initialized.insert(property.to_string()) {
+                    self.report_readonly_property_already_initialized(
+                        class_name,
+                        property,
+                        "has already been initialized in this constructor",
+                        span,
+                    );
+                    return ConstructorInitDecision::Rejected;
+                }
+
+                ConstructorInitDecision::Allowed
+            }
+        }
+    }
+
+    fn report_readonly_property_already_initialized(
+        &mut self,
+        class_name: &str,
+        property: &str,
+        reason: &str,
+        span: Span,
+    ) {
+        self.diagnostics.push(Diagnostic::new(
+            "E0412",
+            format!("readonly property `{class_name}::${property}` {reason}"),
+            span,
+        ));
     }
 
     fn check_function_call(

@@ -136,6 +136,8 @@ class Person
 
 To assign to a property, both the object path and the property must be writable, unless a constructor is initializing an uninitialized readonly property through constructor init access.
 
+Constructor init access is narrower than writable `$this`. Inside `__construct`, a direct simple assignment such as `$this->id = $id;` may initialize an uninitialized readonly property of the declaring class exactly once. Property initializers and constructor-promoted parameters count as already initialized. Init access does not permit compound assignments, nested writes such as `$this->child->name = "Lucy";`, or calls to writable methods through `$this`. Full definite property initialization is future work; the current checker does not yet require every readonly property to be initialized by every constructor path.
+
 Function parameters are readonly by default and become writable only with `writable`.
 
 Methods receive readonly `$this` by default. A method that mutates `$this` must be declared with `writable function`.
@@ -303,7 +305,21 @@ function __construct(
 }
 ```
 
-Constructor init access for assigning readonly properties inside constructor bodies is a required language rule, but it is not implemented in the current vertical slice. The intended rule is narrower than writable `$this`: a constructor may initialize each uninitialized readonly property exactly once.
+Constructor init access is supported for direct initialization of uninitialized readonly properties inside constructor bodies:
+
+```php
+class Person
+{
+    string $id;
+
+    function __construct(string $givenId)
+    {
+        $this->id = $givenId;
+    }
+}
+```
+
+This does not make `$this` writable. The constructor cannot assign the same readonly property twice, cannot reassign a readonly property that already has an initializer or is promoted from a constructor parameter, cannot use compound assignment for init access, and cannot use init access for nested object paths.
 
 Doria should support richer instance property initializers than PHP:
 
