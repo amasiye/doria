@@ -27,6 +27,14 @@ From this directory:
 gradle buildPlugin
 ```
 
+From the repository root:
+
+```bash
+gradle -p editors/intellij/doria buildPlugin
+```
+
+If Gradle reports `Task 'buildPlugin' not found in root project 'doria'`, it loaded the outer repository instead of this plugin build. Run `gradle projects` from `editors/intellij/doria`; it should report root project `doria-intellij`.
+
 The packaged plugin will be written under:
 
 ```text
@@ -37,6 +45,12 @@ build/distributions/
 
 ```bash
 gradle runIde
+```
+
+or, from the repository root:
+
+```bash
+gradle -p editors/intellij/doria runIde
 ```
 
 ## Language server path resolution
