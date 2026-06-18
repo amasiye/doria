@@ -103,6 +103,86 @@
     "comments": {
       "patterns": [
         {
+          "name": "comment.block.documentation.doria",
+          "begin": "/\\*\\*",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.comment.begin.doria"
+            }
+          },
+          "end": "\\*/",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.comment.end.doria"
+            }
+          },
+          "patterns": [
+            {
+              "match": "(@method)\\s+(?:(static)\\s+)?((?:\\??[A-Za-z_\\\\][A-Za-z0-9_\\\\]*(?:<[^>]+>)?(?:\\[\\])?)(?:\\|\\??[A-Za-z_\\\\][A-Za-z0-9_\\\\]*(?:<[^>]+>)?(?:\\[\\])?)*)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+              "captures": {
+                "1": {
+                  "name": "keyword.other.documentation.tag.doria"
+                },
+                "2": {
+                  "name": "storage.modifier.static.doria"
+                },
+                "3": {
+                  "name": "storage.type.documentation.doria"
+                },
+                "4": {
+                  "name": "entity.name.function.method.documentation.doria"
+                }
+              }
+            },
+            {
+              "match": "(@param)\\s+((?:\\??[A-Za-z_\\\\][A-Za-z0-9_\\\\]*(?:<[^>]+>)?(?:\\[\\])?)(?:\\|\\??[A-Za-z_\\\\][A-Za-z0-9_\\\\]*(?:<[^>]+>)?(?:\\[\\])?)*)\\s+(\\$[A-Za-z_][A-Za-z0-9_]*)",
+              "captures": {
+                "1": {
+                  "name": "keyword.other.documentation.tag.doria"
+                },
+                "2": {
+                  "name": "storage.type.documentation.doria"
+                },
+                "3": {
+                  "name": "variable.other.doria"
+                }
+              }
+            },
+            {
+              "match": "(@property(?:-read|-write)?)\\s+((?:\\??[A-Za-z_\\\\][A-Za-z0-9_\\\\]*(?:<[^>]+>)?(?:\\[\\])?)(?:\\|\\??[A-Za-z_\\\\][A-Za-z0-9_\\\\]*(?:<[^>]+>)?(?:\\[\\])?)*)\\s+(\\$[A-Za-z_][A-Za-z0-9_]*)",
+              "captures": {
+                "1": {
+                  "name": "keyword.other.documentation.tag.doria"
+                },
+                "2": {
+                  "name": "storage.type.documentation.doria"
+                },
+                "3": {
+                  "name": "variable.other.doria"
+                }
+              }
+            },
+            {
+              "match": "(@(?:return|throws|var|template|extends|implements))\\s+((?:\\??[A-Za-z_\\\\][A-Za-z0-9_\\\\]*(?:<[^>]+>)?(?:\\[\\])?)(?:\\|\\??[A-Za-z_\\\\][A-Za-z0-9_\\\\]*(?:<[^>]+>)?(?:\\[\\])?)*)",
+              "captures": {
+                "1": {
+                  "name": "keyword.other.documentation.tag.doria"
+                },
+                "2": {
+                  "name": "storage.type.documentation.doria"
+                }
+              }
+            },
+            {
+              "name": "keyword.other.documentation.tag.doria",
+              "match": "@[A-Za-z_][A-Za-z0-9_-]*"
+            },
+            {
+              "include": "#variables"
+            }
+          ]
+        },
+        {
           "name": "comment.line.double-slash.doria",
           "match": "//.*$"
         },

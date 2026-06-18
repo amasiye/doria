@@ -42,7 +42,7 @@ class DoriaVariableUsageAnnotator : Annotator {
     private fun collectVariableOccurrences(text: String): List<VariableOccurrence> {
         val tokens = tokenize(text)
         return tokens.mapIndexedNotNull { index, token ->
-            if (token.type != DoriaTokenTypes.VARIABLE) {
+            if (token.type != DoriaTokenTypes.VARIABLE || token.state == DoriaLexer.MODE_DOC_COMMENT) {
                 return@mapIndexedNotNull null
             }
 
@@ -67,6 +67,7 @@ class DoriaVariableUsageAnnotator : Annotator {
                     text = text.substring(lexer.tokenStart, lexer.tokenEnd),
                     startOffset = lexer.tokenStart,
                     endOffset = lexer.tokenEnd,
+                    state = lexer.state,
                 )
             }
             lexer.advance()
@@ -114,6 +115,7 @@ class DoriaVariableUsageAnnotator : Annotator {
         val text: String,
         val startOffset: Int,
         val endOffset: Int,
+        val state: Int,
     )
 
     private data class VariableOccurrence(

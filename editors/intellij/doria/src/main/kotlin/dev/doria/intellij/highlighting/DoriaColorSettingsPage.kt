@@ -23,6 +23,12 @@ class DoriaColorSettingsPage : ColorSettingsPage {
                 echo ${'$'}this->getGreetingMessage();
             }
 
+            /**
+             * Rename the person.
+             *
+             * @param string ${'$'}name The new name.
+             * @return Person
+             */
             internal function getGreetingMessage(): string
             {
                 return "Hello, my name is {${'$'}this->name}";
@@ -61,6 +67,8 @@ class DoriaColorSettingsPage : ColorSettingsPage {
             AttributesDescriptor("Number", DoriaSyntaxHighlighter.NUMBER),
             AttributesDescriptor("String", DoriaSyntaxHighlighter.STRING),
             AttributesDescriptor("Comment", DoriaSyntaxHighlighter.COMMENT),
+            AttributesDescriptor("Doc comment", DoriaSyntaxHighlighter.DOC_COMMENT),
+            AttributesDescriptor("Doc comment tag", DoriaSyntaxHighlighter.DOC_COMMENT_TAG),
             AttributesDescriptor("Operator", DoriaSyntaxHighlighter.OPERATOR),
             AttributesDescriptor("Braces", DoriaSyntaxHighlighter.BRACE),
             AttributesDescriptor("Brackets", DoriaSyntaxHighlighter.BRACKET),

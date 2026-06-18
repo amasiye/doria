@@ -12,11 +12,21 @@ class Person
         echo $this->getGreetingMessage();
     }
 
+    /**
+     * Rename the person.
+     *
+     * @param string $name The new name of the person.
+     */
     writable function rename(string $name): void
     {
         $this->name = $name;
     }
 
+    /**
+     * Get the greeting message for the person.
+     *
+     * @return string The greeting message.
+     */
     internal function getGreetingMessage(): string
     {
         return "Hello, my name is {$this->name} and I am {$this->age} years old!";

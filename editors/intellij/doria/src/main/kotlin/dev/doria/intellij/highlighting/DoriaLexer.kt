@@ -51,6 +51,10 @@ class DoriaLexer : LexerBase() {
                 scanInterpolationToken()
                 return
             }
+            MODE_DOC_COMMENT -> {
+                scanDocCommentToken()
+                return
+            }
         }
 
         scanCodeToken(doubleQuoteStartsInterpolatedString = true)
@@ -62,6 +66,7 @@ class DoriaLexer : LexerBase() {
             current.isWhitespace() -> scanWhitespace()
             current == '/' && peek(1) == '/' -> scanLineComment()
             current == '#' && peek(1) != '[' -> scanLineComment()
+            current == '/' && peek(1) == '*' && peek(2) == '*' && peek(3) != '/' -> scanDocCommentStart()
             current == '/' && peek(1) == '*' -> scanBlockComment()
             current == '"' && doubleQuoteStartsInterpolatedString -> {
                 mode = MODE_DOUBLE_STRING
@@ -102,6 +107,81 @@ class DoriaLexer : LexerBase() {
             tokenEnd++
         }
         tokenType = DoriaTokenTypes.COMMENT
+    }
+
+    private fun scanDocCommentStart() {
+        tokenEnd = tokenStart + 3
+        tokenType = DoriaTokenTypes.DOC_COMMENT
+        mode = MODE_DOC_COMMENT
+    }
+
+    private fun scanDocCommentToken() {
+        if (buffer[tokenStart] == '*' && peek(1) == '/') {
+            tokenEnd = tokenStart + 2
+            tokenType = DoriaTokenTypes.DOC_COMMENT
+            mode = MODE_NORMAL
+            return
+        }
+
+        if (buffer[tokenStart] == '@' && peek(1)?.let(::isIdentifierStart) == true) {
+            scanDocCommentTag()
+            return
+        }
+
+        if (buffer[tokenStart] == '$') {
+            scanVariable()
+            return
+        }
+
+        if (isIdentifierStart(buffer[tokenStart])) {
+            scanDocCommentIdentifier()
+            return
+        }
+
+        tokenEnd = tokenStart + 1
+        while (tokenEnd < endOffset) {
+            if (buffer[tokenEnd] == '*' && tokenEnd + 1 < endOffset && buffer[tokenEnd + 1] == '/') {
+                break
+            }
+            if (buffer[tokenEnd] == '@' && tokenEnd + 1 < endOffset && isIdentifierStart(buffer[tokenEnd + 1])) {
+                break
+            }
+            if (buffer[tokenEnd] == '$' || isIdentifierStart(buffer[tokenEnd])) {
+                break
+            }
+            tokenEnd++
+        }
+        tokenType = DoriaTokenTypes.DOC_COMMENT
+    }
+
+    private fun scanDocCommentTag() {
+        tokenEnd = tokenStart + 1
+        while (tokenEnd < endOffset && (isIdentifierPart(buffer[tokenEnd]) || buffer[tokenEnd] == '-')) {
+            tokenEnd++
+        }
+        tokenType = DoriaTokenTypes.DOC_COMMENT_TAG
+    }
+
+    private fun scanDocCommentIdentifier() {
+        tokenEnd = tokenStart + 1
+        while (tokenEnd < endOffset && isIdentifierPart(buffer[tokenEnd])) {
+            tokenEnd++
+        }
+
+        val text = buffer.subSequence(tokenStart, tokenEnd).toString()
+        tokenType = if (isDocTypePosition()) {
+            when (text) {
+                "void", "int", "float", "string", "bool", "mixed", "object", "resource", "array" -> DoriaTokenTypes.PRIMITIVE_TYPE
+                "List", "Dictionary", "Set" -> DoriaTokenTypes.COLLECTION_TYPE
+                else -> if (text.first().isUpperCase()) DoriaTokenTypes.TYPE_NAME else DoriaTokenTypes.DOC_COMMENT
+            }
+        } else if (text == "static" && isDocMethodStaticModifierPosition()) {
+            DoriaTokenTypes.MODIFIER
+        } else if (isDocMethodNamePosition()) {
+            DoriaTokenTypes.FUNCTION_DECLARATION
+        } else {
+            DoriaTokenTypes.DOC_COMMENT
+        }
     }
 
     private fun scanString(quote: Char) {
@@ -302,6 +382,148 @@ class DoriaLexer : LexerBase() {
         return twoChars.takeIf { it == "->" || it == "::" }
     }
 
+    private fun isDocTypePosition(): Boolean {
+        val tag = docTagBefore(tokenStart) ?: return false
+        if (tag.name !in DOC_TYPE_TAGS) {
+            return false
+        }
+
+        val typeRange = docTypeRange(tag.endOffset, lineEnd(tokenStart), tag.name) ?: return false
+        return tokenStart in typeRange
+    }
+
+    private fun isDocMethodStaticModifierPosition(): Boolean {
+        val tag = docTagBefore(tokenStart) ?: return false
+        if (tag.name != "method") {
+            return false
+        }
+
+        var cursor = tag.endOffset
+        val lineEnd = lineEnd(tokenStart)
+        while (cursor < lineEnd && buffer[cursor].isWhitespace()) {
+            cursor++
+        }
+        return cursor == tokenStart
+    }
+
+    private fun isDocMethodNamePosition(): Boolean {
+        val tag = docTagBefore(tokenStart) ?: return false
+        if (tag.name != "method") {
+            return false
+        }
+
+        val typeRange = docTypeRange(tag.endOffset, lineEnd(tokenStart), tag.name) ?: return false
+        var cursor = typeRange.last + 1
+        while (cursor < endOffset && buffer[cursor].isWhitespace()) {
+            cursor++
+        }
+        return cursor == tokenStart && nextNonWhitespace(tokenEnd) == '('
+    }
+
+    private fun docTagBefore(index: Int): DocTag? {
+        var cursor = lineStart(index)
+        var tag: DocTag? = null
+        while (cursor < index) {
+            if (buffer[cursor] == '@' && cursor + 1 < index && isIdentifierStart(buffer[cursor + 1])) {
+                var tagEnd = cursor + 2
+                while (tagEnd < index && (isIdentifierPart(buffer[tagEnd]) || buffer[tagEnd] == '-')) {
+                    tagEnd++
+                }
+                tag = DocTag(buffer.subSequence(cursor + 1, tagEnd).toString(), tagEnd)
+                cursor = tagEnd
+            } else {
+                cursor++
+            }
+        }
+        return tag
+    }
+
+    private fun docTypeRange(startIndex: Int, lineEnd: Int, tagName: String): IntRange? {
+        var cursor = startIndex
+        while (cursor < lineEnd && buffer[cursor].isWhitespace()) {
+            cursor++
+        }
+        if (tagName == "method" && hasWordAt(cursor, "static")) {
+            cursor += "static".length
+            while (cursor < lineEnd && buffer[cursor].isWhitespace()) {
+                cursor++
+            }
+        }
+        if (cursor >= lineEnd) {
+            return null
+        }
+
+        val typeStart = cursor
+        var depth = 0
+        var sawTypeCharacter = false
+        while (cursor < lineEnd) {
+            val char = buffer[cursor]
+            when {
+                char == '$' && depth == 0 -> break
+                char == '<' -> {
+                    depth++
+                    sawTypeCharacter = true
+                    cursor++
+                }
+                char == '>' -> {
+                    if (depth > 0) {
+                        depth--
+                    }
+                    sawTypeCharacter = true
+                    cursor++
+                }
+                char.isWhitespace() -> {
+                    if (sawTypeCharacter && depth == 0) {
+                        break
+                    }
+                    cursor++
+                }
+                isDocTypeCharacter(char) -> {
+                    sawTypeCharacter = true
+                    cursor++
+                }
+                else -> break
+            }
+        }
+
+        return if (sawTypeCharacter) typeStart until cursor else null
+    }
+
+    private fun lineStart(index: Int): Int {
+        var cursor = index - 1
+        while (cursor >= startOffset && buffer[cursor] != '\n' && buffer[cursor] != '\r') {
+            cursor--
+        }
+        return cursor + 1
+    }
+
+    private fun lineEnd(index: Int): Int {
+        var cursor = index
+        while (cursor < endOffset && buffer[cursor] != '\n' && buffer[cursor] != '\r') {
+            cursor++
+        }
+        return cursor
+    }
+
+    private fun isDocTypeCharacter(char: Char): Boolean =
+        isIdentifierPart(char) || char == '\\' || char == '?' || char == '|' || char == '&' ||
+            char == '[' || char == ']' || char == ',' || char == '.'
+
+    private fun hasWordAt(index: Int, word: String): Boolean {
+        if (index + word.length > endOffset) {
+            return false
+        }
+        if (buffer.subSequence(index, index + word.length).toString() != word) {
+            return false
+        }
+
+        val before = index - 1
+        val after = index + word.length
+        val validBefore = before < startOffset || !isIdentifierPart(buffer[before])
+        val validAfter = after >= endOffset || !isIdentifierPart(buffer[after])
+        return validBefore && validAfter
+    }
+
     private fun nextNonWhitespace(index: Int): Char? {
         var cursor = index
         while (cursor < endOffset && buffer[cursor].isWhitespace()) {
@@ -335,10 +557,27 @@ class DoriaLexer : LexerBase() {
 
     private fun isIdentifierPart(char: Char): Boolean = char == '_' || char.isLetterOrDigit()
 
+    private data class DocTag(val name: String, val endOffset: Int)
+
     companion object {
         private const val MODE_NORMAL = 0
         private const val MODE_DOUBLE_STRING = 1
         private const val MODE_INTERPOLATION = 2
+        const val MODE_DOC_COMMENT = 3
+
+        private val DOC_TYPE_TAGS = setOf(
+            "param",
+            "return",
+            "var",
+            "property",
+            "property-read",
+            "property-write",
+            "method",
+            "throws",
+            "template",
+            "extends",
+            "implements",
+        )
 
         private val THREE_CHAR_OPERATORS = setOf("===", "!==")
         private val TWO_CHAR_OPERATORS = setOf("==", "!=", "<=", ">=", "&&", "||", "??", "=>", "+=", "-=", "->", "::")

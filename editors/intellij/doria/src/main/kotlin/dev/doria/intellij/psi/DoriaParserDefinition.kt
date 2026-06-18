@@ -34,7 +34,11 @@ class DoriaParserDefinition : ParserDefinition {
 
     override fun getWhitespaceTokens(): TokenSet = TokenSet.create(TokenType.WHITE_SPACE)
 
-    override fun getCommentTokens(): TokenSet = TokenSet.create(DoriaTokenTypes.COMMENT)
+    override fun getCommentTokens(): TokenSet = TokenSet.create(
+        DoriaTokenTypes.COMMENT,
+        DoriaTokenTypes.DOC_COMMENT,
+        DoriaTokenTypes.DOC_COMMENT_TAG,
+    )
 
     override fun getStringLiteralElements(): TokenSet = TokenSet.create(DoriaTokenTypes.STRING)
 
