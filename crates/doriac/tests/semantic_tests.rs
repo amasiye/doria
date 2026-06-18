@@ -1202,8 +1202,67 @@ class Person
 "#,
             "E0203",
         ),
+        (
+            r#"
+class Person
+{
+    string $id;
+
+    function __construct(List<string> $ids)
+    {
+        foreach ($ids as string $id) {
+            $this->id = $id;
+        }
+    }
+}
+"#,
+            "E0202",
+        ),
     ] {
         assert_diagnostic_code(source, code);
+    }
+}
+
+#[test]
+fn rejects_direct_lifecycle_method_calls() {
+    for source in [
+        r#"
+class Person
+{
+    string $id;
+
+    function __construct(string $givenId)
+    {
+        $this->id = $givenId;
+    }
+}
+
+let writable $person = new Person("a");
+$person->__construct("b");
+"#,
+        r#"
+class Person
+{
+    function __destruct()
+    {
+    }
+}
+
+let writable $person = new Person();
+$person->__destruct();
+"#,
+        r#"
+class Person
+{
+    function __construct()
+    {
+    }
+}
+
+Person::__construct();
+"#,
+    ] {
+        assert_diagnostic_code(source, "E0414");
     }
 }
 

@@ -588,7 +588,7 @@ impl<'program> Checker<'program> {
         statement: &Stmt,
         scopes: &mut ScopeStack,
         method_context: Option<&MethodContext>,
-        mut constructor_init_context: Option<&mut ConstructorInitContext>,
+        constructor_init_context: Option<&mut ConstructorInitContext>,
         return_context: Option<&ReturnContext>,
     ) {
         match statement {
@@ -626,7 +626,7 @@ impl<'program> Checker<'program> {
                     &assignment.op,
                     scopes,
                     method_context,
-                    constructor_init_context.as_deref_mut(),
+                    constructor_init_context,
                 ) {
                     match assignment.op {
                         AssignOp::Assign => {
@@ -712,13 +712,7 @@ impl<'program> Checker<'program> {
                     foreach.span,
                 );
                 for statement in &foreach.body.statements {
-                    self.check_statement(
-                        statement,
-                        scopes,
-                        method_context,
-                        constructor_init_context.as_deref_mut(),
-                        return_context,
-                    );
+                    self.check_statement(statement, scopes, method_context, None, return_context);
                 }
                 scopes.pop();
             }
@@ -1206,6 +1200,10 @@ impl<'program> Checker<'program> {
             return;
         };
 
+        if self.check_direct_lifecycle_method_call(&class_name, method, span) {
+            return;
+        }
+
         if matches!(method_info.access, MemberAccess::Internal)
             && !self.can_access_internal_member(&class_name, method_context)
         {
@@ -1264,6 +1262,10 @@ impl<'program> Checker<'program> {
             return;
         };
 
+        if self.check_direct_lifecycle_method_call(class_name, method, span) {
+            return;
+        }
+
         if matches!(method_info.access, MemberAccess::Internal)
             && !self.can_access_internal_member(class_name, method_context)
         {
@@ -1282,6 +1284,39 @@ impl<'program> Checker<'program> {
             scopes,
             method_context,
         );
+    }
+
+    fn check_direct_lifecycle_method_call(
+        &mut self,
+        class_name: &str,
+        method: &str,
+        span: Span,
+    ) -> bool {
+        let Some(lifecycle) = LifecycleMethod::from_method_name(method) else {
+            return false;
+        };
+
+        let help = match lifecycle {
+            LifecycleMethod::Constructor => {
+                format!("construct `{class_name}` with `new {class_name}(...)`")
+            }
+            LifecycleMethod::Destructor => {
+                "destructors are invoked by the runtime, not user code".to_string()
+            }
+        };
+
+        self.diagnostics.push(
+            Diagnostic::new(
+                "E0414",
+                format!(
+                    "{} `{class_name}::{method}` cannot be called directly",
+                    lifecycle.label()
+                ),
+                span,
+            )
+            .with_help(help),
+        );
+        true
     }
 
     fn check_constructor_call(
