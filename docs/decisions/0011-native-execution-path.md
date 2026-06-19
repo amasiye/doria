@@ -1,15 +1,13 @@
 # 0011 Native execution path
 
-Status: Proposed
+Status: Accepted
 
-## Purpose
+## Decision
 
 Doria's first native milestone is not "compile the whole language."
 The first native milestone is to prove that `doriac` can produce a standalone native executable through a Doria-owned path.
 
-This note proposes that path. It does not implement a native backend, choose a final backend technology, or settle all native runtime details.
-
-The proposed first native smoke target is deliberately tiny:
+The accepted Stage 1 native executable smoke target is:
 
 ```doria
 function main(): int
@@ -18,13 +16,26 @@ function main(): int
 }
 ```
 
-This avoids strings, objects, classes, heap allocation, collections, exceptions/errors, a standard library, and runtime complexity. It tests only the ability to take checked Doria through a native-owned path and produce a standalone executable with a process exit code.
+For Stage 1:
+
+```text
+- A native executable requires exactly one top-level `function main(): int`.
+- The returned `int` is the process exit code.
+- Top-level executable statements are not accepted for native executable output yet.
+- Top-level statements may remain valid for checking, Doria IR work, and compatibility/debugging backends.
+- `main(): void` is not part of Stage 1.
+- `main` with parameters is not part of Stage 1.
+- Any future argument-passing form is deferred until strings and collections are designed.
+- Any future fallible/recoverable-error entrypoint form is deferred until Doria's error model is designed.
+```
+
+This decision accepts only the smallest Stage 1 native execution path. It does not settle strings, objects, collections, heap allocation, FFI, standard library, recoverable errors, broad numeric semantics, or final backend technology.
 
 ## Context
 
 Decision `0010-native-first-correctness.md` establishes that Doria is native-first, that PHP transpilation is optional and non-authoritative, and that backend convenience must not define Doria semantics.
 
-This proposed decision keeps that boundary intact:
+This decision keeps that boundary intact:
 
 ```text
 Doria source
@@ -36,15 +47,41 @@ Doria source
 -> native execution path
 ```
 
-Generated PHP is not part of the correctness proof for native execution.
+Generated PHP is not part of the correctness proof for native execution. Backends implement Doria; they do not define it.
 
-## Proposed minimum native slice
+## Accepted Stage 1 boundary
 
-Recommended staged path:
+Stage 1 exists to answer one question:
 
 ```text
-Stage 0: Native execution design note only.
-Stage 1: Compile `function main(): int { return 0; }` to a native executable.
+Can checked Doria produce a standalone native executable through a Doria-owned path?
+```
+
+The answer should be proven with exactly one top-level entrypoint:
+
+```doria
+function main(): int
+{
+    return 0;
+}
+```
+
+This is deliberately tiny. It avoids strings, objects, classes, heap allocation, collections, exceptions/errors, a standard library, and runtime complexity. It tests only process entry, a Doria semantic integer return value, and process exit-code integration.
+
+The accepted rule is not a full language-wide entrypoint model. It is the first native executable rule.
+
+## Staged native path
+
+Accepted now:
+
+```text
+Stage 0: Native execution design note.
+Stage 1: Compile exactly one top-level `function main(): int { return 0; }` shape to a standalone native executable whose exit code is the returned int.
+```
+
+Recommended later stages, not accepted by this decision:
+
+```text
 Stage 2: Add integer literals, local variables, arithmetic, and return values.
 Stage 3: Add bool literals, comparisons, `if`, and `while`.
 Stage 4: Add direct function calls.
@@ -54,51 +91,44 @@ Stage 7: Add objects/classes/constructors only after object layout is specified.
 Stage 8: Add collections only after List/Dictionary/Set representations are specified.
 ```
 
-Recommendation: keep Stage 1 almost boring. A tiny executable returning `0` gives Doria its first native-owned proof point without accidentally deciding strings, object layout, heap allocation, or standard-library APIs.
+The tradeoff is intentional: Stage 1 is not an impressive demo, but it is a clean correctness milestone that does not smuggle in string, object, allocation, runtime, or standard-library assumptions.
 
-Tradeoff: this stage will not be impressive as a demo. That is intentional. It is a correctness milestone, not a language-completeness milestone.
+## Entrypoint rules
 
-## Entrypoint questions
+### Is `main` required for Stage 1 native executables?
 
-These are recommendations only until Andrew accepts or revises them.
+Accepted: yes. Stage 1 native executable output requires exactly one top-level `function main(): int`.
 
-### Is `main` required for native executables?
-
-Recommendation: require `main` for the first native executable slice.
-
-Reasoning: an explicit entrypoint avoids silently deciding how top-level statements initialize, order, fail, or map to process startup.
+An explicit entrypoint avoids silently deciding how top-level statements initialize, order, fail, or map to process startup.
 
 ### What signatures are allowed for `main` initially?
 
-Recommendation: initially allow exactly one top-level function with this signature:
+Accepted for Stage 1:
 
 ```doria
 function main(): int
 ```
 
-The return value becomes the process exit code.
-
-Deferred options:
+Not accepted for Stage 1:
 
 ```text
 function main(): void
 function main(List<string> $args): int
-function main(List<string> $args): Result<int, Error>
 ```
 
-Those options require decisions about process arguments, strings, collections, errors, and exit behavior, so they should not be included in Stage 1.
+A future argument-passing entrypoint form may be considered after strings and collections are designed.
 
-### Should top-level statements be allowed for native executables?
+A future recoverable-error entrypoint form may be considered after Doria's error model is designed.
 
-Recommendation: top-level statements should remain valid Doria for checking, Doria IR work, and compatibility backends, but native executable output should initially require `main`.
+### Are top-level statements allowed for native executables?
 
-Reasoning: top-level statements raise questions about script mode, implicit entrypoint generation, initialization order, and how top-level side effects compose with an explicit `main`.
+Accepted for Stage 1: no. Top-level executable statements are not accepted for native executable output yet.
+
+Top-level statements may remain valid for parser/check/Doria IR work and compatibility/debugging backends. That keeps existing language work usable without turning top-level execution into the native startup model prematurely.
 
 ### How do top-level statements relate to `main`?
 
-Recommendation: do not decide this in the first native slice.
-
-Possible future designs:
+Deferred. Possible future designs include:
 
 ```text
 1. Native executable mode requires `main` and rejects top-level executable statements.
@@ -107,55 +137,65 @@ Possible future designs:
 4. Top-level statements remain available only for script/debug/compatibility modes.
 ```
 
-This is a language-design fork and should be decided separately.
+This remains a language-design question and must not be decided silently by the first backend implementation.
 
 ### What is the process exit code?
 
-Recommendation: for Stage 1, the `int` returned by `main` is the process exit code.
+Accepted for Stage 1: the `int` returned by `main` is the process exit code.
 
-Open question: should Doria define exit-code truncation/range behavior explicitly, such as limiting native process exit codes to `0..255` on platforms where that matters, or should the backend map the semantic `int` to the platform convention with diagnostics for out-of-range literals later?
+Deferred: exact exit-code range/truncation behavior across operating systems. Stage 1 may map the returned integer through the platform process-exit mechanism, but a later decision should specify diagnostics or behavior for out-of-range literal and computed values.
 
 ### What happens if there is no `main`?
 
-Recommendation: native executable output should report a clear unsupported-entrypoint diagnostic.
+Accepted for Stage 1: native executable output reports a clear unsupported-entrypoint diagnostic.
 
-Example wording:
+Example diagnostic direction:
 
 ```text
 native executable output requires exactly one top-level `function main(): int`
 ```
 
-This should be a native-backend diagnostic, not a general parse or semantic error, while other backends still support their own valid subsets.
+This should be a native-backend diagnostic, not a general parse or semantic error, while other backends still support their valid subsets.
 
 ### What happens if there are multiple `main` functions?
 
-Recommendation: report a clear diagnostic for native executable output. The general semantic checker may already reject duplicate top-level functions; the native backend should still guard its own entrypoint selection.
+Accepted for Stage 1: native executable output reports a clear diagnostic. The general semantic checker may already reject duplicate top-level functions, but the native backend should still guard entrypoint selection.
 
-## Primitive representation questions
+## Primitive representation boundary
 
-These choices must be explicit before or during early native implementation. They should not be inherited from PHP, Rust, C, LLVM, Cranelift, or the host machine by accident.
+For the first native smoke target, `int` is treated as a Doria semantic integer suitable for a process exit code.
 
-### `int`
+That is the only accepted primitive representation assumption in this note.
 
-Options:
+Deferred decisions:
 
 ```text
-1. signed 64-bit integer
-2. target pointer-width integer
-3. arbitrary precision integer
-4. separate sized integer family later
+- exact full-width `int` semantics
+- integer overflow behavior
+- explicit exit-code range/truncation rules
+- float semantics
+- bool ABI/layout
+- void ABI details beyond no returned value for non-Stage-1 entrypoints
+- null representation
+- string representation
 ```
 
-Recommendation: use a fixed-width signed 64-bit `int` for early native semantics unless Andrew decides otherwise.
+Recommendation for the next numeric stage, not accepted here as a full language-wide decision:
 
-Tradeoffs:
+```text
+Use fixed-width signed 64-bit `int` for early native arithmetic semantics unless Andrew decides otherwise.
+Use 64-bit floating point for early `float` semantics unless Andrew decides otherwise.
+Treat `bool` as a Doria semantic bool while allowing the backend to choose an internal machine representation, as long as Doria-visible behavior stays fixed.
+```
+
+Tradeoffs to revisit:
 
 ```text
 i64:
   stable cross-platform behavior, simple tests, familiar enough for application code
   but may surprise users expecting machine-word `int`
 
-pointer width:
+target pointer width:
   convenient for some systems code and host ABI interactions
   but 32-bit and 64-bit targets can behave differently
 
@@ -164,41 +204,17 @@ arbitrary precision:
   but requires runtime support and is too heavy for the first native smoke path
 ```
 
-Overflow behavior remains an open question. Stage 1 does not need arithmetic, but Stage 2 does.
+String representation is deferred until a string-native stage. Strings affect literals, interpolation, stdout, ownership, allocation, encoding, slices, FFI, object display hooks, and collections.
 
-### `float`
+## Backend route status
 
-Recommendation: use 64-bit floating point for early native semantics, unless Andrew decides otherwise.
+Accepted: Doria will begin with the smallest standalone native executable smoke target.
 
-Tradeoff: `f64` is common and practical, but exact floating semantics, NaN behavior, and formatting should be specified before float-heavy native tests.
+Deferred: final backend technology selection.
 
-### `bool`
+This note does not accept Cranelift, LLVM, C, a debug interpreter, or any other route as the final backend choice.
 
-Recommendation: treat `bool` as a semantic Doria boolean. The backend may choose an internal machine representation, such as 1 byte or 32 bits, as long as Doria-visible behavior is fixed.
-
-Tradeoff: backend-native booleans are convenient, but ABI exposure and memory layout will matter later for objects, arrays, FFI, and packed data.
-
-### `void`
-
-Recommendation: `void` has no runtime value.
-
-Tradeoff: this is straightforward for functions, but expression-position `void` rules should remain explicit if Doria later adds expression-oriented control flow.
-
-### `null`
-
-Recommendation: defer final native representation until nullable types, object references, and runtime values are specified.
-
-Options include a dedicated singleton value, a tagged value representation, or null pointer representation for reference-like values. The first native smoke target does not need `null`.
-
-### `string`
-
-Recommendation: defer string representation until Stage 6.
-
-String decisions affect literals, interpolation, stdout, ownership, allocation, encoding, slices, FFI, object display hooks, and collections. They should not be smuggled into Stage 1.
-
-## Backend route options
-
-No backend route is accepted by this proposed note. The options below frame the tradeoffs.
+Backend options to evaluate separately:
 
 | Route | Strengths | Risks |
 | --- | --- | --- |
@@ -207,57 +223,11 @@ No backend route is accepted by this proposed note. The options below frame the 
 | C backend as bootstrap/native portability bridge | Can produce native executables through existing C compilers, useful for portability experiments and simple inspection. | C semantics can leak into Doria if not guarded; object/layout/runtime details still need explicit design; generated C is another backend output, not an oracle. |
 | Interpreter/debug backend | Excellent for correctness testing, simple expected-output checks, and backend-independent semantic validation. | Not a standalone native executable by itself; cannot satisfy Stage 1 unless paired with a native wrapper/runtime; may delay first binary if treated as a prerequisite. |
 
-Assessment in Doria terms:
-
-```text
-Correctness:
-  Debug interpreter is strongest as a semantic test tool.
-  Any native backend is acceptable only after semantic checks and Doria IR remain authoritative.
-
-Implementation complexity:
-  Debug interpreter and tiny Cranelift smoke backend are likely simpler than LLVM.
-  C backend may look simple but shifts complexity into C semantics and toolchain behavior.
-
-Windows/macOS/Linux:
-  LLVM and C compilers have broad coverage.
-  Cranelift can be practical but target support and object/linking details must be checked.
-  Debug interpreter is easiest to run cross-platform but is not the final native target.
-
-Speed to first native executable:
-  Cranelift or C are likely fastest.
-  LLVM may be slower to integrate.
-  Debug interpreter is fastest for execution semantics but not standalone native output.
-
-Long-term optimization potential:
-  LLVM is strongest.
-  Cranelift may be enough for a long time depending on Doria's goals.
-  C inherits host compiler optimization but weakens control over semantics.
-  Interpreter is not an optimization path.
-
-Debugging and testability:
-  Debug interpreter is strongest.
-  C output can be inspected.
-  LLVM/Cranelift need good IR dumps and smoke tests.
-
-Dependency burden:
-  Debug interpreter has the least dependency burden.
-  Cranelift is moderate.
-  LLVM is heavy.
-  C backend depends on external system toolchains.
-
-Fit with self-hosting:
-  A simple Doria-owned interpreter or native-oriented IR can be easier to port later.
-  LLVM/Cranelift integration may remain in Rust or a low-level host layer for a long time.
-  C output can support bootstrapping experiments but should not define Doria.
-```
-
-Recommendation: use a tiny debug interpreter as a correctness aid if it helps, and favor a Cranelift smoke backend for the first standalone native executable if its object/linking path is acceptable. Revisit LLVM and C backend tradeoffs after the native-oriented IR shape is clearer.
-
-This is a recommendation, not a settled decision.
+Recommendation, not accepted decision: evaluate a small Cranelift smoke backend first if its object/linking path is acceptable, and consider a tiny debug interpreter as a correctness aid. Revisit LLVM and C backend tradeoffs after the native-oriented IR shape is clearer.
 
 ## Doria IR and native-oriented IR boundary
 
-Doria IR remains the checked compiler-owned representation.
+Doria IR is the checked compiler-owned representation.
 
 A later native-oriented lowered IR may be useful for:
 
@@ -278,7 +248,7 @@ Do not distort Doria IR to match Cranelift, LLVM, C, PHP, or any one backend. Do
 
 ## Runtime boundaries
 
-The first native smoke target:
+The Stage 1 native smoke target:
 
 ```doria
 function main(): int
@@ -333,7 +303,7 @@ List/Dictionary/Set
 
 ## Correctness gates for implementation
 
-Future native implementation should follow these gates:
+Future native implementation must follow these gates:
 
 ```text
 - Parser and semantic checks must pass before native lowering.
@@ -347,9 +317,11 @@ Future native implementation should follow these gates:
 - Any language-design fork discovered during backend work must stop for Andrew's decision.
 ```
 
-## Proposed first native tests
+## Future native tests
 
-These are proposed future tests only. This note does not add native tests.
+These are future implementation tests only. This decision note does not add native tests.
+
+Accepted Stage 1 success shape:
 
 ```doria
 function main(): int
@@ -357,6 +329,8 @@ function main(): int
     return 0;
 }
 ```
+
+Recommended later tests, after later stages are accepted:
 
 ```doria
 function main(): int
@@ -390,29 +364,31 @@ Potential early negative tests:
 ```text
 - native executable requested with no `main`
 - native executable requested with wrong `main` signature
+- native executable requested with top-level executable statements but no accepted native entrypoint
 - native executable requested with unsupported string/object/collection features before their stages
 - code rejected by semantic analysis is not lowered to native output
 ```
 
-## Open questions for Andrew
+## Deferred questions for Andrew
 
-These need review before implementation:
+These remain open beyond Stage 1:
 
 ```text
-1. Accept exactly one top-level `function main(): int` for Stage 1?
-2. Should `main(): void` ever be allowed for native executables?
-3. Should top-level statements become script mode, implicit main, module initialization, or compatibility-only execution?
-4. Should Doria define process exit-code range/truncation explicitly?
-5. Should early `int` semantics be fixed signed 64-bit?
-6. What should integer overflow do once arithmetic lands?
-7. Should the first standalone native backend use Cranelift, C, LLVM, or another path?
-8. Should a debug interpreter be built before, alongside, or after the first native executable smoke target?
-9. What diagnostics should distinguish general semantic errors from backend-unsupported native features?
+1. Should `main(): void` ever be allowed for native executables?
+2. Should top-level statements become script mode, implicit main, module initialization, or compatibility-only execution?
+3. Should Doria define process exit-code range/truncation explicitly?
+4. Should early arithmetic `int` semantics be fixed signed 64-bit?
+5. What should integer overflow do once arithmetic lands?
+6. Which backend route should implement the first and longer-term native paths?
+7. Should a debug interpreter be built before, alongside, or after the first native executable smoke target?
+8. What diagnostics should distinguish general semantic errors from backend-unsupported native features?
+9. What future argument-passing form should `main` use after strings and collections are designed?
+10. What future fallible/recoverable-error entrypoint form should exist after Doria's error model is designed?
 ```
 
-## Non-goals of this proposal
+## Non-goals of this decision
 
-This note does not:
+This decision does not:
 
 ```text
 - add Cranelift
@@ -421,10 +397,18 @@ This note does not:
 - add a debug interpreter
 - add a native backend module
 - change CLI behavior
-- change Doria semantics
-- add native tests
 - change Cargo dependencies
+- add native tests
 - change PHP backend behavior
+- settle final backend technology
+- settle strings
+- settle objects/classes/constructors
+- settle heap allocation
+- settle collections
+- settle FFI
+- settle standard library shape
+- settle recoverable errors
+- settle broad numeric semantics
 ```
 
-It only proposes the first native execution path and the questions that should be settled before implementation.
+It accepts only the Stage 1 native execution rule and its immediate correctness boundary.
