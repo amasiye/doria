@@ -85,13 +85,13 @@ fn compile_command(args: &[String]) -> Result<(), String> {
     }
 
     let (path, text) = read_source(input)?;
+    let out_path = match out {
+        Some(out) => PathBuf::from(out),
+        None => default_output_path(input, target)?,
+    };
     let output = doriac::compile_source(path.clone(), text.clone(), target)
         .map_err(|diagnostics| doriac::render_diagnostics(path, text, &diagnostics))?;
 
-    let out_path = match out {
-        Some(out) => PathBuf::from(out),
-        None => default_output_path(input, &output)?,
-    };
     write_backend_output(&out_path, output)?;
     println!("{}", out_path.display());
     Ok(())
@@ -145,29 +145,64 @@ fn write_backend_output(out_path: &Path, output: BackendOutput) -> Result<(), St
     }
 }
 
-fn default_output_path(input: &str, output: &BackendOutput) -> Result<PathBuf, String> {
+fn default_output_path(input: &str, target: BackendTarget) -> Result<PathBuf, String> {
     let stem = Path::new(input)
         .file_stem()
         .and_then(|stem| stem.to_str())
         .filter(|stem| !stem.is_empty())
         .ok_or_else(|| format!("cannot infer output file name from `{input}`"))?;
 
-    let extension = output_extension(output);
+    let extension = default_output_extension(target);
     let mut file_name = stem.to_string();
     if !extension.is_empty() {
         file_name.push('.');
         file_name.push_str(extension);
     }
 
-    Ok(PathBuf::from(file_name))
+    let output_path = PathBuf::from(file_name);
+    if inferred_output_aliases_input(input, &output_path)? {
+        return Err(format!(
+            "inferred output path `{}` would overwrite input `{}`; pass --out <file> to choose a different output path",
+            output_path.display(),
+            input
+        ));
+    }
+
+    Ok(output_path)
 }
 
-fn output_extension(output: &BackendOutput) -> &str {
-    match output {
-        BackendOutput::Text { extension, .. }
-        | BackendOutput::Binary { extension, .. }
-        | BackendOutput::Executable { extension, .. } => extension,
-        BackendOutput::Artifact { .. } => "",
+fn inferred_output_aliases_input(input: &str, output_path: &Path) -> Result<bool, String> {
+    let input_path = Path::new(input);
+    let input_canonical = fs::canonicalize(input_path)
+        .map_err(|error| format!("failed to resolve input path `{input}`: {error}"))?;
+
+    if let Ok(output_canonical) = fs::canonicalize(output_path) {
+        return Ok(output_canonical == input_canonical);
+    }
+
+    let output_absolute = if output_path.is_absolute() {
+        output_path.to_path_buf()
+    } else {
+        env::current_dir()
+            .map_err(|error| format!("failed to resolve current directory: {error}"))?
+            .join(output_path)
+    };
+
+    Ok(output_absolute == input_canonical)
+}
+
+fn default_output_extension(target: BackendTarget) -> &'static str {
+    match target {
+        BackendTarget::Native => {
+            if cfg!(windows) {
+                "exe"
+            } else {
+                ""
+            }
+        }
+        BackendTarget::Php => "php",
+        BackendTarget::Debug => "debug",
+        BackendTarget::Wasm => "wasm",
     }
 }
 

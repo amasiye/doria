@@ -78,6 +78,72 @@ echo "Hello from Doria\n";
     let _ = fs::remove_dir_all(temp_dir);
 }
 
+#[test]
+fn compile_rejects_inferred_native_output_that_would_overwrite_input() {
+    let temp_dir = temp_dir_path("native-overwrite-guard");
+    fs::create_dir_all(&temp_dir).expect("temp directory should be created");
+
+    let source = r#"
+function main(): int
+{
+    return 0;
+}
+"#;
+    let input_name = native_output_name("main");
+    fs::write(temp_dir.join(&input_name), source).expect("source file should be writable");
+
+    let compile = Command::new(doriac_bin())
+        .current_dir(&temp_dir)
+        .arg("compile")
+        .arg(&input_name)
+        .output()
+        .expect("doriac binary should run");
+
+    assert_failure_contains(
+        "native inferred output overwrite guard",
+        compile,
+        "would overwrite input",
+    );
+
+    let preserved =
+        fs::read_to_string(temp_dir.join(&input_name)).expect("source file should remain readable");
+    assert_eq!(preserved, source);
+
+    let _ = fs::remove_dir_all(temp_dir);
+}
+
+#[test]
+fn compile_rejects_inferred_php_output_that_would_overwrite_input() {
+    let temp_dir = temp_dir_path("php-overwrite-guard");
+    fs::create_dir_all(&temp_dir).expect("temp directory should be created");
+
+    let source = r#"
+echo "Hello from Doria\n";
+"#;
+    fs::write(temp_dir.join("main.php"), source).expect("source file should be writable");
+
+    let compile = Command::new(doriac_bin())
+        .current_dir(&temp_dir)
+        .arg("compile")
+        .arg("main.php")
+        .arg("--target")
+        .arg("php")
+        .output()
+        .expect("doriac binary should run");
+
+    assert_failure_contains(
+        "php inferred output overwrite guard",
+        compile,
+        "would overwrite input",
+    );
+
+    let preserved =
+        fs::read_to_string(temp_dir.join("main.php")).expect("source file should remain readable");
+    assert_eq!(preserved, source);
+
+    let _ = fs::remove_dir_all(temp_dir);
+}
+
 fn doriac_bin() -> &'static str {
     env!("CARGO_BIN_EXE_doriac")
 }
@@ -91,6 +157,19 @@ fn assert_success(label: &str, output: Output) {
             output.status, stdout, stderr
         );
     }
+}
+
+fn assert_failure_contains(label: &str, output: Output, expected: &str) {
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        panic!("{label} unexpectedly succeeded\nstdout:\n{stdout}");
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(expected),
+        "{label}: expected stderr containing `{expected}`, got `{stderr}`"
+    );
 }
 
 fn temp_dir_path(stem: &str) -> PathBuf {
