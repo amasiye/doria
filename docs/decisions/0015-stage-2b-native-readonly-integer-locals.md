@@ -179,7 +179,7 @@ function main(): int
 }
 ```
 
-The arithmetic, local-to-local initializer, returned expression, and control-flow cases are future Stage 2c, Stage 2d, or later native work. This proposal keeps Stage 2b intentionally smaller.
+The arithmetic and local-to-local initializer cases are accepted separately in `0017-stage-2c-native-int-arithmetic.md`. Returned arithmetic expressions and control flow remain Stage 2d or later native work.
 
 ## Doria integer range vs process exit-code range
 

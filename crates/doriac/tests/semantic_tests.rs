@@ -107,6 +107,52 @@ function main(): int
 }
 
 #[test]
+fn rejects_constant_integer_arithmetic_overflow_before_lowering() {
+    for source in [
+        r#"
+function main(): int
+{
+    return 9223372036854775807 + 1;
+}
+"#,
+        r#"
+function main(): int
+{
+    let $max = 9223372036854775807;
+    let $overflow = $max + 1;
+    return 0;
+}
+"#,
+        r#"
+function main(): int
+{
+    let $large = 4611686018427387904;
+    let $overflow = $large * 2;
+    return 0;
+}
+"#,
+    ] {
+        let check_err = doriac::check_source("test.doria", source)
+            .expect_err("semantic check should reject constant integer overflow");
+        assert!(
+            check_err
+                .iter()
+                .any(|diagnostic| diagnostic.code == "E0418"),
+            "expected E0418, got {check_err:?}"
+        );
+
+        let lower_err = doriac::lower_source("test.doria", source)
+            .expect_err("lowering should not run after semantic integer overflow failure");
+        assert!(
+            lower_err
+                .iter()
+                .any(|diagnostic| diagnostic.code == "E0418"),
+            "expected E0418, got {lower_err:?}"
+        );
+    }
+}
+
+#[test]
 fn checks_writable_local_assignment_compatibility() {
     doriac::check_source(
         "test.doria",

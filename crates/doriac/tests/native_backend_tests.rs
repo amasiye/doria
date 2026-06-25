@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use doriac::backend::BackendTarget;
 
 #[test]
-fn compiles_and_runs_stage_2b_native_smoke_examples() {
+fn compiles_and_runs_stage_2c_native_smoke_examples() {
     if !host_linker_is_available() {
         eprintln!(
             "native smoke test unavailable: host linker `{}` was not found",
@@ -37,6 +37,21 @@ fn compiles_and_runs_stage_2b_native_smoke_examples() {
         (
             "main_unused_large_local",
             "inline_main_unused_large_local.doria",
+            0,
+        ),
+        (
+            "main_int_arithmetic",
+            "examples/native/main_int_arithmetic.doria",
+            42,
+        ),
+        (
+            "main_local_to_local",
+            "inline_main_local_to_local.doria",
+            42,
+        ),
+        (
+            "main_negative_unused_local",
+            "inline_main_negative_unused_local.doria",
             0,
         ),
     ];
@@ -87,12 +102,31 @@ function main(): int
 }
 "#
         }
+        "main_local_to_local" => {
+            r#"
+function main(): int
+{
+    let $first = 42;
+    let $second = $first;
+    return $second;
+}
+"#
+        }
+        "main_negative_unused_local" => {
+            r#"
+function main(): int
+{
+    let $negative = 1 - 2;
+    return 0;
+}
+"#
+        }
         _ => unreachable!("unexpected inline native smoke source `{stem}`"),
     }
 }
 
 #[test]
-fn rejects_unsupported_stage_2b_native_shapes() {
+fn rejects_unsupported_stage_2c_native_shapes() {
     let cases = [
         ("no main", "", "B0001", "no native entrypoint found"),
         (
@@ -126,7 +160,7 @@ function main(): int
 }
 "#,
             "B0001",
-            "native Stage 2b exit code must be in the range 0..125",
+            "native Stage 2c exit code must be in the range 0..125",
         ),
         (
             "return 255",
@@ -137,7 +171,7 @@ function main(): int
 }
 "#,
             "B0001",
-            "native Stage 2b exit code must be in the range 0..125",
+            "native Stage 2c exit code must be in the range 0..125",
         ),
         (
             "return out of Doria int range",
@@ -193,7 +227,7 @@ function main(): int
 }
 "#,
             "B0001",
-            "native Stage 2b exit code must be in the range 0..125",
+            "native Stage 2c exit code must be in the range 0..125",
         ),
         (
             "return binary expression",
@@ -216,7 +250,7 @@ function main(): int
 }
 "#,
             "B0001",
-            "unsupported native local for Stage 2b",
+            "unsupported native local for Stage 2c",
         ),
         (
             "non-int local",
@@ -228,32 +262,19 @@ function main(): int
 }
 "#,
             "B0001",
-            "unsupported native local for Stage 2b",
+            "unsupported native local for Stage 2c",
         ),
         (
-            "local initialized from binary expression",
+            "local initialized from division",
             r#"
 function main(): int
 {
-    let $code = 20 + 22;
+    let $code = 84 / 2;
     return $code;
 }
 "#,
             "B0001",
-            "unsupported native local for Stage 2b",
-        ),
-        (
-            "local initialized from another local",
-            r#"
-function main(): int
-{
-    let $first = 42;
-    let $second = $first;
-    return $second;
-}
-"#,
-            "B0001",
-            "unsupported native local for Stage 2b",
+            "integer division and modulo need an accepted Doria semantics decision",
         ),
         (
             "local outside Doria int range",
@@ -266,6 +287,30 @@ function main(): int
 "#,
             "E0417",
             "integer literal is outside the Doria `int` range",
+        ),
+        (
+            "constant arithmetic overflow",
+            r#"
+function main(): int
+{
+    let $value = 9223372036854775807 + 1;
+    return 0;
+}
+"#,
+            "E0418",
+            "integer arithmetic overflows the Doria `int` range",
+        ),
+        (
+            "returned negative local outside exit-code range",
+            r#"
+function main(): int
+{
+    let $code = 1 - 2;
+    return $code;
+}
+"#,
+            "B0001",
+            "native Stage 2c exit code must be in the range 0..125",
         ),
         (
             "echo",
@@ -328,7 +373,7 @@ function main(): int
     for (name, source, expected_code, expected_message) in cases {
         let diagnostics =
             doriac::compile_source(format!("{name}.doria"), source, BackendTarget::Native)
-                .expect_err("unsupported native Stage 2b source should fail");
+                .expect_err("unsupported native Stage 2c source should fail");
 
         assert_eq!(diagnostics[0].code, expected_code, "{name}");
         assert!(
@@ -340,7 +385,7 @@ function main(): int
 }
 
 #[test]
-fn native_backend_returns_executable_output_for_stage_2b_literal_shape() {
+fn native_backend_returns_executable_output_for_stage_2c_literal_shape() {
     if !host_linker_is_available() {
         eprintln!(
             "native executable output test unavailable: host linker `{}` was not found",
@@ -359,7 +404,7 @@ function main(): int
 "#,
         BackendTarget::Native,
     )
-    .expect("Stage 2b source should compile");
+    .expect("Stage 2c source should compile");
 
     match output {
         doriac::backend::BackendOutput::Executable { bytes, .. } => {
@@ -370,7 +415,7 @@ function main(): int
 }
 
 #[test]
-fn native_backend_returns_executable_output_for_stage_2b_local_shape() {
+fn native_backend_returns_executable_output_for_stage_2c_arithmetic_shape() {
     if !host_linker_is_available() {
         eprintln!(
             "native executable output test unavailable: host linker `{}` was not found",
@@ -384,13 +429,14 @@ fn native_backend_returns_executable_output_for_stage_2b_local_shape() {
         r#"
 function main(): int
 {
-    let $code = 42;
+    let $base = 20;
+    let $code = $base * 2 + 2;
     return $code;
 }
 "#,
         BackendTarget::Native,
     )
-    .expect("Stage 2b local source should compile");
+    .expect("Stage 2c arithmetic source should compile");
 
     match output {
         doriac::backend::BackendOutput::Executable { bytes, .. } => {
@@ -418,7 +464,7 @@ fn compile_native_file(input: &Path, output: &Path) {
 
 fn compile_native_source(source: &str, output: &Path) {
     let native = doriac::compile_source("test.doria", source, BackendTarget::Native)
-        .expect("Stage 2b source should compile");
+        .expect("Stage 2c source should compile");
     let doriac::backend::BackendOutput::Executable { bytes, .. } = native else {
         panic!("native backend should return executable output, got {native:?}");
     };
