@@ -127,6 +127,13 @@ enum AssignmentDestination {
     Property { class_name: String, name: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IntConstantEval {
+    Known(i64),
+    Unknown,
+    Invalid,
+}
+
 impl<'program> Checker<'program> {
     fn new(program: &'program Program) -> Self {
         Self {
@@ -475,6 +482,7 @@ impl<'program> Checker<'program> {
                 Binding {
                     writable: param.writable,
                     ty,
+                    int_constant: None,
                 },
                 param.span,
             );
@@ -622,6 +630,12 @@ impl<'program> Checker<'program> {
                     Binding {
                         writable: decl.writable,
                         ty,
+                        int_constant: self.readonly_int_constant(
+                            decl.writable,
+                            ty,
+                            &decl.initializer,
+                            scopes,
+                        ),
                     },
                     decl.span,
                 );
@@ -734,6 +748,7 @@ impl<'program> Checker<'program> {
                         Binding {
                             writable: false,
                             ty,
+                            int_constant: None,
                         },
                         foreach.span,
                     );
@@ -750,6 +765,7 @@ impl<'program> Checker<'program> {
                     Binding {
                         writable: false,
                         ty: value_ty,
+                        int_constant: None,
                     },
                     foreach.span,
                 );
@@ -1087,9 +1103,15 @@ impl<'program> Checker<'program> {
                     self.check_constructor_call(class_name, args, *span, scopes, method_context);
                 }
             }
-            Expr::Binary { left, right, .. } => {
+            Expr::Binary {
+                left,
+                op,
+                right,
+                span,
+            } => {
                 self.check_expr(left, scopes, method_context);
                 self.check_expr(right, scopes, method_context);
+                self.check_int_constant_arithmetic(left, op, right, *span, scopes);
             }
             Expr::Identifier { .. }
             | Expr::String { .. }
@@ -1107,6 +1129,98 @@ impl<'program> Checker<'program> {
                 "integer literal is outside the Doria `int` range",
                 span,
             ));
+        }
+    }
+
+    fn check_int_constant_arithmetic(
+        &mut self,
+        left: &Expr,
+        op: &BinaryOp,
+        right: &Expr,
+        span: Span,
+        scopes: &ScopeStack,
+    ) {
+        if !Self::is_stage_2c_checked_arithmetic_op(op) {
+            return;
+        }
+
+        let (IntConstantEval::Known(left), IntConstantEval::Known(right)) = (
+            Self::eval_int_constant(left, scopes),
+            Self::eval_int_constant(right, scopes),
+        ) else {
+            return;
+        };
+
+        if Self::checked_stage_2c_arithmetic(left, op, right).is_some() {
+            return;
+        }
+
+        self.diagnostics.push(Diagnostic::new(
+            "E0418",
+            "integer arithmetic overflows the Doria `int` range",
+            span,
+        ));
+    }
+
+    fn readonly_int_constant(
+        &self,
+        writable: bool,
+        ty: TypeId,
+        initializer: &Expr,
+        scopes: &ScopeStack,
+    ) -> Option<i64> {
+        if writable || !matches!(self.types.kind(ty), TypeKind::Int) {
+            return None;
+        }
+
+        match Self::eval_int_constant(initializer, scopes) {
+            IntConstantEval::Known(value) => Some(value),
+            IntConstantEval::Unknown | IntConstantEval::Invalid => None,
+        }
+    }
+
+    fn eval_int_constant(expr: &Expr, scopes: &ScopeStack) -> IntConstantEval {
+        match expr {
+            Expr::Int { value, .. } => value
+                .parse::<i64>()
+                .map(IntConstantEval::Known)
+                .unwrap_or(IntConstantEval::Invalid),
+            Expr::Variable { name, .. } => scopes
+                .lookup(name)
+                .and_then(|binding| binding.int_constant)
+                .map(IntConstantEval::Known)
+                .unwrap_or(IntConstantEval::Unknown),
+            Expr::Binary {
+                left, op, right, ..
+            } if Self::is_stage_2c_checked_arithmetic_op(op) => {
+                let left = Self::eval_int_constant(left, scopes);
+                let right = Self::eval_int_constant(right, scopes);
+                match (left, right) {
+                    (IntConstantEval::Known(left), IntConstantEval::Known(right)) => {
+                        Self::checked_stage_2c_arithmetic(left, op, right)
+                            .map(IntConstantEval::Known)
+                            .unwrap_or(IntConstantEval::Invalid)
+                    }
+                    (IntConstantEval::Invalid, _) | (_, IntConstantEval::Invalid) => {
+                        IntConstantEval::Invalid
+                    }
+                    _ => IntConstantEval::Unknown,
+                }
+            }
+            _ => IntConstantEval::Unknown,
+        }
+    }
+
+    fn is_stage_2c_checked_arithmetic_op(op: &BinaryOp) -> bool {
+        matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul)
+    }
+
+    fn checked_stage_2c_arithmetic(left: i64, op: &BinaryOp, right: i64) -> Option<i64> {
+        match op {
+            BinaryOp::Add => left.checked_add(right),
+            BinaryOp::Sub => left.checked_sub(right),
+            BinaryOp::Mul => left.checked_mul(right),
+            _ => None,
         }
     }
 

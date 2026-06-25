@@ -40,7 +40,7 @@ Those features require answers for:
 - how Cranelift fast profile and future LLVM optimized profile remain semantically identical
 ```
 
-This decision accepts the Stage 2 native integer direction and the narrow Stage 2a implementation path. The current implementation supports Stage 2a only; Stage 2b, Stage 2c, and Stage 2d remain future implementation slices.
+This decision accepts the Stage 2 native integer direction and the narrow Stage 2a implementation path. Stage 2b readonly integer locals are accepted separately in `0015-stage-2b-native-readonly-integer-locals.md`. Stage 2c integer arithmetic is accepted separately in `0017-stage-2c-native-int-arithmetic.md`. Stage 2d remains a future implementation slice.
 
 ## Decision summary
 
@@ -80,7 +80,7 @@ Stage 2d:
   Support returning simple integer expressions from `main`.
 ```
 
-Stage 2a is the current accepted and implemented native integer slice. Stage 2b, Stage 2c, and Stage 2d remain separate future implementation slices and should not be treated as implemented or ready to implement by this decision alone.
+Stage 2a is the first accepted and implemented native integer slice. Stage 2b is accepted separately in `0015-stage-2b-native-readonly-integer-locals.md`. Stage 2c is accepted separately in `0017-stage-2c-native-int-arithmetic.md`. Stage 2d remains a separate future implementation slice and should not be treated as implemented or ready to implement by this decision alone.
 
 Rationale:
 
@@ -169,7 +169,7 @@ Use fixed-width signed 64-bit `int` for early native semantics.
 
 Doria `int` is a fixed-width signed 64-bit integer for early native integer semantics. Cranelift and LLVM should lower Doria `int` according to this Doria decision, not according to backend defaults.
 
-Explicit sized integer families may be designed later for FFI, binary formats, graphics, game engines, and systems APIs. They are not part of Stage 2a.
+Explicit fixed-width numeric spellings are accepted separately in `0016-fixed-width-numeric-types.md` for FFI, binary formats, graphics, game engines, and systems APIs. They are not implemented by Stage 2a.
 
 ## Integer literal rules
 
@@ -341,7 +341,7 @@ Stage 2a must not compile:
 - standard library runtime
 ```
 
-Those belong to later accepted native slices. Stage 2b, Stage 2c, and Stage 2d remain future work.
+Those belong to later accepted native slices. Stage 2b is accepted separately in `0015-stage-2b-native-readonly-integer-locals.md`; Stage 2c is accepted separately in `0017-stage-2c-native-int-arithmetic.md`; Stage 2d remains future work.
 
 ## Conformance expectations
 

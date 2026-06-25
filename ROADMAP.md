@@ -10,6 +10,7 @@
 - Move toward **self-hosting**: `doriac` is initially implemented in Rust, but an early language-development goal is to eventually write significant parts of `doriac` in Doria itself.
 - Support Doria language features that PHP cannot express directly, including executable property initializers and richer attribute/metadata expressions.
 - Eventually support PHP-to-Doria migration tooling, while keeping that tooling separate from the Doria parser and core compiler semantics.
+- Establish Baton as Doria's planned project, package, build, and application orchestration tool while keeping `doriac` as the compiler.
 - Build a benchmark culture early: measure speed, memory, compile time, startup time, and artifact size before making performance claims.
 
 ## Current Slice
@@ -20,7 +21,7 @@
 - Allow constructors to initialize uninitialized readonly properties through narrow direct init access.
 - Support MVP `if` / `else if` / `else` and `while` in the AST, semantic checker, Doria IR, and PHP backend.
 - Represent braced string interpolation in the Doria AST and Doria IR, with PHP lowering emitted as explicit concatenation.
-- Stage 2a Cranelift native smoke backend is implemented for exactly one top-level `function main(): int` returning an integer literal in the portable `0..125` exit-code range.
+- Stage 2c Cranelift native smoke backend is implemented for exactly one top-level `function main(): int` with supported readonly integer locals and `+`/`-`/`*` arithmetic, followed by a final return of an integer literal or supported readonly local in the portable `0..125` exit-code range.
 - Keep PHP as a compatibility backend only; do not treat PHP output as the proof that Doria semantics are correct.
 - Do not build PHP-to-Doria migration in the current v0.1 slice.
 - Do not start desktop, game engine, raylib, or FFI implementation work in the current v0.1 slice.
@@ -30,9 +31,13 @@
 - Treat `docs/decisions/0011-native-execution-path.md` as the accepted Stage 1 native execution path.
 - Follow the accepted staged Cranelift/LLVM native backend direction: Cranelift first for the smallest native smoke/backend route, LLVM later as the longer-term optimizing backend path.
 - Treat `docs/decisions/0013-stage-2-native-integers.md` as the accepted Stage 2 native integer execution decision.
-- Keep Stage 2b readonly integer locals, Stage 2c simple integer arithmetic, and Stage 2d returned integer expressions as separate future implementation slices after Stage 2a.
+- Treat `docs/decisions/0015-stage-2b-native-readonly-integer-locals.md` as the accepted Stage 2b native readonly integer locals decision.
+- Treat `docs/decisions/0016-fixed-width-numeric-types.md` as the accepted fixed-width numeric family and default numeric spelling decision.
+- Treat `docs/decisions/0017-stage-2c-native-int-arithmetic.md` as the accepted Stage 2c native integer arithmetic decision.
+- Keep Stage 2d returned integer expressions as a separate future implementation slice after Stage 2c.
+- Add compiler support for `int8`/`int16`/`int32`/`int64`, `uint8`/`uint16`/`uint32`/`uint64`, and `float32`/`float64` in a dedicated typed semantic model slice before claiming those spellings are implemented.
 - Plan a lowered/native IR when native code generation needs a simpler representation for control flow, memory layout, runtime calls, and backend emission.
-- Expand native support beyond Stage 2a only after the next accepted native slice specifies the language semantics and expected behavior.
+- Expand native support beyond Stage 2c only after the next accepted native slice specifies the language semantics and expected behavior.
 - Keep future LLVM optimized-profile work conformant with accepted Doria integer semantics and Cranelift fast-profile behavior for the same supported programs.
 - Expand return checking from the current final-statement rule into full path-sensitive control-flow analysis.
 - Add full definite property initialization analysis for constructor paths.
@@ -54,6 +59,33 @@
 - Keep native desktop, game engine, and raylib goals visible when designing Doria IR, runtime, memory representation, and FFI.
 - Require conformance tests once Cranelift and LLVM both support the same native feature: same Doria source, same semantic checks, same Doria-visible behavior.
 - Do not begin raylib bindings until native backend, FFI model, and basic runtime are ready.
+
+## Baton Project Tool Path
+
+Baton is planned project tooling. It should not move ahead of current compiler correctness work unless explicitly directed later.
+
+Future Baton work should proceed in stages:
+
+1. Accepted product identity and responsibility boundary: Baton is the project/package/build tool; `doriac` is the compiler; Doria semantics remain owned by the language specification and compiler.
+2. Manifest and lockfile design: decide file names, package metadata, dependency syntax, lockfile guarantees, and reproducibility rules in separate decisions.
+3. Project creation: design project initialization, default layout, examples, and starter application shape.
+4. Build orchestration: define the public write/build/run path without exposing compiler internals as the primary workflow.
+5. Compiler invocation: decide how Baton invokes `doriac`, passes profiles/options, receives diagnostics, and preserves compiler-owned semantics.
+6. Dependency resolution: design version constraints, source kinds, conflict resolution, and diagnostics.
+7. Local/package cache: define where packages and build artifacts live and how cache invalidation works.
+8. Workspaces: design multi-package repositories and shared dependency resolution.
+9. Testing integration: define how Baton discovers and runs tests without becoming a separate language runtime.
+10. Package registry and publication: design registry interaction, publication checks, package metadata, and yanking/deprecation policy.
+11. Security, integrity, and reproducibility: design checksums, signing or trust model, supply-chain protections, offline behavior, and deterministic build inputs.
+
+Throughout this path, Baton may orchestrate the accepted native profiles:
+
+```text
+Fast native profile       -> Cranelift
+Optimized native profile  -> LLVM
+```
+
+Baton must not change Doria-visible semantics between profiles.
 
 ## PHP Migration Path
 

@@ -1,0 +1,6 @@
+function main(): int
+{
+    let $base = 20;
+    let $code = $base * 2 + 2;
+    return $code;
+}

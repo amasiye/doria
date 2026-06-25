@@ -21,6 +21,8 @@ Doria may intentionally support features PHP cannot express directly, including 
 
 Doria may eventually include a PHP-to-Doria migration converter, but that converter is a migration tool, not the Doria parser and not the core compiler identity.
 
+The accepted project-tool name is Baton. Baton is the planned user-facing project, package, build, and application orchestration tool. `doriac` remains the compiler.
+
 ## Non-negotiable engineering guardrails
 
 - Correctness and accuracy outrank quick demos, fast runnable output, and compatibility shortcuts.
@@ -33,6 +35,33 @@ Doria may eventually include a PHP-to-Doria migration converter, but that conver
 - Do not implement a workaround that makes the current backend pass while leaving Doria semantics ambiguous.
 - Prefer clear unsupported-feature diagnostics over permissive behavior that may become wrong.
 - Preserve the ability to lower Doria to native code safely, even if the immediate task only touches frontend code or a compatibility backend.
+- Do not silently rename or replace Baton.
+- Do not claim Baton is implemented until it exists.
+- Do not turn Baton into a separate compiler or semantic authority.
+- Do not present `doriac check` as a mandatory public workflow stage.
+- Public onboarding uses write/build/run.
+- Compiler-oriented documentation may still document direct `doriac` commands.
+- If Baton design encounters an unresolved product or language fork, stop and ask Andrew.
+
+## Decision triage
+
+Stop and ask Andrew only when a decision affects one or more of:
+
+- Doria-visible language semantics
+- safety or memory guarantees
+- ABI or externally observable data layout
+- Cranelift/LLVM conformance
+- public APIs that would be costly to reverse
+- syntax, type conversions, ownership, destruction, or runtime behavior
+
+For reversible implementation details:
+
+- choose the simplest correct backend-independent option
+- explicitly record the assumption
+- test it
+- proceed without blocking
+
+At completion, report assumptions made and critical decisions encountered. If no critical decision requires Andrew's input, say so directly.
 
 ## Working rules
 
@@ -45,10 +74,13 @@ Doria may eventually include a PHP-to-Doria migration converter, but that conver
 - Do not let PHP backend needs leak into the parser, AST, semantic model, Doria IR, or native-oriented IR design.
 - For native work, keep the fast Cranelift profile and optimized LLVM profile semantically equivalent for supported code. Differences may be in compile time, optimization, debug information, and binary quality, not Doria behavior.
 - Do not let Cranelift or LLVM semantics decide Doria semantics. Backend-specific assumptions must remain behind Doria IR or native-oriented IR lowering.
+- Preserve the accepted fixed-width numeric direction: `int` means `int64`, `float` means `float64`, and the accepted explicit numeric spellings are `int8`/`int16`/`int32`/`int64`, `uint8`/`uint16`/`uint32`/`uint64`, and `float32`/`float64`.
+- Do not treat the native Stage 2a `0..125` process-exit range as the range of Doria integer values.
 - Do not reintroduce `public`, `protected`, or `private` as Doria member visibility modifiers. Doria class members are externally accessible by default; use `internal` for implementation details.
 - Keep `writable` and `internal` separate: `writable` controls mutation, while `internal` controls API surface.
 - Keep self-hosting in mind when designing compiler APIs, diagnostics, source management, Doria IR, and the standard library.
 - Keep native desktop, game engine, C-library binding, and raylib goals visible when designing Doria IR, future native-oriented IR, runtime, memory representation, FFI, and performance benchmarks.
+- Keep Baton architecturally outside the compiler pipeline. Baton may orchestrate projects and invoke `doriac`; it must not duplicate parsing, semantic analysis, type checking, Doria IR lowering, or code generation.
 - Keep executable initializers and attribute expressions represented as Doria concepts, not PHP workarounds.
 - Keep PHP-to-Doria migration architecturally separate from the Doria parser. The migration tool may parse PHP, but Doria itself should parse Doria.
 - Preserve readonly-by-default as the language default. Use class-level ergonomics such as `writable class`/`readonly class` before adding shorter aliases for `writable`.
@@ -97,4 +129,4 @@ Run backend-specific checks only when the touched task depends on that backend. 
 cargo run -p doriac -- compile examples/person.doria --target php --out build/person.php
 ```
 
-When a native backend target exists, native smoke tests must be part of the relevant definition of done. The current native target is the Stage 2a Cranelift-backed smoke backend only; do not treat it as full native code generation.
+When a native backend target exists, native smoke tests must be part of the relevant definition of done. The current native target is the Stage 2c Cranelift-backed smoke backend only; do not treat it as full native code generation.

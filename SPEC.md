@@ -12,6 +12,8 @@ Doria source files use the `.doria` extension and do not require `<?php` tags.
 
 The compiler is `doriac`. The current bootstrap implementation is written in Rust. Doria's primary target is native machine code and standalone executables. A strategic goal is for `doriac` to become increasingly self-hosted in Doria over time.
 
+Baton is planned external project tooling for project, package, build, and application orchestration. Baton does not define Doria semantics and is not part of the compiler pipeline.
+
 The compiler architecture is backend-independent:
 
 ```text
@@ -62,7 +64,7 @@ Valid PHP should be easy to migrate to Doria, but Doria-specific syntax does not
 
 Doria does not use `public`, `protected`, or `private` as member visibility modifiers. Class members are externally accessible by default, and `internal` marks implementation details.
 
-The current compiler implementation produces only Stage 2a native smoke executables for exactly one top-level `function main(): int` returning an integer literal in the accepted `0..125` portable exit-code range. It is not yet full native code generation, a package manager, reflection system, macro system, async runtime, PHP migration converter, or full standard library. That implementation status does not make PHP transpilation the language goal.
+The current compiler implementation produces only Stage 2c native smoke executables for exactly one top-level `function main(): int` with supported readonly integer locals and `+`/`-`/`*` arithmetic, followed by a final return of an integer literal or supported readonly local in the accepted `0..125` portable exit-code range. It is not yet full native code generation, a package manager, reflection system, macro system, async runtime, PHP migration converter, or full standard library. That implementation status does not make PHP transpilation the language goal.
 
 Doria is not a Rust language. Rust is the current bootstrap implementation language for `doriac`, not the permanent identity of the compiler.
 
@@ -245,12 +247,22 @@ See `docs/api-design-guidelines.md` for the detailed design notes.
 
 ## 7. Basic type system
 
-The MVP type names are:
+Accepted type-position names include:
 
 ```text
 void
 int
+int8
+int16
+int32
+int64
+uint8
+uint16
+uint32
+uint64
 float
+float32
+float64
 string
 bool
 null
@@ -273,7 +285,9 @@ TypeKind     resolved semantic type shape
 
 The semantic model also has an internal `Unknown` recovery type for diagnostics and error recovery; it is not the normal spelling for user-authored type declarations.
 
-Lowercase primitive names are type-position names: `int`, `float`, `string`, `bool`, `object`, and `resource`. PascalCase names such as `Int`, `Float`, `String`, `Bool`, `Object`, and `Resource` are reserved for future expression-level standard-library/helper APIs. They are not primitive type spellings, and primitive type names are not namespaces. Future code should prefer APIs such as `Int::parse(...)`, but companion semantics are not part of the current implementation.
+Lowercase primitive names are type-position names: `int`, `int8`, `int16`, `int32`, `int64`, `uint8`, `uint16`, `uint32`, `uint64`, `float`, `float32`, `float64`, `string`, `bool`, `object`, and `resource`. `int` means `int64`; `float` means `float64`. PascalCase names such as `Int`, `Float`, `String`, `Bool`, `Object`, and `Resource` are reserved for future expression-level standard-library/helper APIs. They are not primitive type spellings, and primitive type names are not namespaces. Future code should prefer APIs such as `Int::parse(...)`, but companion semantics are not part of the current implementation.
+
+The fixed-width numeric type family is accepted in `docs/decisions/0016-fixed-width-numeric-types.md`. Current compiler support may lag this accepted direction until the lexer, parser, semantic type model, Doria IR, and backends are updated.
 
 Collection aliases have fixed arity:
 
@@ -309,7 +323,7 @@ Interpolated strings are represented in the AST and Doria IR as string parts bef
 
 Interpolated values may currently be `string`, `int`, `float`, `bool`, `null`, `mixed`, or the internal `Unknown` recovery type. Class values, `object`, `resource`, `List<T>`, `Dictionary<K, V>`, and `Set<T>` are rejected until Doria has a deliberate display/string-conversion design.
 
-Numeric widening is not implemented yet; for now `float` is not assignable from `int`, and `int` is not assignable from `float`. Any future safe numeric widening should be a separate design decision. Named arguments and richer call argument representation are separate future slices.
+Numeric widening is not implemented yet; for now `float` is not assignable from `int`, and `int` is not assignable from `float`. The accepted fixed-width numeric family also does not imply implicit widening, narrowing, or scalar coercion. Any future safe numeric widening should be a separate design decision. Named arguments and richer call argument representation are separate future slices.
 
 Simple collection literals infer collection element/key/value types when all clear parts match. Clear heterogeneous collection literals, such as `[1, "two"]`, are rejected by narrow collection alias assignment checks rather than being erased to `Unknown`. The empty literal `[]` stays ambiguous so typed contexts may use it as an empty `List<T>` or `Dictionary<K, V>`. The PHP-compatible `array` annotation remains broad enough to accept list-shaped and dictionary-shaped literals for now, but `array` is not the desired long-term collection model.
 
@@ -501,7 +515,7 @@ Doria IR is the checked compiler-owned representation of a Doria program. After 
 
 As native code generation matures, Doria IR may lower into a simpler native-oriented IR for control flow, memory layout, runtime calls, and backend code generation.
 
-The native backend is the primary target. It should lower Doria IR, and any later native-oriented IR, toward native machine code and standalone executables. The current Cranelift-backed native backend is deliberately limited to the accepted Stage 2a smoke entrypoint: exactly one top-level `function main(): int` returning an integer literal in `0..125`. It emits unsupported-feature diagnostics for locals, arithmetic, strings, `if` / `while`, classes, collections, and broader valid Doria until later native slices are designed.
+The native backend is the primary target. It should lower Doria IR, and any later native-oriented IR, toward native machine code and standalone executables. The current Cranelift-backed native backend is deliberately limited to the accepted Stage 2c smoke entrypoint: exactly one top-level `function main(): int` with supported readonly integer locals and `+`/`-`/`*` arithmetic, followed by a final return of an integer literal or supported readonly local in `0..125`. It emits unsupported-feature diagnostics for writable locals, non-integer locals, division/modulo, direct returned arithmetic expressions, strings, `if` / `while`, classes, collections, and broader valid Doria until later native slices are designed.
 
 The PHP backend is currently implemented as a compatibility/debugging backend. It emits `<?php` and lowers Doria-only syntax away:
 
@@ -530,9 +544,9 @@ Future work includes:
 - Full path-sensitive control-flow analysis for returns and constructor initialization.
 - Advanced control-flow design for `do ... while ... finally`, `given ... when`, `given ... while`, `if` chains with possible `finally`, value-returning `when`, and `match`.
 - Async/await and structured concurrency.
-- Broader native backend design and implementation beyond the Stage 2a smoke target.
+- Broader native backend design and implementation beyond the Stage 2c smoke target.
 - Native-oriented IR implementation when native code generation needs it.
-- Broader native code generation and standalone executable production beyond the Stage 2a smoke target.
+- Broader native code generation and standalone executable production beyond the Stage 2c smoke target.
 - Self-hosting path for writing more of `doriac` in Doria.
 - PHP-to-Doria migration tooling.
 - Package management.
