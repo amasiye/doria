@@ -25,6 +25,11 @@ fn compiles_and_runs_stage_2c_native_smoke_examples() {
         ("main_return_42", "examples/native/main_return_42.doria", 42),
         ("main_return_125", "inline_main_return_125.doria", 125),
         (
+            "main_return_arithmetic_literal",
+            "inline_main_return_arithmetic_literal.doria",
+            42,
+        ),
+        (
             "main_readonly_local",
             "examples/native/main_readonly_local.doria",
             42,
@@ -40,8 +45,18 @@ fn compiles_and_runs_stage_2c_native_smoke_examples() {
             0,
         ),
         (
-            "main_int_arithmetic",
-            "examples/native/main_int_arithmetic.doria",
+            "main_arithmetic_42",
+            "examples/native/main_arithmetic_42.doria",
+            42,
+        ),
+        (
+            "main_return_arithmetic_locals",
+            "inline_main_return_arithmetic_locals.doria",
+            42,
+        ),
+        (
+            "main_product_arithmetic_local",
+            "inline_main_product_arithmetic_local.doria",
             42,
         ),
         (
@@ -52,6 +67,11 @@ fn compiles_and_runs_stage_2c_native_smoke_examples() {
         (
             "main_negative_unused_local",
             "inline_main_negative_unused_local.doria",
+            0,
+        ),
+        (
+            "main_unused_arithmetic_126",
+            "inline_main_unused_arithmetic_126.doria",
             0,
         ),
     ];
@@ -81,6 +101,14 @@ fn native_smoke_source(stem: &str) -> &'static str {
 function main(): int
 {
     return 125;
+}
+"#
+        }
+        "main_return_arithmetic_literal" => {
+            r#"
+function main(): int
+{
+    return 20 + 22;
 }
 "#
         }
@@ -117,6 +145,36 @@ function main(): int
 function main(): int
 {
     let $negative = 1 - 2;
+    return 0;
+}
+"#
+        }
+        "main_return_arithmetic_locals" => {
+            r#"
+function main(): int
+{
+    let $left = 20;
+    let $right = 22;
+    return $left + $right;
+}
+"#
+        }
+        "main_product_arithmetic_local" => {
+            r#"
+function main(): int
+{
+    let $base = 6;
+    let $scale = 7;
+    let $code = $base * $scale;
+    return $code;
+}
+"#
+        }
+        "main_unused_arithmetic_126" => {
+            r#"
+function main(): int
+{
+    let $value = 100 + 26;
     return 0;
 }
 "#
@@ -230,15 +288,27 @@ function main(): int
             "native Stage 2c exit code must be in the range 0..125",
         ),
         (
-            "return binary expression",
+            "return arithmetic outside exit-code range",
             r#"
 function main(): int
 {
-    return 20 + 22;
+    return 100 + 26;
 }
 "#,
             "B0001",
-            "expected integer literal or readonly integer local",
+            "native Stage 2c exit code must be in the range 0..125",
+        ),
+        (
+            "returned arithmetic local outside exit-code range",
+            r#"
+function main(): int
+{
+    let $value = 100 + 26;
+    return $value;
+}
+"#,
+            "B0001",
+            "native Stage 2c exit code must be in the range 0..125",
         ),
         (
             "writable local",
@@ -265,6 +335,28 @@ function main(): int
             "unsupported native local for Stage 2c",
         ),
         (
+            "return division",
+            r#"
+function main(): int
+{
+    return 42 / 1;
+}
+"#,
+            "B0001",
+            "unsupported native arithmetic operator for Stage 2c",
+        ),
+        (
+            "return modulo",
+            r#"
+function main(): int
+{
+    return 42 % 5;
+}
+"#,
+            "B0001",
+            "unsupported native arithmetic operator for Stage 2c",
+        ),
+        (
             "local initialized from division",
             r#"
 function main(): int
@@ -274,7 +366,19 @@ function main(): int
 }
 "#,
             "B0001",
-            "integer division and modulo need an accepted Doria semantics decision",
+            "unsupported native arithmetic operator for Stage 2c",
+        ),
+        (
+            "local initialized from function call",
+            r#"
+function main(): int
+{
+    let $code = calculate();
+    return $code;
+}
+"#,
+            "E0309",
+            "unknown function `calculate`",
         ),
         (
             "local outside Doria int range",
@@ -289,11 +393,34 @@ function main(): int
             "integer literal is outside the Doria `int` range",
         ),
         (
+            "return arithmetic overflow",
+            r#"
+function main(): int
+{
+    return 9223372036854775807 + 1;
+}
+"#,
+            "E0418",
+            "integer arithmetic overflows the Doria `int` range",
+        ),
+        (
             "constant arithmetic overflow",
             r#"
 function main(): int
 {
     let $value = 9223372036854775807 + 1;
+    return 0;
+}
+"#,
+            "E0418",
+            "integer arithmetic overflows the Doria `int` range",
+        ),
+        (
+            "constant multiplication overflow",
+            r#"
+function main(): int
+{
+    let $value = 9223372036854775807 * 2;
     return 0;
 }
 "#,

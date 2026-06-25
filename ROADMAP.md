@@ -21,7 +21,7 @@
 - Allow constructors to initialize uninitialized readonly properties through narrow direct init access.
 - Support MVP `if` / `else if` / `else` and `while` in the AST, semantic checker, Doria IR, and PHP backend.
 - Represent braced string interpolation in the Doria AST and Doria IR, with PHP lowering emitted as explicit concatenation.
-- Stage 2c Cranelift native smoke backend is implemented for exactly one top-level `function main(): int` with supported readonly integer locals and `+`/`-`/`*` arithmetic, followed by a final return of an integer literal or supported readonly local in the portable `0..125` exit-code range.
+- Stage 2c Cranelift native smoke backend is implemented for exactly one top-level `function main(): int` with supported readonly integer locals and `+`/`-`/`*` arithmetic, followed by a final return of a supported integer expression in the portable `0..125` exit-code range.
 - Keep PHP as a compatibility backend only; do not treat PHP output as the proof that Doria semantics are correct.
 - Do not build PHP-to-Doria migration in the current v0.1 slice.
 - Do not start desktop, game engine, raylib, or FFI implementation work in the current v0.1 slice.
@@ -34,7 +34,7 @@
 - Treat `docs/decisions/0015-stage-2b-native-readonly-integer-locals.md` as the accepted Stage 2b native readonly integer locals decision.
 - Treat `docs/decisions/0016-fixed-width-numeric-types.md` as the accepted fixed-width numeric family and default numeric spelling decision.
 - Treat `docs/decisions/0017-stage-2c-native-int-arithmetic.md` as the accepted Stage 2c native integer arithmetic decision.
-- Keep Stage 2d returned integer expressions as a separate future implementation slice after Stage 2c.
+- Keep broader native expression lowering as a separate future implementation slice after Stage 2c.
 - Add compiler support for `int8`/`int16`/`int32`/`int64`, `uint8`/`uint16`/`uint32`/`uint64`, and `float32`/`float64` in a dedicated typed semantic model slice before claiming those spellings are implemented.
 - Plan a lowered/native IR when native code generation needs a simpler representation for control flow, memory layout, runtime calls, and backend emission.
 - Expand native support beyond Stage 2c only after the next accepted native slice specifies the language semantics and expected behavior.

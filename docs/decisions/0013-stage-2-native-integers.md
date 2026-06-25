@@ -77,7 +77,7 @@ Stage 2c:
   Support simple integer arithmetic expressions with literals and locals.
 
 Stage 2d:
-  Support returning simple integer expressions from `main`.
+  Support broader native expression lowering after the Stage 2c arithmetic smoke slice.
 ```
 
 Stage 2a is the first accepted and implemented native integer slice. Stage 2b is accepted separately in `0015-stage-2b-native-readonly-integer-locals.md`. Stage 2c is accepted separately in `0017-stage-2c-native-int-arithmetic.md`. Stage 2d remains a separate future implementation slice and should not be treated as implemented or ready to implement by this decision alone.
@@ -88,7 +88,7 @@ Rationale:
 - Stage 2a isolates process exit-code mapping from general integer arithmetic.
 - Stage 2b adds local storage without arithmetic overflow.
 - Stage 2c forces arithmetic semantics and overflow diagnostics into the open.
-- Stage 2d proves returned expressions without broadening the language into control flow, calls, strings, or runtime support.
+- Stage 2d can broaden native expression lowering after the arithmetic-only smoke slice.
 ```
 
 ## `int` representation options
@@ -224,7 +224,7 @@ For Stage 2a:
 - arithmetic is not supported, so arithmetic overflow is not yet applicable
 - out-of-range integer literals are rejected before native lowering
 
-For future Stage 2c:
+For Stage 2c:
 - compile-time constant overflow should be rejected before native lowering
 - non-constant runtime overflow remains deferred until Doria has an accepted panic/error/runtime policy
 ```
@@ -398,7 +398,7 @@ This decision resolves:
 1. Early Doria `int` is signed 64-bit.
 2. Stage 2a uses exit-code range `0..125`.
 3. Negative integer expressions remain out of scope until unary operators are specified.
-4. Future Stage 2c should reject compile-time constant overflow before native lowering.
+4. Stage 2c rejects compile-time constant overflow before native lowering.
 5. Non-constant runtime overflow remains deferred until Doria has an accepted panic/error/runtime policy.
 ```
 

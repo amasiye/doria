@@ -64,7 +64,7 @@ Valid PHP should be easy to migrate to Doria, but Doria-specific syntax does not
 
 Doria does not use `public`, `protected`, or `private` as member visibility modifiers. Class members are externally accessible by default, and `internal` marks implementation details.
 
-The current compiler implementation produces only Stage 2c native smoke executables for exactly one top-level `function main(): int` with supported readonly integer locals and `+`/`-`/`*` arithmetic, followed by a final return of an integer literal or supported readonly local in the accepted `0..125` portable exit-code range. It is not yet full native code generation, a package manager, reflection system, macro system, async runtime, PHP migration converter, or full standard library. That implementation status does not make PHP transpilation the language goal.
+The current compiler implementation produces only Stage 2c native smoke executables for exactly one top-level `function main(): int` with supported readonly integer locals and `+`/`-`/`*` arithmetic, followed by a final return of a supported integer expression in the accepted `0..125` portable exit-code range. It is not yet full native code generation, a package manager, reflection system, macro system, async runtime, PHP migration converter, or full standard library. That implementation status does not make PHP transpilation the language goal.
 
 Doria is not a Rust language. Rust is the current bootstrap implementation language for `doriac`, not the permanent identity of the compiler.
 
@@ -515,7 +515,7 @@ Doria IR is the checked compiler-owned representation of a Doria program. After 
 
 As native code generation matures, Doria IR may lower into a simpler native-oriented IR for control flow, memory layout, runtime calls, and backend code generation.
 
-The native backend is the primary target. It should lower Doria IR, and any later native-oriented IR, toward native machine code and standalone executables. The current Cranelift-backed native backend is deliberately limited to the accepted Stage 2c smoke entrypoint: exactly one top-level `function main(): int` with supported readonly integer locals and `+`/`-`/`*` arithmetic, followed by a final return of an integer literal or supported readonly local in `0..125`. It emits unsupported-feature diagnostics for writable locals, non-integer locals, division/modulo, direct returned arithmetic expressions, strings, `if` / `while`, classes, collections, and broader valid Doria until later native slices are designed.
+The native backend is the primary target. It should lower Doria IR, and any later native-oriented IR, toward native machine code and standalone executables. The current Cranelift-backed native backend is deliberately limited to the accepted Stage 2c smoke entrypoint: exactly one top-level `function main(): int` with supported readonly integer locals and `+`/`-`/`*` arithmetic, followed by a final return of a supported integer expression in `0..125`. It emits unsupported-feature diagnostics for writable locals, non-integer locals, division/modulo, strings, `if` / `while`, classes, collections, and broader valid Doria until later native slices are designed.
 
 The PHP backend is currently implemented as a compatibility/debugging backend. It emits `<?php` and lowers Doria-only syntax away:
 

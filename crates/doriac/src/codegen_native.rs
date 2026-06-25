@@ -79,7 +79,7 @@ pub fn validate_stage_2c(program: &hir::Program) -> Result<i32, BackendError> {
 
     let Some((return_statement, local_statements)) = main.body.statements.split_last() else {
         return Err(BackendError::new(
-            "unsupported native statement for Stage 2c: `main` must end with `return <portable integer literal or readonly integer local>;`",
+            "unsupported native statement for Stage 2c: `main` must end with `return <portable integer expression>;`",
         ));
     };
 
@@ -89,7 +89,7 @@ pub fn validate_stage_2c(program: &hir::Program) -> Result<i32, BackendError> {
             Stmt::VarDecl(decl) => validate_stage_2c_local(decl, &mut local_values)?,
             Stmt::Return { .. } => {
                 return Err(BackendError::new(
-                    "unsupported native statement for Stage 2c: no statements may follow `return <portable integer literal or readonly integer local>;`",
+                    "unsupported native statement for Stage 2c: no statements may follow `return <portable integer expression>;`",
                 ));
             }
             other => {
@@ -106,10 +106,10 @@ pub fn validate_stage_2c(program: &hir::Program) -> Result<i32, BackendError> {
             validate_stage_2c_return_expr(expr, &local_values)
         }
         Stmt::Return { expr: None, .. } => Err(BackendError::new(
-            "unsupported native statement for Stage 2c: expected `return <portable integer literal or readonly integer local>;`, found bare `return;`",
+            "unsupported native statement for Stage 2c: expected `return <portable integer expression>;`, found bare `return;`",
         )),
         other => Err(BackendError::new(format!(
-            "unsupported native statement for Stage 2c: `main` must end with `return <portable integer literal or readonly integer local>;`, found {}",
+            "unsupported native statement for Stage 2c: `main` must end with `return <portable integer expression>;`, found {}",
             describe_statement(other)
         ))),
     }
@@ -144,21 +144,8 @@ fn validate_stage_2c_return_expr(
     expr: &Expr,
     local_values: &HashMap<String, i64>,
 ) -> Result<i32, BackendError> {
-    match expr {
-        Expr::Int { value, .. } => parse_stage_2c_exit_code(parse_doria_int_literal(value)?),
-        Expr::Variable { name, .. } => {
-            let Some(value) = local_values.get(name) else {
-                return Err(BackendError::new(
-                    "unsupported native expression for Stage 2c: expected integer literal or readonly integer local",
-                ));
-            };
-            parse_stage_2c_exit_code(*value)
-        }
-        other => Err(BackendError::new(format!(
-            "unsupported native expression for Stage 2c: expected integer literal or readonly integer local, found `{}`",
-            describe_expression(other)
-        ))),
-    }
+    let value = eval_stage_2c_int_expr(expr, local_values)?;
+    parse_stage_2c_exit_code(value)
 }
 
 fn eval_stage_2c_int_expr(
@@ -169,7 +156,7 @@ fn eval_stage_2c_int_expr(
         Expr::Int { value, .. } => parse_doria_int_literal(value),
         Expr::Variable { name, .. } => local_values.get(name).copied().ok_or_else(|| {
             BackendError::new(
-                "unsupported native expression for Stage 2c: expected integer literal or readonly integer local",
+                "unsupported native expression for Stage 2c: expected integer literal, readonly integer local, or supported integer arithmetic",
             )
         }),
         Expr::Binary {
@@ -186,7 +173,7 @@ fn eval_stage_2c_int_expr(
             ..
         } => {
             Err(BackendError::new(
-                "unsupported native expression for Stage 2c: integer division and modulo need an accepted Doria semantics decision",
+                "unsupported native arithmetic operator for Stage 2c",
             ))
         }
         other => Err(BackendError::new(format!(
