@@ -6,7 +6,7 @@ Accepted by the Stage 2c implementation task. Keep this slice narrow; later nati
 
 ## Decision
 
-Stage 2c adds native support for simple integer arithmetic in readonly integer local initializers and final return expressions inside the accepted native entrypoint:
+Stage 2c adds native support for simple integer arithmetic in readonly integer local initializers inside the accepted native entrypoint:
 
 ```doria
 function main(): int
@@ -14,15 +14,6 @@ function main(): int
     let $base = 20;
     let $code = $base * 2 + 2;
     return $code;
-}
-```
-
-```doria
-function main(): int
-{
-    let $left = 20;
-    let $right = 22;
-    return $left + $right;
 }
 ```
 
@@ -42,14 +33,14 @@ Supported operands are:
 - nested supported Stage 2c arithmetic expressions
 ```
 
-The final return may be Stage 2b-shaped or a supported Stage 2c integer expression:
+The final return remains Stage 2b-shaped in Stage 2c:
 
 ```doria
 return 42;
 return $code;
-return 20 + 22;
-return $left + $right;
 ```
+
+Returned arithmetic expressions are accepted separately in `0018-stage-2d-native-returned-int-expressions.md`.
 
 ## Rationale
 
@@ -114,13 +105,6 @@ Stage 2c native output accepts:
 ```doria
 function main(): int
 {
-    return 20 + 22;
-}
-```
-
-```doria
-function main(): int
-{
     let $code = 20 + 22;
     return $code;
 }
@@ -147,6 +131,13 @@ function main(): int
 ## Unsupported native forms
 
 These forms may remain valid Doria but are not Stage 2c native output:
+
+```doria
+function main(): int
+{
+    return 20 + 22;
+}
+```
 
 ```doria
 function main(): int
@@ -181,6 +172,7 @@ function main(): int
 
 This decision does not:
 
+- support direct returned arithmetic expressions; those are accepted separately in `0018-stage-2d-native-returned-int-expressions.md`
 - support writable locals or assignments
 - support compound assignments
 - support division or modulo
