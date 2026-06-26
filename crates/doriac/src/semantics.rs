@@ -1140,7 +1140,7 @@ impl<'program> Checker<'program> {
         span: Span,
         scopes: &ScopeStack,
     ) {
-        if !Self::is_stage_2c_checked_arithmetic_op(op) {
+        if !Self::is_checked_int_arithmetic_op(op) {
             return;
         }
 
@@ -1151,7 +1151,7 @@ impl<'program> Checker<'program> {
             return;
         };
 
-        if Self::checked_stage_2c_arithmetic(left, op, right).is_some() {
+        if Self::checked_int_arithmetic(left, op, right).is_some() {
             return;
         }
 
@@ -1192,12 +1192,12 @@ impl<'program> Checker<'program> {
                 .unwrap_or(IntConstantEval::Unknown),
             Expr::Binary {
                 left, op, right, ..
-            } if Self::is_stage_2c_checked_arithmetic_op(op) => {
+            } if Self::is_checked_int_arithmetic_op(op) => {
                 let left = Self::eval_int_constant(left, scopes);
                 let right = Self::eval_int_constant(right, scopes);
                 match (left, right) {
                     (IntConstantEval::Known(left), IntConstantEval::Known(right)) => {
-                        Self::checked_stage_2c_arithmetic(left, op, right)
+                        Self::checked_int_arithmetic(left, op, right)
                             .map(IntConstantEval::Known)
                             .unwrap_or(IntConstantEval::Invalid)
                     }
@@ -1211,11 +1211,11 @@ impl<'program> Checker<'program> {
         }
     }
 
-    fn is_stage_2c_checked_arithmetic_op(op: &BinaryOp) -> bool {
+    fn is_checked_int_arithmetic_op(op: &BinaryOp) -> bool {
         matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul)
     }
 
-    fn checked_stage_2c_arithmetic(left: i64, op: &BinaryOp, right: i64) -> Option<i64> {
+    fn checked_int_arithmetic(left: i64, op: &BinaryOp, right: i64) -> Option<i64> {
         match op {
             BinaryOp::Add => left.checked_add(right),
             BinaryOp::Sub => left.checked_sub(right),

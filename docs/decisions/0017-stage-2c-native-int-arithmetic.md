@@ -33,18 +33,14 @@ Supported operands are:
 - nested supported Stage 2c arithmetic expressions
 ```
 
-The final return remains Stage 2b-shaped:
+The final return remains Stage 2b-shaped in Stage 2c:
 
 ```doria
 return 42;
 return $code;
 ```
 
-Direct returned arithmetic expressions remain Stage 2d:
-
-```doria
-return 20 + 22; // not Stage 2c
-```
+Returned arithmetic expressions are accepted separately in `0018-stage-2d-native-returned-int-expressions.md`.
 
 ## Rationale
 
@@ -176,7 +172,7 @@ function main(): int
 
 This decision does not:
 
-- support direct returned arithmetic expressions
+- support direct returned arithmetic expressions; those are accepted separately in `0018-stage-2d-native-returned-int-expressions.md`
 - support writable locals or assignments
 - support compound assignments
 - support division or modulo
