@@ -11,7 +11,7 @@ name = "doriac"
 path = "src/lib.rs"
 
 [dependencies]
-cranelift-codegen = "0.127.4"
+cranelift-codegen = "0.133.1"
 cranelift-frontend = "0.127.4"
 cranelift-module = "0.127.4"
 cranelift-native = "0.127.4"
