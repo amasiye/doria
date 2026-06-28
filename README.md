@@ -64,10 +64,10 @@ This repository contains the first working vertical slices of `doriac`:
 - Parses a small subset of declarations, classes, functions, statements, and expressions.
 - Builds an AST.
 - Checks undeclared assignment and readonly/writable mutation rules for locals, properties, `$this`, and writable methods.
-- Checks assignment compatibility, declared returns, positional call arguments, constructor init access, control-flow conditions, and string interpolation constraints for the supported subset.
+- Checks assignment compatibility, declared returns, typed equality/inequality, bool-only boolean operators, positional call arguments, constructor init access, control-flow conditions, and string interpolation constraints for the supported subset.
 - Lowers the checked AST to Doria IR, the compiler-owned representation used before backend output.
 - Emits Stage 4a Cranelift-backed native smoke executables for `function main(): int` using supported readonly integer locals, `+`/`-`/`*` arithmetic, final returns, terminal `if` / `else` returns, and guard-style `if` returns with a fallback return in the accepted `0..125` portable exit-code range.
-- Emits PHP for supported syntax through the optional PHP compatibility backend.
+- Emits PHP for supported syntax through the optional PHP compatibility backend, including `not`, `and`, `or`, and `xor` lowering that preserves Doria boolean semantics.
 - Provides CLI commands and integration tests.
 
 It is intentionally not a complete language yet. The implementation should grow in small, tested compiler increments without compromising Doria's native-first semantics.

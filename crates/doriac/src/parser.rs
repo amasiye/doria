@@ -419,7 +419,7 @@ impl Parser {
     }
 
     fn parse_binary(&mut self, min_prec: u8) -> Option<Expr> {
-        let mut left = self.parse_postfix()?;
+        let mut left = self.parse_unary()?;
 
         while let Some((op, prec)) = self.current_binary_op() {
             if prec < min_prec {
@@ -428,6 +428,12 @@ impl Parser {
             self.advance();
             let right = self.parse_binary(prec + 1)?;
             let span = left.span().merge(right.span());
+            if Self::xor_mix_is_ambiguous(&op, &left, &right) {
+                self.error(
+                    "ambiguous `xor` expression; keep `xor` separate from other logical operators in this compiler slice",
+                    span,
+                );
+            }
             left = Expr::Binary {
                 left: Box::new(left),
                 op,
@@ -437,6 +443,59 @@ impl Parser {
         }
 
         Some(left)
+    }
+
+    fn parse_unary(&mut self) -> Option<Expr> {
+        if self.match_kind(&TokenKind::Bang) || self.match_kind(&TokenKind::Not) {
+            let op_span = self.previous().span;
+            let expr = self.parse_unary()?;
+            let span = op_span.merge(expr.span());
+            return Some(Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(expr),
+                span,
+            });
+        }
+
+        self.parse_postfix()
+    }
+
+    fn xor_mix_is_ambiguous(op: &BinaryOp, left: &Expr, right: &Expr) -> bool {
+        match op {
+            BinaryOp::Xor => Self::has_logical_binary(left) || Self::has_logical_binary(right),
+            BinaryOp::And | BinaryOp::Or => {
+                Self::has_xor_binary(left) || Self::has_xor_binary(right)
+            }
+            _ => false,
+        }
+    }
+
+    fn has_logical_binary(expr: &Expr) -> bool {
+        match expr {
+            Expr::Binary {
+                op, left, right, ..
+            } => {
+                matches!(op, BinaryOp::And | BinaryOp::Or | BinaryOp::Xor)
+                    || Self::has_logical_binary(left)
+                    || Self::has_logical_binary(right)
+            }
+            Expr::Unary { expr, .. } => Self::has_logical_binary(expr),
+            _ => false,
+        }
+    }
+
+    fn has_xor_binary(expr: &Expr) -> bool {
+        match expr {
+            Expr::Binary {
+                op, left, right, ..
+            } => {
+                matches!(op, BinaryOp::Xor)
+                    || Self::has_xor_binary(left)
+                    || Self::has_xor_binary(right)
+            }
+            Expr::Unary { expr, .. } => Self::has_xor_binary(expr),
+            _ => false,
+        }
     }
 
     fn parse_postfix(&mut self) -> Option<Expr> {
@@ -814,13 +873,12 @@ impl Parser {
 
     fn current_binary_op(&self) -> Option<(BinaryOp, u8)> {
         match self.peek().kind {
-            TokenKind::OrOr => Some((BinaryOp::Or, 1)),
-            TokenKind::AndAnd => Some((BinaryOp::And, 2)),
+            TokenKind::OrOr | TokenKind::Or => Some((BinaryOp::Or, 1)),
+            TokenKind::Xor => Some((BinaryOp::Xor, 1)),
+            TokenKind::AndAnd | TokenKind::And => Some((BinaryOp::And, 2)),
             TokenKind::QuestionQuestion => Some((BinaryOp::Coalesce, 3)),
             TokenKind::EqualEqual => Some((BinaryOp::Equal, 4)),
-            TokenKind::EqualEqualEqual => Some((BinaryOp::StrictEqual, 4)),
             TokenKind::BangEqual => Some((BinaryOp::NotEqual, 4)),
-            TokenKind::BangEqualEqual => Some((BinaryOp::NotStrictEqual, 4)),
             TokenKind::Less => Some((BinaryOp::Less, 5)),
             TokenKind::LessEqual => Some((BinaryOp::LessEqual, 5)),
             TokenKind::Greater => Some((BinaryOp::Greater, 5)),
@@ -1006,6 +1064,10 @@ fn token_name(kind: &TokenKind) -> &'static str {
         TokenKind::AndAnd => "&&",
         TokenKind::OrOr => "||",
         TokenKind::Bang => "!",
+        TokenKind::Not => "not",
+        TokenKind::And => "and",
+        TokenKind::Or => "or",
+        TokenKind::Xor => "xor",
         TokenKind::Question => "?",
         TokenKind::QuestionQuestion => "??",
         TokenKind::FatArrow => "=>",

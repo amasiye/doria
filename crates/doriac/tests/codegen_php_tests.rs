@@ -20,6 +20,25 @@ echo $count;
 }
 
 #[test]
+fn emits_php_for_boolean_word_operators() {
+    let php = doriac::compile_source_to_php(
+        "test.doria",
+        r#"
+echo true and false;
+echo false or true;
+echo not false;
+echo true xor false;
+"#,
+    )
+    .expect("compilation should succeed");
+
+    assert!(php.contains("echo (true && false);"));
+    assert!(php.contains("echo (false || true);"));
+    assert!(php.contains("echo (!false);"));
+    assert!(php.contains("echo (true !== false);"));
+}
+
+#[test]
 fn lowers_checked_program_to_hir() {
     let lowered = doriac::lower_source(
         "test.doria",

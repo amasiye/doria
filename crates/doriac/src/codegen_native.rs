@@ -422,12 +422,7 @@ fn validate_stage_4a_condition(
                 value: evaluate_native_compare(left.value, native_op, right.value),
             })
         }
-        Expr::Binary {
-            op: BinaryOp::StrictEqual | BinaryOp::NotStrictEqual,
-            ..
-        } => Err(BackendError::new(
-            "unsupported native comparison operator for Stage 4a",
-        )),
+
         _ => Err(BackendError::new(
             "unsupported native condition for Stage 4a: expected bool literal or supported integer comparison",
         )),
@@ -925,6 +920,7 @@ fn describe_expression(expr: &Expr) -> &'static str {
         Expr::FunctionCall { .. } => "function call",
         Expr::StaticCall { .. } => "static call",
         Expr::New { .. } => "object construction",
+        Expr::Unary { .. } => "unary expression",
         Expr::Binary { .. } => "binary expression",
     }
 }

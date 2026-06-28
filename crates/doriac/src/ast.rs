@@ -217,6 +217,11 @@ pub enum Expr {
         args: Vec<Expr>,
         span: Span,
     },
+    Unary {
+        op: UnaryOp,
+        expr: Box<Expr>,
+        span: Span,
+    },
     Binary {
         left: Box<Expr>,
         op: BinaryOp,
@@ -238,6 +243,11 @@ pub struct ArrayElement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnaryOp {
+    Not,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -246,15 +256,14 @@ pub enum BinaryOp {
     Mod,
     Concat,
     Equal,
-    StrictEqual,
     NotEqual,
-    NotStrictEqual,
     Less,
     LessEqual,
     Greater,
     GreaterEqual,
     And,
     Or,
+    Xor,
     Coalesce,
 }
 
@@ -276,6 +285,7 @@ impl Expr {
             | Expr::FunctionCall { span, .. }
             | Expr::StaticCall { span, .. }
             | Expr::New { span, .. }
+            | Expr::Unary { span, .. }
             | Expr::Binary { span, .. } => *span,
         }
     }
