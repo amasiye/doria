@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use doriac::backend::BackendTarget;
 
 #[test]
-fn compiles_and_runs_stage_2d_native_smoke_examples() {
+fn compiles_and_runs_current_native_smoke_examples() {
     if !host_linker_is_available() {
         eprintln!(
             "native smoke test unavailable: host linker `{}` was not found",
@@ -163,6 +163,41 @@ fn compiles_and_runs_stage_2d_native_smoke_examples() {
             "main_terminal_if_else_false_or_true",
             "inline_main_terminal_if_else_false_or_true.doria",
             42,
+        ),
+        (
+            "main_writable_local_42",
+            "examples/native/main_writable_local_42.doria",
+            42,
+        ),
+        (
+            "main_typed_writable_sub_assign",
+            "inline_main_typed_writable_sub_assign.doria",
+            42,
+        ),
+        (
+            "main_writable_assign",
+            "inline_main_writable_assign.doria",
+            42,
+        ),
+        (
+            "main_writable_assign_from_multiply",
+            "inline_main_writable_assign_from_multiply.doria",
+            42,
+        ),
+        (
+            "main_writable_if_condition",
+            "inline_main_writable_if_condition.doria",
+            42,
+        ),
+        (
+            "main_large_writable_reassigned_zero",
+            "inline_main_large_writable_reassigned_zero.doria",
+            0,
+        ),
+        (
+            "main_exit_boundary_reassigned_zero",
+            "inline_main_exit_boundary_reassigned_zero.doria",
+            0,
         ),
     ];
 
@@ -494,12 +529,83 @@ function main(): int
 }
 "#
         }
+        "main_typed_writable_sub_assign" => {
+            r#"
+function main(): int
+{
+    writable int $code = 50;
+    $code -= 8;
+
+    return $code;
+}
+"#
+        }
+        "main_writable_assign" => {
+            r#"
+function main(): int
+{
+    let writable $code = 0;
+    $code = 42;
+
+    return $code;
+}
+"#
+        }
+        "main_writable_assign_from_multiply" => {
+            r#"
+function main(): int
+{
+    let writable $code = 1;
+    $code = $code * 42;
+
+    return $code;
+}
+"#
+        }
+        "main_writable_if_condition" => {
+            r#"
+function main(): int
+{
+    let $base = 20;
+    let writable $code = $base;
+    $code += 22;
+
+    if ($code == 42) {
+        return 42;
+    }
+
+    return 0;
+}
+"#
+        }
+        "main_large_writable_reassigned_zero" => {
+            r#"
+function main(): int
+{
+    let writable $large = 9223372036854775807;
+    $large = 0;
+
+    return $large;
+}
+"#
+        }
+        "main_exit_boundary_reassigned_zero" => {
+            r#"
+function main(): int
+{
+    let writable $code = 126;
+    $code = 0;
+
+    return $code;
+}
+"#
+        }
         _ => unreachable!("unexpected inline native smoke source `{stem}`"),
     }
 }
 
 #[test]
-fn rejects_unsupported_stage_2d_native_shapes() {
+fn rejects_unsupported_current_native_smoke_shapes() {
     let cases = [
         ("no main", "", "B0001", "no native entrypoint found"),
         (
@@ -533,7 +639,7 @@ function main(): int
 }
 "#,
             "B0001",
-            "native Stage 4b exit code must be in the range 0..125",
+            "native Stage 5a exit code must be in the range 0..125",
         ),
         (
             "return 255",
@@ -544,7 +650,7 @@ function main(): int
 }
 "#,
             "B0001",
-            "native Stage 4b exit code must be in the range 0..125",
+            "native Stage 5a exit code must be in the range 0..125",
         ),
         (
             "return out of Doria int range",
@@ -600,7 +706,7 @@ function main(): int
 }
 "#,
             "B0001",
-            "native Stage 4b exit code must be in the range 0..125",
+            "native Stage 5a exit code must be in the range 0..125",
         ),
         (
             "return arithmetic outside exit-code range",
@@ -611,7 +717,7 @@ function main(): int
 }
 "#,
             "B0001",
-            "native Stage 4b exit code must be in the range 0..125",
+            "native Stage 5a exit code must be in the range 0..125",
         ),
         (
             "returned arithmetic local outside exit-code range",
@@ -623,19 +729,7 @@ function main(): int
 }
 "#,
             "B0001",
-            "native Stage 4b exit code must be in the range 0..125",
-        ),
-        (
-            "writable local",
-            r#"
-function main(): int
-{
-    let writable $code = 42;
-    return $code;
-}
-"#,
-            "B0001",
-            "unsupported native local for Stage 2d",
+            "native Stage 5a exit code must be in the range 0..125",
         ),
         (
             "non-int local",
@@ -647,7 +741,137 @@ function main(): int
 }
 "#,
             "B0001",
-            "unsupported native local for Stage 2d",
+            "unsupported native local for current native smoke backend",
+        ),
+        (
+            "non-int writable local",
+            r#"
+function main(): int
+{
+    let writable $ok = true;
+    return 0;
+}
+"#,
+            "B0001",
+            "unsupported native local for current native smoke backend",
+        ),
+        (
+            "readonly assignment",
+            r#"
+function main(): int
+{
+    let $code = 40;
+    $code += 2;
+
+    return $code;
+}
+"#,
+            "E0201",
+            "cannot assign to readonly variable `$code`",
+        ),
+        (
+            "undeclared assignment",
+            r#"
+function main(): int
+{
+    $code = 42;
+
+    return 0;
+}
+"#,
+            "E0101",
+            "undeclared variable `$code`",
+        ),
+        (
+            "assignment type mismatch",
+            r#"
+function main(): int
+{
+    let writable $code = 0;
+    $code = true;
+
+    return $code;
+}
+"#,
+            "E0403",
+            "cannot assign value of type `bool`",
+        ),
+        (
+            "assignment result outside exit-code range",
+            r#"
+function main(): int
+{
+    let writable $code = 100;
+    $code += 26;
+
+    return $code;
+}
+"#,
+            "B0001",
+            "native Stage 5a exit code must be in the range 0..125",
+        ),
+        (
+            "assignment overflow",
+            r#"
+function main(): int
+{
+    let writable $code = 9223372036854775807;
+    $code += 1;
+
+    return 0;
+}
+"#,
+            "B0001",
+            "integer arithmetic overflows the Doria `int` range",
+        ),
+        (
+            "assignment rhs division",
+            r#"
+function main(): int
+{
+    let writable $code = 0;
+    $code = 84 / 2;
+
+    return $code;
+}
+"#,
+            "B0001",
+            "unsupported native arithmetic operator for Stage 5a",
+        ),
+        (
+            "assignment after final return",
+            r#"
+function main(): int
+{
+    let writable $code = 42;
+
+    return $code;
+
+    $code = 0;
+
+    return 0;
+}
+"#,
+            "B0001",
+            "unsupported statement after native terminator for Stage 5a",
+        ),
+        (
+            "assignment inside branch",
+            r#"
+function main(): int
+{
+    let writable $code = 0;
+
+    if (true) {
+        $code = 42;
+        return $code;
+    }
+
+    return 0;
+}
+"#,
+            "B0001",
+            "unsupported native branch body shape for Stage 5a",
         ),
         (
             "return division",
@@ -658,7 +882,7 @@ function main(): int
 }
 "#,
             "B0001",
-            "unsupported native arithmetic operator for Stage 2d",
+            "unsupported native arithmetic operator for Stage 5a",
         ),
         (
             "return modulo",
@@ -669,7 +893,7 @@ function main(): int
 }
 "#,
             "B0001",
-            "unsupported native arithmetic operator for Stage 2d",
+            "unsupported native arithmetic operator for Stage 5a",
         ),
         (
             "local initialized from division",
@@ -681,7 +905,7 @@ function main(): int
 }
 "#,
             "B0001",
-            "unsupported native arithmetic operator for Stage 2d",
+            "unsupported native arithmetic operator for Stage 5a",
         ),
         (
             "local initialized from function call",
@@ -774,7 +998,7 @@ function main(): int
 }
 "#,
             "B0001",
-            "native Stage 4b exit code must be in the range 0..125",
+            "native Stage 5a exit code must be in the range 0..125",
         ),
         (
             "if else branch outside exit-code range",
@@ -789,7 +1013,7 @@ function main(): int
 }
 "#,
             "B0001",
-            "native Stage 4b exit code must be in the range 0..125",
+            "native Stage 5a exit code must be in the range 0..125",
         ),
         (
             "guard if branch outside exit-code range",
@@ -804,7 +1028,7 @@ function main(): int
 }
 "#,
             "B0001",
-            "native Stage 4b exit code must be in the range 0..125",
+            "native Stage 5a exit code must be in the range 0..125",
         ),
         (
             "logical if branch outside exit-code range",
@@ -819,7 +1043,7 @@ function main(): int
 }
 "#,
             "B0001",
-            "native Stage 4b exit code must be in the range 0..125",
+            "native Stage 5a exit code must be in the range 0..125",
         ),
         (
             "if integer condition",
@@ -894,7 +1118,7 @@ function main(): int
 }
 "#,
             "B0001",
-            "unsupported native arithmetic operator for Stage 2d",
+            "unsupported native arithmetic operator for Stage 5a",
         ),
         (
             "if call condition",
@@ -925,7 +1149,7 @@ function main(): int
 }
 "#,
             "B0001",
-            "unsupported native branch for Stage 4b",
+            "unsupported native branch body shape for Stage 5a",
         ),
         (
             "if without fallback return",
@@ -972,7 +1196,7 @@ function main(): int
 }
 "#,
             "B0001",
-            "unsupported native statement for Stage 4b",
+            "unsupported statement after native terminator for Stage 5a",
         ),
         (
             "echo",
@@ -1035,7 +1259,7 @@ function main(): int
     for (name, source, expected_code, expected_message) in cases {
         let diagnostics =
             doriac::compile_source(format!("{name}.doria"), source, BackendTarget::Native)
-                .expect_err("unsupported native Stage 2d source should fail");
+                .expect_err("unsupported current native smoke source should fail");
 
         assert_eq!(diagnostics[0].code, expected_code, "{name}");
         assert!(
@@ -1047,7 +1271,7 @@ function main(): int
 }
 
 #[test]
-fn native_backend_returns_executable_output_for_stage_2d_literal_shape() {
+fn native_backend_returns_executable_output_for_literal_shape() {
     if !host_linker_is_available() {
         eprintln!(
             "native executable output test unavailable: host linker `{}` was not found",
@@ -1066,7 +1290,7 @@ function main(): int
 "#,
         BackendTarget::Native,
     )
-    .expect("Stage 2d source should compile");
+    .expect("current native smoke source should compile");
 
     match output {
         doriac::backend::BackendOutput::Executable { bytes, .. } => {
@@ -1077,7 +1301,7 @@ function main(): int
 }
 
 #[test]
-fn native_backend_returns_executable_output_for_stage_2d_arithmetic_shape() {
+fn native_backend_returns_executable_output_for_arithmetic_shape() {
     if !host_linker_is_available() {
         eprintln!(
             "native executable output test unavailable: host linker `{}` was not found",
@@ -1098,7 +1322,7 @@ function main(): int
 "#,
         BackendTarget::Native,
     )
-    .expect("Stage 2d arithmetic source should compile");
+    .expect("current native arithmetic source should compile");
 
     match output {
         doriac::backend::BackendOutput::Executable { bytes, .. } => {
@@ -1126,7 +1350,7 @@ fn compile_native_file(input: &Path, output: &Path) {
 
 fn compile_native_source(source: &str, output: &Path) {
     let native = doriac::compile_source("test.doria", source, BackendTarget::Native)
-        .expect("Stage 2d source should compile");
+        .expect("current native smoke source should compile");
     let doriac::backend::BackendOutput::Executable { bytes, .. } = native else {
         panic!("native backend should return executable output, got {native:?}");
     };
