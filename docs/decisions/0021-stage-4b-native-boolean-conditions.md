@@ -2,6 +2,8 @@
 
 Status: Accepted
 
+Decision 0022 extends the current native smoke subset with Stage 5a direct-body writable integer locals and direct-body integer assignments. This decision remains the accepted record for Stage 4b boolean condition support.
+
 ## Decision
 
 Stage 4b extends the current Cranelift native smoke backend so supported `if` conditions can use the accepted Doria boolean operators from decision 0020:
