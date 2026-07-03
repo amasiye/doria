@@ -83,13 +83,20 @@ At completion, report assumptions made and critical decisions encountered. If no
 - Do not treat the native Stage 2a `0..125` process-exit range as the range of Doria integer values.
 - Do not reintroduce `public`, `protected`, or `private` as Doria member visibility modifiers. Doria class members are externally accessible by default; use `internal` for implementation details.
 - Keep `writable` and `internal` separate: `writable` controls mutation, while `internal` controls API surface.
+- Preserve the accepted namespace/import/include/directive direction: namespaces are semantic symbol ownership, `use` is semantic import/name aliasing, `include` is required include-once compile-time source inclusion, and `declare` is a structured compiler/source directive.
+- Do not describe `include` as PHP runtime include, and do not treat `include` as the normal import mechanism.
+- Do not confuse `use` with `include`, and do not confuse `use` with Baton package resolution.
+- Do not add `require`, `require_once`, or `include_once`; Doria `include` already means required include-once.
+- Do not import C/C++ textual macro behavior without an accepted decision. Do not add `#define` or `#undef` macro substitution.
+- Do not implement `goto` without a separate accepted decision.
+- Do not confuse source/compiler directives with runtime control flow.
 - Keep self-hosting in mind when designing compiler APIs, diagnostics, source management, Doria IR, and the standard library.
 - Keep native desktop, game engine, C-library binding, and raylib goals visible when designing Doria IR, future native-oriented IR, runtime, memory representation, FFI, and performance benchmarks.
 - Keep Baton architecturally outside the compiler pipeline. Baton may orchestrate projects and invoke `doriac`; it must not duplicate parsing, semantic analysis, type checking, Doria IR lowering, or code generation.
 - Keep executable initializers and attribute expressions represented as Doria concepts, not PHP workarounds.
 - Keep PHP-to-Doria migration architecturally separate from the Doria parser. The migration tool may parse PHP, but Doria itself should parse Doria.
 - Preserve readonly-by-default as the language default. Use class-level ergonomics such as `writable class`/`readonly class` before adding shorter aliases for `writable`.
-- Treat basic `if` / `else if` / `else` and `while` as MVP control flow. `if` is statement control flow and does not return a value; `when` is the planned value-returning conditional/control construct. Keep `finally`, `do ... while`, `given`, value-returning `when`, `match`, `break`, and `continue` as planned control-flow implementation work until their remaining grammar and semantics are specified.
+- Treat basic `if` / `else if` / `else` and `while` as MVP control flow. `if` is statement control flow and does not return a value; `when` is the planned value-returning conditional/control construct. `break` and `continue` are accepted as nearest-loop control flow but are not implemented yet. Keep `finally`, `do ... while`, `given`, value-returning `when`, `match`, labeled loop control, and broader control-flow semantics as planned implementation work until their remaining grammar and semantics are specified.
 - Do not confuse unsupported native backend coverage with invalid Doria. If a construct is valid Doria but unsupported by the current native slice, call it unsupported native backend coverage, especially for `if` without `else`, `else if`, `given`, `finally`, `when`, wider boolean expressions, and broader control-flow shapes.
 - Prefer nouns as properties and verbs as methods in Doria APIs and examples. Use property hooks for computed, validated, lazy, or guarded values instead of vague zero-argument noun methods such as `body()`.
 - Do not introduce external Rust crates unless they remove real complexity and the repository is ready to manage that dependency.

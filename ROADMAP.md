@@ -46,6 +46,7 @@
 - Treat `docs/decisions/0025-stage-6b-native-if-fallthrough-merges.md` as the accepted Stage 6b native fallthrough `if` merge implementation decision.
 - Treat `docs/decisions/0026-stage-6c-native-structured-while-bodies.md` as the accepted Stage 6c native structured `while` body implementation decision.
 - Treat `docs/decisions/0027-stage-7a-native-smoke-ir-boundary.md` as the accepted Stage 7a native smoke IR boundary implementation decision.
+- Treat `docs/decisions/0028-namespaces-use-include-and-directives.md` as the accepted namespace, `use`, `include`, `declare`, `break`, and `continue` direction.
 - Keep broader native expression, assignment, and control-flow support beyond the Stage 6c smoke subset as separate future implementation slices.
 - Extend accepted operator support with integer bitwise spellings in a dedicated parser and semantic checking slice; do not import PHP loose comparison or PHP `and` / `or` precedence.
 - Add compiler support for `int8`/`int16`/`int32`/`int64`, `uint8`/`uint16`/`uint32`/`uint64`, and `float32`/`float64` in a dedicated typed semantic model slice before claiming those spellings are implemented.
@@ -55,6 +56,13 @@
 - Expand return checking from the current final-statement rule into full path-sensitive control-flow analysis.
 - Add full definite property initialization analysis for constructor paths.
 - Plan the path toward writing more of `doriac` in Doria itself.
+- Design and implement namespaces as semantic symbol ownership.
+- Design and implement `use` statements for semantic imports and aliases.
+- Design and implement `include` as required include-once source inclusion.
+- Design and implement `declare` as structured compiler/source directives.
+- Implement `break` and `continue` after the native/control-flow model can support them correctly.
+- Evaluate `goto` carefully before acceptance.
+- Evaluate structured conditional compilation and compile-time diagnostics without adopting C/C++ textual macros.
 - Expand string interpolation beyond variable/property paths after Doria has a deliberate display/string-conversion design.
 - Emit precedence-aware backend expressions.
 - Add parser/AST support for attributes using `#[...]`.
