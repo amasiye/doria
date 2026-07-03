@@ -24,3 +24,9 @@ The extension resolves the server from:
 No npm dependencies are required for the development extension.
 
 After changing the TextMate grammar, reload the VS Code window or restart the Extension Development Host so VS Code reads the updated grammar.
+
+Keep this TextMate grammar aligned with the IntelliJ / JetBrains highlighter under `editors/intellij/doria`. From the repository root, run:
+
+```bash
+python3 scripts/check_editor_highlighting.py
+```

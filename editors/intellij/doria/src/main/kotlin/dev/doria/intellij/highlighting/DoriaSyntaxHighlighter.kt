@@ -32,6 +32,7 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
         DoriaTokenTypes.COMMENT -> COMMENT_KEYS
         DoriaTokenTypes.DOC_COMMENT -> DOC_COMMENT_KEYS
         DoriaTokenTypes.DOC_COMMENT_TAG -> DOC_COMMENT_TAG_KEYS
+        DoriaTokenTypes.INVALID -> INVALID_KEYS
         DoriaTokenTypes.OPERATOR -> OPERATOR_KEYS
         DoriaTokenTypes.BRACE -> BRACE_KEYS
         DoriaTokenTypes.BRACKET -> BRACKET_KEYS
@@ -122,6 +123,10 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
             "DORIA_DOC_COMMENT_TAG",
             DefaultLanguageHighlighterColors.DOC_COMMENT_TAG,
         )
+        val INVALID: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
+            "DORIA_INVALID",
+            HighlighterColors.BAD_CHARACTER,
+        )
         val OPERATOR: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
             "DORIA_OPERATOR",
             DefaultLanguageHighlighterColors.OPERATION_SIGN,
@@ -167,6 +172,7 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
         private val COMMENT_KEYS = arrayOf(COMMENT)
         private val DOC_COMMENT_KEYS = arrayOf(DOC_COMMENT)
         private val DOC_COMMENT_TAG_KEYS = arrayOf(DOC_COMMENT_TAG)
+        private val INVALID_KEYS = arrayOf(INVALID)
         private val OPERATOR_KEYS = arrayOf(OPERATOR)
         private val BRACE_KEYS = arrayOf(BRACE)
         private val BRACKET_KEYS = arrayOf(BRACKET)

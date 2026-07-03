@@ -80,6 +80,7 @@ class DoriaColorSettingsPage : ColorSettingsPage {
             AttributesDescriptor("Comment", DoriaSyntaxHighlighter.COMMENT),
             AttributesDescriptor("Doc comment", DoriaSyntaxHighlighter.DOC_COMMENT),
             AttributesDescriptor("Doc comment tag", DoriaSyntaxHighlighter.DOC_COMMENT_TAG),
+            AttributesDescriptor("Invalid or rejected syntax", DoriaSyntaxHighlighter.INVALID),
             AttributesDescriptor("Operator", DoriaSyntaxHighlighter.OPERATOR),
             AttributesDescriptor("Braces", DoriaSyntaxHighlighter.BRACE),
             AttributesDescriptor("Brackets", DoriaSyntaxHighlighter.BRACKET),
