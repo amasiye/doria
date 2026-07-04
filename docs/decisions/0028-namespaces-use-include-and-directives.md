@@ -67,7 +67,7 @@ Namespaces are required for serious multi-file programs, libraries, package ecos
 
 `use` is not textual inclusion, PHP runtime include, package dependency resolution, or code execution.
 
-Class-body `use` for trait composition is a separate context documented in `docs/decisions/0029-oop-declaration-vocabulary.md`.
+Trait composition does not use this spelling. Class-body and trait-body trait composition uses `uses`, documented in `docs/decisions/0030-trait-composition-uses-keyword.md`.
 
 Accepted conceptual syntax:
 
