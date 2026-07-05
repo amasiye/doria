@@ -22,6 +22,12 @@ fn compiles_and_runs_current_native_smoke_examples() {
             "examples/native/main_return_zero.doria",
             0,
         ),
+        (
+            "main_void_empty",
+            "examples/native/main_void_empty.doria",
+            0,
+        ),
+        ("main_void_return", "inline_main_void_return.doria", 0),
         ("main_return_42", "examples/native/main_return_42.doria", 42),
         ("main_return_125", "inline_main_return_125.doria", 125),
         (
@@ -420,8 +426,168 @@ fn compiles_and_runs_current_native_smoke_examples() {
     }
 }
 
+#[test]
+fn compiles_and_runs_void_main_string_literal_echo() {
+    if !host_linker_is_available() {
+        eprintln!(
+            "native stdout smoke test unavailable: host linker `{}` was not found",
+            host_linker()
+        );
+        return;
+    }
+
+    let workspace = workspace_root();
+    let hello_output = temp_executable_path("main_void_hello");
+    compile_native_file(
+        &workspace.join("examples/native/main_void_hello.doria"),
+        &hello_output,
+    );
+    assert_native_run_output(&hello_output, "main_void_hello", b"Hello Doria!");
+    let _ = fs::remove_file(hello_output);
+
+    for (stem, expected_stdout) in [
+        ("main_void_multiple_echo", b"Hello Doria!".as_slice()),
+        ("main_void_empty_echo", b"".as_slice()),
+        ("main_void_guard_true_return", b"".as_slice()),
+        ("main_void_guard_false_return", b"".as_slice()),
+        ("main_void_guard_true_skips_echo", b"".as_slice()),
+        (
+            "main_void_guard_false_reaches_echo",
+            b"Hello Doria!".as_slice(),
+        ),
+        ("main_void_else_if_final_true_returns", b"".as_slice()),
+        (
+            "main_void_else_if_final_false_falls_through",
+            b"".as_slice(),
+        ),
+    ] {
+        let output = temp_executable_path(stem);
+        compile_native_source(native_smoke_source(stem), &output);
+        assert_native_run_output(&output, stem, expected_stdout);
+        let _ = fs::remove_file(output);
+    }
+}
+
+#[test]
+fn compiles_and_runs_large_void_main_string_literal_echo() {
+    if !host_linker_is_available() {
+        eprintln!(
+            "native stdout smoke test unavailable: host linker `{}` was not found",
+            host_linker()
+        );
+        return;
+    }
+
+    let message = "Doria".repeat(64 * 1024);
+    let source = format!(
+        r#"
+function main(): void
+{{
+    echo "{message}";
+}}
+"#
+    );
+    let output = temp_executable_path("main_void_large_echo");
+    compile_native_source(&source, &output);
+    assert_native_run_output(&output, "main_void_large_echo", message.as_bytes());
+    let _ = fs::remove_file(output);
+}
+
 fn native_smoke_source(stem: &str) -> &'static str {
     match stem {
+        "main_void_return" => {
+            r#"
+function main(): void
+{
+    return;
+}
+"#
+        }
+        "main_void_multiple_echo" => {
+            r#"
+function main(): void
+{
+    echo "Hello";
+    echo " Doria!";
+}
+"#
+        }
+        "main_void_empty_echo" => {
+            r#"
+function main(): void
+{
+    echo "";
+}
+"#
+        }
+        "main_void_guard_true_return" => {
+            r#"
+function main(): void
+{
+    if (true) {
+        return;
+    }
+}
+"#
+        }
+        "main_void_guard_false_return" => {
+            r#"
+function main(): void
+{
+    if (false) {
+        return;
+    }
+}
+"#
+        }
+        "main_void_guard_true_skips_echo" => {
+            r#"
+function main(): void
+{
+    if (true) {
+        return;
+    }
+
+    echo "should not print";
+}
+"#
+        }
+        "main_void_guard_false_reaches_echo" => {
+            r#"
+function main(): void
+{
+    if (false) {
+        return;
+    }
+
+    echo "Hello Doria!";
+}
+"#
+        }
+        "main_void_else_if_final_true_returns" => {
+            r#"
+function main(): void
+{
+    if (false) {
+        return;
+    } else if (true) {
+        return;
+    }
+}
+"#
+        }
+        "main_void_else_if_final_false_falls_through" => {
+            r#"
+function main(): void
+{
+    if (false) {
+        return;
+    } else if (false) {
+        return;
+    }
+}
+"#
+        }
         "main_return_125" => {
             r#"
 function main(): int
@@ -1412,17 +1578,6 @@ fn rejects_unsupported_current_native_smoke_shapes() {
     let cases = [
         ("no main", "", "B0001", "no native entrypoint found"),
         (
-            "main returns void",
-            r#"
-function main(): void
-{
-    return;
-}
-"#,
-            "B0001",
-            "wrong main signature",
-        ),
-        (
             "main has parameter",
             r#"
 function main(int $code): int
@@ -1934,6 +2089,21 @@ function main(): int
             "must return a value",
         ),
         (
+            "int else if without final fallback return",
+            r#"
+function main(): int
+{
+    if (false) {
+        return 0;
+    } else if (true) {
+        return 42;
+    }
+}
+"#,
+            "E0406",
+            "must return a value",
+        ),
+        (
             "branch-local variable leak",
             r#"
 function main(): int
@@ -2299,7 +2469,7 @@ function main(): int
             "unsupported statement after native terminator for Stage 7b",
         ),
         (
-            "echo",
+            "numeric echo",
             r#"
 function main(): int
 {
@@ -2308,7 +2478,31 @@ function main(): int
 }
 "#,
             "B0001",
-            "echo statement",
+            "unsupported native echo expression for Stage 7b",
+        ),
+        (
+            "string local echo",
+            r#"
+function main(): void
+{
+    let $message = "Hello Doria!";
+    echo $message;
+}
+"#,
+            "B0001",
+            "unsupported native local for current native smoke backend",
+        ),
+        (
+            "interpolated echo",
+            r#"
+function main(): void
+{
+    let $name = 1;
+    echo "Hello, {$name}";
+}
+"#,
+            "B0001",
+            "unsupported native echo expression for Stage 7b",
         ),
         (
             "top-level statement",
@@ -2430,6 +2624,19 @@ function main(): int
         }
         other => panic!("native backend should return executable output, got {other:?}"),
     }
+}
+
+fn assert_native_run_output(output: &Path, stem: &str, expected_stdout: &[u8]) {
+    let run = Command::new(output)
+        .output()
+        .expect("native executable should run");
+    assert_eq!(run.status.code(), Some(0), "{stem}");
+    assert_eq!(run.stdout, expected_stdout, "{stem}");
+    assert!(
+        run.stderr.is_empty(),
+        "{stem}: expected empty stderr, got {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
 
 fn compile_native_file(input: &Path, output: &Path) {

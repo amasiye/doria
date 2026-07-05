@@ -1,10 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, AbiParam, Block, BlockArg, InstBuilder, Value};
-use cranelift_codegen::settings;
+use cranelift_codegen::ir::{
+    types, AbiParam, Block, BlockArg, InstBuilder, StackSlotData, StackSlotKind, Value,
+};
+use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
-use cranelift_module::{default_libcall_names, Linkage, Module};
+use cranelift_module::DataDescription;
+use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use crate::backend::BackendError;
@@ -27,6 +30,7 @@ struct NativeSmokeBlock {
 enum NativeSmokeStmt {
     Local(NativeSmokeLocal),
     Assign(NativeSmokeAssign),
+    EchoStringLiteral { value: String },
     While(NativeSmokeWhile),
     If(NativeSmokeIf),
     Break,
@@ -98,6 +102,107 @@ struct NativeSmokeLoopLoweringContext<'a> {
     carried_locals: &'a [(String, i64)],
 }
 
+struct NativeSmokeLoweringResources<'module> {
+    module: &'module mut ObjectModule,
+    write_func_id: Option<FuncId>,
+    get_std_handle_func_id: Option<FuncId>,
+    write_file_func_id: Option<FuncId>,
+    next_string_literal_id: usize,
+}
+
+impl<'module> NativeSmokeLoweringResources<'module> {
+    fn new(module: &'module mut ObjectModule) -> Self {
+        Self {
+            module,
+            write_func_id: None,
+            get_std_handle_func_id: None,
+            write_file_func_id: None,
+            next_string_literal_id: 0,
+        }
+    }
+
+    fn declare_write_function(&mut self) -> Result<FuncId, BackendError> {
+        if let Some(function_id) = self.write_func_id {
+            return Ok(function_id);
+        }
+
+        let pointer_type = self.module.target_config().pointer_type();
+        let mut signature = self.module.make_signature();
+        signature.params.push(AbiParam::new(types::I32));
+        signature.params.push(AbiParam::new(pointer_type));
+        signature.params.push(AbiParam::new(pointer_type));
+        signature.returns.push(AbiParam::new(pointer_type));
+
+        let function_id = self
+            .module
+            .declare_function("write", Linkage::Import, &signature)
+            .map_err(|error| BackendError::new(format!("backend emission failure: {error}")))?;
+        self.write_func_id = Some(function_id);
+        Ok(function_id)
+    }
+
+    fn declare_get_std_handle_function(&mut self) -> Result<FuncId, BackendError> {
+        if let Some(function_id) = self.get_std_handle_func_id {
+            return Ok(function_id);
+        }
+
+        let pointer_type = self.module.target_config().pointer_type();
+        let mut signature = self.module.make_signature();
+        signature.params.push(AbiParam::new(types::I32));
+        signature.returns.push(AbiParam::new(pointer_type));
+
+        let function_id = self
+            .module
+            .declare_function("GetStdHandle", Linkage::Import, &signature)
+            .map_err(|error| BackendError::new(format!("backend emission failure: {error}")))?;
+        self.get_std_handle_func_id = Some(function_id);
+        Ok(function_id)
+    }
+
+    fn declare_write_file_function(&mut self) -> Result<FuncId, BackendError> {
+        if let Some(function_id) = self.write_file_func_id {
+            return Ok(function_id);
+        }
+
+        let pointer_type = self.module.target_config().pointer_type();
+        let mut signature = self.module.make_signature();
+        signature.params.push(AbiParam::new(pointer_type));
+        signature.params.push(AbiParam::new(pointer_type));
+        signature.params.push(AbiParam::new(types::I32));
+        signature.params.push(AbiParam::new(pointer_type));
+        signature.params.push(AbiParam::new(pointer_type));
+        signature.returns.push(AbiParam::new(types::I32));
+
+        let function_id = self
+            .module
+            .declare_function("WriteFile", Linkage::Import, &signature)
+            .map_err(|error| BackendError::new(format!("backend emission failure: {error}")))?;
+        self.write_file_func_id = Some(function_id);
+        Ok(function_id)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeSmokeStdoutPlatform {
+    Unix,
+    Windows,
+    Unsupported,
+}
+
+fn native_smoke_stdout_platform(windows: bool, unix: bool) -> NativeSmokeStdoutPlatform {
+    if windows {
+        NativeSmokeStdoutPlatform::Windows
+    } else if unix {
+        NativeSmokeStdoutPlatform::Unix
+    } else {
+        NativeSmokeStdoutPlatform::Unsupported
+    }
+}
+
+fn host_native_smoke_stdout_platform() -> NativeSmokeStdoutPlatform {
+    native_smoke_stdout_platform(cfg!(windows), cfg!(unix))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativeSmokeAssignOp {
     Assign,
@@ -125,6 +230,7 @@ enum NativeSmokeBinaryOp {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NativeSmokeTerminator {
+    ExitSuccess,
     Return {
         expr: NativeSmokeExpr,
         evaluated_exit_code: i32,
@@ -141,6 +247,12 @@ enum NativeSmokeTerminator {
         then_block: Box<NativeSmokeBlock>,
         fallback: Box<NativeSmokeBlock>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeSmokeMainReturn {
+    Int,
+    Void,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,10 +342,10 @@ fn validate_stage_6c(program: &hir::Program) -> Result<NativeSmokeModule, Backen
     let [main] = main_functions.as_slice() else {
         return Err(match main_functions.len() {
             0 => BackendError::new(
-                "no native entrypoint found; native Stage 7b output requires exactly one top-level `function main(): int`",
+                "no native entrypoint found; native Stage 7b output requires exactly one top-level `function main(): int` or `function main(): void`",
             ),
             _ => BackendError::new(
-                "multiple native entrypoints found; native Stage 7b output requires exactly one top-level `function main(): int`",
+                "multiple native entrypoints found; native Stage 7b output requires exactly one top-level `function main(): int` or `function main(): void`",
             ),
         });
     };
@@ -244,22 +356,32 @@ fn validate_stage_6c(program: &hir::Program) -> Result<NativeSmokeModule, Backen
         ));
     }
 
-    if !matches!(
-        main.return_type.as_ref(),
-        Some(return_type) if return_type.name == "int" && return_type.args.is_empty()
-    ) {
-        return Err(BackendError::new(
-            "wrong main signature for native Stage 7b: expected `function main(): int`",
-        ));
-    }
+    let main_return = validate_native_main_return(main)?;
 
-    let body = validate_stage_6c_block(&main.body.statements, &HashMap::new())?;
+    let body = validate_stage_6c_block(&main.body.statements, &HashMap::new(), main_return)?;
     Ok(NativeSmokeModule { body })
+}
+
+fn validate_native_main_return(
+    main: &hir::FunctionDecl,
+) -> Result<NativeSmokeMainReturn, BackendError> {
+    match main.return_type.as_ref() {
+        Some(return_type) if return_type.name == "int" && return_type.args.is_empty() => {
+            Ok(NativeSmokeMainReturn::Int)
+        }
+        Some(return_type) if return_type.name == "void" && return_type.args.is_empty() => {
+            Ok(NativeSmokeMainReturn::Void)
+        }
+        _ => Err(BackendError::new(
+            "wrong main signature for native Stage 7b: expected `function main(): int` or `function main(): void`",
+        )),
+    }
 }
 
 fn validate_stage_6c_block(
     statements: &[Stmt],
     local_states: &HashMap<String, NativeSmokeLocalState>,
+    main_return: NativeSmokeMainReturn,
 ) -> Result<NativeSmokeBlock, BackendError> {
     let mut block_states = local_states.clone();
     let mut native_statements = Vec::new();
@@ -290,6 +412,10 @@ fn validate_stage_6c_block(
                 native_statements.push(NativeSmokeStmt::Assign(assignment));
                 terminal_index += 1;
             }
+            Stmt::Echo { expr, .. } => {
+                native_statements.push(validate_stage_6c_echo(expr)?);
+                terminal_index += 1;
+            }
             Stmt::While(while_stmt) => {
                 let native_while = validate_stage_6c_while(while_stmt, &block_states)?;
                 for (name, value) in &native_while.final_values {
@@ -316,8 +442,11 @@ fn validate_stage_6c_block(
         }
     }
 
-    let terminator =
-        validate_stage_6c_statement_sequence(&statements[terminal_index..], &block_states)?;
+    let terminator = validate_stage_6c_statement_sequence(
+        &statements[terminal_index..],
+        &block_states,
+        main_return,
+    )?;
 
     Ok(NativeSmokeBlock {
         statements: native_statements,
@@ -344,15 +473,17 @@ fn merge_native_values(
 fn validate_stage_6c_statement_sequence(
     statements: &[Stmt],
     local_states: &HashMap<String, NativeSmokeLocalState>,
+    main_return: NativeSmokeMainReturn,
 ) -> Result<NativeSmokeTerminator, BackendError> {
     match statements {
+        [] if main_return == NativeSmokeMainReturn::Void => Ok(NativeSmokeTerminator::ExitSuccess),
         [] => Err(BackendError::new(
-            "unsupported native block for Stage 7b: expected supported local declarations, assignments, bounded while statements, or fallthrough if statements followed by a return, terminal if/else, or guard if with fallback",
+            "unsupported native block for Stage 7b: expected supported local declarations, assignments, string-literal echo statements, bounded while statements, or fallthrough if statements followed by a return, terminal if/else, or guard if with fallback",
         )),
-        [statement] => validate_stage_6c_terminator(statement, local_states),
         [Stmt::If(if_stmt), rest @ ..] if if_stmt.else_branch.is_none() => {
-            validate_stage_6c_guard(if_stmt, rest, local_states)
+            validate_stage_6c_guard(if_stmt, rest, local_states, main_return)
         }
+        [statement] => validate_stage_6c_terminator(statement, local_states, main_return),
         [Stmt::If(if_stmt), _] if if_stmt.else_branch.is_some() => {
             Err(BackendError::new(
                 "unsupported statement after native terminator for Stage 7b: no statements may follow a terminal if/else",
@@ -372,16 +503,18 @@ fn validate_stage_6c_guard(
     if_stmt: &hir::IfStmt,
     fallback_statements: &[Stmt],
     local_states: &HashMap<String, NativeSmokeLocalState>,
+    main_return: NativeSmokeMainReturn,
 ) -> Result<NativeSmokeTerminator, BackendError> {
-    if fallback_statements.is_empty() {
+    if fallback_statements.is_empty() && main_return != NativeSmokeMainReturn::Void {
         return Err(BackendError::new(
             "unsupported native branch fallthrough for Stage 7b: guard `if` without `else` requires a supported fallback block",
         ));
     }
 
     let condition = validate_stage_6c_condition(&if_stmt.condition, local_states)?;
-    let then_block = validate_stage_6c_branch(&if_stmt.then_block.statements, local_states)?;
-    let fallback = validate_stage_6c_block(fallback_statements, local_states)?;
+    let then_block =
+        validate_stage_6c_branch(&if_stmt.then_block.statements, local_states, main_return)?;
+    let fallback = validate_stage_6c_block(fallback_statements, local_states, main_return)?;
 
     Ok(NativeSmokeTerminator::Guard {
         condition: condition.condition,
@@ -496,6 +629,9 @@ fn validate_stage_6c_fallthrough_block(
                 }
                 native_statements.push(NativeSmokeStmt::Assign(assignment));
             }
+            Stmt::Echo { expr, .. } => {
+                native_statements.push(validate_stage_6c_echo(expr)?);
+            }
             Stmt::While(while_stmt) => {
                 let native_while = validate_stage_6c_while(while_stmt, &block_states)?;
                 merge_native_values(&mut block_states, &native_while.final_values)?;
@@ -523,7 +659,7 @@ fn validate_stage_6c_fallthrough_block(
             }
             other => {
                 return Err(BackendError::new(format!(
-                    "unsupported native fallthrough branch for Stage 7b: expected supported local declaration, assignment, bounded structured while, or nested fallthrough if, found {}",
+                    "unsupported native fallthrough branch for Stage 7b: expected supported local declaration, assignment, string-literal echo, bounded structured while, or nested fallthrough if, found {}",
                     describe_statement(other)
                 )));
             }
@@ -590,6 +726,19 @@ fn validate_stage_6c_local(
         writable: decl.writable,
         expr: initializer.expr,
         evaluated_value: initializer.value,
+    })
+}
+
+fn validate_stage_6c_echo(expr: &Expr) -> Result<NativeSmokeStmt, BackendError> {
+    let Expr::String { value, .. } = expr else {
+        return Err(BackendError::new(format!(
+            "unsupported native echo expression for Stage 7b: expected string literal, found `{}`",
+            describe_expression(expr)
+        )));
+    };
+
+    Ok(NativeSmokeStmt::EchoStringLiteral {
+        value: value.clone(),
     })
 }
 
@@ -776,6 +925,9 @@ fn validate_stage_6c_while_scoped_body(
                     visible_state.value = assignment.evaluated_value;
                 }
                 native_statements.push(NativeSmokeStmt::Assign(assignment));
+            }
+            Stmt::Echo { expr, .. } => {
+                native_statements.push(validate_stage_6c_echo(expr)?);
             }
             Stmt::If(if_stmt) => {
                 let native_if = validate_stage_6c_loop_fallthrough_if(if_stmt, &block_states)?;
@@ -1126,6 +1278,7 @@ fn evaluate_native_scoped_statements(
                     visible_target.value = evaluated_value;
                 }
             }
+            NativeSmokeStmt::EchoStringLiteral { .. } => {}
             NativeSmokeStmt::If(native_if) => {
                 let updated_states = evaluate_native_scoped_if(native_if, &block_states)?;
                 for name in sorted_native_local_names(&block_states) {
@@ -1206,8 +1359,12 @@ fn stage_6c_loop_cap_error() -> BackendError {
 fn validate_stage_6c_terminator(
     statement: &Stmt,
     local_states: &HashMap<String, NativeSmokeLocalState>,
+    main_return: NativeSmokeMainReturn,
 ) -> Result<NativeSmokeTerminator, BackendError> {
     match statement {
+        Stmt::Return { expr: None, .. } if main_return == NativeSmokeMainReturn::Void => {
+            Ok(NativeSmokeTerminator::ExitSuccess)
+        }
         Stmt::Return { expr: Some(expr), .. } => {
             let (expr, evaluated_exit_code) = validate_stage_6c_return_expr(expr, local_states)?;
             Ok(NativeSmokeTerminator::Return {
@@ -1220,7 +1377,8 @@ fn validate_stage_6c_terminator(
         )),
         Stmt::If(if_stmt) => {
             let condition = validate_stage_6c_condition(&if_stmt.condition, local_states)?;
-            let then_block = validate_stage_6c_branch(&if_stmt.then_block.statements, local_states)?;
+            let then_block =
+                validate_stage_6c_branch(&if_stmt.then_block.statements, local_states, main_return)?;
 
             let Some(else_branch) = &if_stmt.else_branch else {
                 return Err(BackendError::new(
@@ -1230,9 +1388,11 @@ fn validate_stage_6c_terminator(
 
             let else_block = match else_branch {
                 ElseBranch::Block(else_block) => {
-                    validate_stage_6c_branch(&else_block.statements, local_states)?
+                    validate_stage_6c_branch(&else_block.statements, local_states, main_return)?
                 }
-                ElseBranch::If(else_if) => validate_stage_6c_if_as_block(else_if, local_states)?,
+                ElseBranch::If(else_if) => {
+                    validate_stage_6c_if_as_block(else_if, local_states, main_return)?
+                }
             };
 
             Ok(NativeSmokeTerminator::IfElse {
@@ -1252,13 +1412,14 @@ fn validate_stage_6c_terminator(
 fn validate_stage_6c_branch(
     statements: &[Stmt],
     local_states: &HashMap<String, NativeSmokeLocalState>,
+    main_return: NativeSmokeMainReturn,
 ) -> Result<NativeSmokeBlock, BackendError> {
-    validate_stage_6c_block(statements, local_states).map_err(|error| {
+    validate_stage_6c_block(statements, local_states, main_return).map_err(|error| {
         if should_preserve_native_block_error(&error.message) {
             error
         } else {
             BackendError::new(
-                "unsupported native branch body shape for Stage 7b: expected supported local declarations, assignments, bounded while statements, or fallthrough if statements followed by a supported native terminator",
+                "unsupported native branch body shape for Stage 7b: expected supported local declarations, assignments, string-literal echo statements, bounded while statements, or fallthrough if statements followed by a supported native terminator",
             )
         }
     })
@@ -1267,13 +1428,10 @@ fn validate_stage_6c_branch(
 fn validate_stage_6c_if_as_block(
     if_stmt: &hir::IfStmt,
     local_states: &HashMap<String, NativeSmokeLocalState>,
+    main_return: NativeSmokeMainReturn,
 ) -> Result<NativeSmokeBlock, BackendError> {
     let statement = Stmt::If(if_stmt.clone());
-    let terminator = validate_stage_6c_terminator(&statement, local_states)?;
-    Ok(NativeSmokeBlock {
-        statements: Vec::new(),
-        terminator,
-    })
+    validate_stage_6c_block(&[statement], local_states, main_return)
 }
 
 fn should_preserve_native_block_error(message: &str) -> bool {
@@ -1517,6 +1675,7 @@ fn evaluate_native_block_exit_code(block: &NativeSmokeBlock) -> i32 {
 
 fn evaluate_native_terminator_exit_code(terminator: &NativeSmokeTerminator) -> i32 {
     match terminator {
+        NativeSmokeTerminator::ExitSuccess => 0,
         NativeSmokeTerminator::Return {
             evaluated_exit_code,
             ..
@@ -1567,8 +1726,12 @@ fn parse_stage_6c_exit_code(value: i64) -> Result<i32, BackendError> {
 pub(crate) fn lower_to_object(native_module: &NativeSmokeModule) -> Result<Vec<u8>, BackendError> {
     let isa_builder = cranelift_native::builder()
         .map_err(|error| BackendError::new(format!("backend emission failure: {error}")))?;
+    let mut flag_builder = settings::builder();
+    flag_builder
+        .set("is_pic", "true")
+        .map_err(|error| BackendError::new(format!("backend emission failure: {error}")))?;
     let isa = isa_builder
-        .finish(settings::Flags::new(settings::builder()))
+        .finish(settings::Flags::new(flag_builder))
         .map_err(|error| BackendError::new(format!("backend emission failure: {error}")))?;
     let mut module = ObjectModule::new(
         ObjectBuilder::new(isa, "doria_stage_7b", default_libcall_names())
@@ -1592,9 +1755,11 @@ pub(crate) fn lower_to_object(native_module: &NativeSmokeModule) -> Result<Vec<u
         builder.seal_block(entry_block);
         let mut lowered_local_values = HashMap::new();
         let mut evaluated_local_values = HashMap::new();
+        let mut resources = NativeSmokeLoweringResources::new(&mut module);
         lower_native_block(
             &mut builder,
             &native_module.body,
+            &mut resources,
             &mut lowered_local_values,
             &mut evaluated_local_values,
         )?;
@@ -1615,6 +1780,7 @@ pub(crate) fn lower_to_object(native_module: &NativeSmokeModule) -> Result<Vec<u
 fn lower_native_block(
     builder: &mut FunctionBuilder,
     block: &NativeSmokeBlock,
+    resources: &mut NativeSmokeLoweringResources<'_>,
     lowered_local_values: &mut HashMap<String, Value>,
     evaluated_local_values: &mut HashMap<String, i64>,
 ) -> Result<(), BackendError> {
@@ -1622,6 +1788,7 @@ fn lower_native_block(
         lower_native_statement(
             builder,
             statement,
+            resources,
             lowered_local_values,
             evaluated_local_values,
             None,
@@ -1632,6 +1799,7 @@ fn lower_native_block(
     lower_native_terminator(
         builder,
         &block.terminator,
+        resources,
         lowered_local_values,
         evaluated_local_values,
     )
@@ -1640,10 +1808,15 @@ fn lower_native_block(
 fn lower_native_terminator(
     builder: &mut FunctionBuilder,
     terminator: &NativeSmokeTerminator,
+    resources: &mut NativeSmokeLoweringResources<'_>,
     lowered_local_values: &HashMap<String, Value>,
     evaluated_local_values: &HashMap<String, i64>,
 ) -> Result<(), BackendError> {
     match terminator {
+        NativeSmokeTerminator::ExitSuccess => {
+            lower_native_success_return(builder);
+            Ok(())
+        }
         NativeSmokeTerminator::Return {
             expr,
             evaluated_exit_code,
@@ -1686,6 +1859,7 @@ fn lower_native_terminator(
             lower_native_block(
                 builder,
                 then_block,
+                resources,
                 &mut then_lowered_local_values,
                 &mut then_evaluated_local_values,
             )?;
@@ -1697,6 +1871,7 @@ fn lower_native_terminator(
             lower_native_block(
                 builder,
                 else_block,
+                resources,
                 &mut else_lowered_local_values,
                 &mut else_evaluated_local_values,
             )
@@ -1733,6 +1908,7 @@ fn lower_native_terminator(
             lower_native_block(
                 builder,
                 then_block,
+                resources,
                 &mut then_lowered_local_values,
                 &mut then_evaluated_local_values,
             )?;
@@ -1744,6 +1920,7 @@ fn lower_native_terminator(
             lower_native_block(
                 builder,
                 fallback,
+                resources,
                 &mut fallback_lowered_local_values,
                 &mut fallback_evaluated_local_values,
             )
@@ -1754,6 +1931,7 @@ fn lower_native_terminator(
 fn lower_native_statement(
     builder: &mut FunctionBuilder,
     statement: &NativeSmokeStmt,
+    resources: &mut NativeSmokeLoweringResources<'_>,
     lowered_local_values: &mut HashMap<String, Value>,
     evaluated_local_values: &mut HashMap<String, i64>,
     visible_local_values: Option<&HashMap<String, Value>>,
@@ -1772,9 +1950,14 @@ fn lower_native_statement(
             evaluated_local_values.insert(assignment.target.clone(), assignment.evaluated_value);
             Ok(NativeSmokeLoweringFlow::Fallthrough)
         }
+        NativeSmokeStmt::EchoStringLiteral { value } => {
+            lower_native_echo_string_literal(builder, value, resources)?;
+            Ok(NativeSmokeLoweringFlow::Fallthrough)
+        }
         NativeSmokeStmt::While(native_while) => lower_native_while(
             builder,
             native_while,
+            resources,
             lowered_local_values,
             evaluated_local_values,
         )
@@ -1782,6 +1965,7 @@ fn lower_native_statement(
         NativeSmokeStmt::If(native_if) => lower_native_fallthrough_if(
             builder,
             native_if,
+            resources,
             lowered_local_values,
             evaluated_local_values,
             visible_local_values,
@@ -1828,6 +2012,7 @@ fn lower_native_statement(
 fn lower_native_fallthrough_if(
     builder: &mut FunctionBuilder,
     native_if: &NativeSmokeIf,
+    resources: &mut NativeSmokeLoweringResources<'_>,
     lowered_local_values: &mut HashMap<String, Value>,
     evaluated_local_values: &mut HashMap<String, i64>,
     visible_local_values: Option<&HashMap<String, Value>>,
@@ -1854,6 +2039,7 @@ fn lower_native_fallthrough_if(
     let then_visible_local_values = lower_native_fallthrough_block(
         builder,
         &native_if.then_block,
+        resources,
         &mut then_lowered_local_values,
         &mut then_evaluated_local_values,
         &base_visible_local_values,
@@ -1878,6 +2064,7 @@ fn lower_native_fallthrough_if(
         lower_native_fallthrough_block(
             builder,
             else_block,
+            resources,
             &mut else_lowered_local_values,
             &mut else_evaluated_local_values,
             &base_visible_local_values,
@@ -1930,6 +2117,7 @@ fn ensure_native_merge_block(
 fn lower_native_fallthrough_block(
     builder: &mut FunctionBuilder,
     block: &NativeSmokeFallthroughBlock,
+    resources: &mut NativeSmokeLoweringResources<'_>,
     lowered_local_values: &mut HashMap<String, Value>,
     evaluated_local_values: &mut HashMap<String, i64>,
     visible_local_values: &HashMap<String, Value>,
@@ -1945,6 +2133,7 @@ fn lower_native_fallthrough_block(
                 lower_native_statement(
                     builder,
                     statement,
+                    resources,
                     lowered_local_values,
                     evaluated_local_values,
                     Some(&visible_lowered_local_values),
@@ -1958,6 +2147,7 @@ fn lower_native_fallthrough_block(
                 lower_native_statement(
                     builder,
                     statement,
+                    resources,
                     lowered_local_values,
                     evaluated_local_values,
                     Some(&visible_lowered_local_values),
@@ -1974,6 +2164,7 @@ fn lower_native_fallthrough_block(
                 lower_native_statement(
                     builder,
                     statement,
+                    resources,
                     lowered_local_values,
                     evaluated_local_values,
                     Some(&visible_lowered_local_values),
@@ -1988,10 +2179,22 @@ fn lower_native_fallthrough_block(
                     )?;
                 }
             }
+            NativeSmokeStmt::EchoStringLiteral { .. } => {
+                lower_native_statement(
+                    builder,
+                    statement,
+                    resources,
+                    lowered_local_values,
+                    evaluated_local_values,
+                    Some(&visible_lowered_local_values),
+                    loop_context,
+                )?;
+            }
             NativeSmokeStmt::If(native_if) => {
                 if lower_native_statement(
                     builder,
                     statement,
+                    resources,
                     lowered_local_values,
                     evaluated_local_values,
                     Some(&visible_lowered_local_values),
@@ -2013,6 +2216,7 @@ fn lower_native_fallthrough_block(
                 lower_native_statement(
                     builder,
                     statement,
+                    resources,
                     lowered_local_values,
                     evaluated_local_values,
                     Some(&visible_lowered_local_values),
@@ -2111,6 +2315,7 @@ fn jump_to_native_carried_block(
 fn lower_native_while(
     builder: &mut FunctionBuilder,
     native_while: &NativeSmokeWhile,
+    resources: &mut NativeSmokeLoweringResources<'_>,
     lowered_local_values: &mut HashMap<String, Value>,
     evaluated_local_values: &mut HashMap<String, i64>,
 ) -> Result<(), BackendError> {
@@ -2184,6 +2389,7 @@ fn lower_native_while(
     let visible_body_values = lower_native_fallthrough_block(
         builder,
         &native_while.body,
+        resources,
         &mut body_local_values,
         &mut body_evaluated_values,
         &header_local_values,
@@ -2241,6 +2447,253 @@ fn lower_native_assignment(
             })
         }
     }
+}
+
+fn lower_native_success_return(builder: &mut FunctionBuilder) {
+    let exit_value = builder.ins().iconst(types::I32, 0);
+    builder.ins().return_(&[exit_value]);
+}
+
+fn lower_native_error_return(builder: &mut FunctionBuilder) {
+    let exit_value = builder.ins().iconst(types::I32, 1);
+    builder.ins().return_(&[exit_value]);
+}
+
+fn lower_native_echo_string_literal(
+    builder: &mut FunctionBuilder,
+    value: &str,
+    resources: &mut NativeSmokeLoweringResources<'_>,
+) -> Result<(), BackendError> {
+    if value.is_empty() {
+        return Ok(());
+    }
+
+    let data_pointer = define_native_echo_string_literal(builder, value, resources)?;
+
+    match host_native_smoke_stdout_platform() {
+        NativeSmokeStdoutPlatform::Unix => {
+            lower_native_unix_echo_string_literal(builder, value, data_pointer, resources)
+        }
+        NativeSmokeStdoutPlatform::Windows => {
+            lower_native_windows_echo_string_literal(builder, value, data_pointer, resources)
+        }
+        NativeSmokeStdoutPlatform::Unsupported => Err(BackendError::new(
+            "unsupported native echo statement for Stage 7b: string-literal stdout smoke path is currently available only on Unix-like and Windows targets",
+        )),
+    }
+}
+
+fn define_native_echo_string_literal(
+    builder: &mut FunctionBuilder,
+    value: &str,
+    resources: &mut NativeSmokeLoweringResources<'_>,
+) -> Result<Value, BackendError> {
+    let data_name = format!("__doria_stage_7b_echo_{}", resources.next_string_literal_id);
+    resources.next_string_literal_id += 1;
+
+    let data_id = resources
+        .module
+        .declare_data(&data_name, Linkage::Local, false, false)
+        .map_err(|error| BackendError::new(format!("backend emission failure: {error}")))?;
+    let mut data_description = DataDescription::new();
+    data_description.define(value.as_bytes().to_vec().into_boxed_slice());
+    resources
+        .module
+        .define_data(data_id, &data_description)
+        .map_err(|error| BackendError::new(format!("backend emission failure: {error}")))?;
+
+    let pointer_type = resources.module.target_config().pointer_type();
+    let global_value = resources.module.declare_data_in_func(data_id, builder.func);
+    Ok(builder.ins().global_value(pointer_type, global_value))
+}
+
+fn lower_native_unix_echo_string_literal(
+    builder: &mut FunctionBuilder,
+    value: &str,
+    data_pointer: Value,
+    resources: &mut NativeSmokeLoweringResources<'_>,
+) -> Result<(), BackendError> {
+    // Stage 7b's stdout smoke path is intentionally narrow: string literals go
+    // straight to stdout, with no native string/runtime model implied.
+    let write_function_id = resources.declare_write_function()?;
+    let write_function = resources
+        .module
+        .declare_func_in_func(write_function_id, builder.func);
+    let pointer_type = resources.module.target_config().pointer_type();
+    let fd = builder.ins().iconst(types::I32, 1);
+
+    let loop_block = builder.create_block();
+    let write_block = builder.create_block();
+    let advance_block = builder.create_block();
+    let error_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder.append_block_param(loop_block, pointer_type);
+    builder.append_block_param(loop_block, pointer_type);
+
+    let zero = builder.ins().iconst(pointer_type, 0);
+    let byte_count = builder.ins().iconst(pointer_type, value.len() as i64);
+    builder.ins().jump(
+        loop_block,
+        &[BlockArg::Value(zero), BlockArg::Value(byte_count)],
+    );
+
+    builder.switch_to_block(loop_block);
+    let offset = builder.block_params(loop_block)[0];
+    let remaining = builder.block_params(loop_block)[1];
+    let is_done = builder.ins().icmp_imm(IntCC::Equal, remaining, 0);
+    builder
+        .ins()
+        .brif(is_done, done_block, &[], write_block, &[]);
+
+    builder.switch_to_block(write_block);
+    builder.seal_block(write_block);
+    let current_pointer = builder.ins().iadd(data_pointer, offset);
+    let write_call = builder
+        .ins()
+        .call(write_function, &[fd, current_pointer, remaining]);
+    let written = builder.inst_results(write_call)[0];
+    let made_progress = builder.ins().icmp_imm(IntCC::SignedGreaterThan, written, 0);
+    builder
+        .ins()
+        .brif(made_progress, advance_block, &[], error_block, &[]);
+
+    builder.switch_to_block(advance_block);
+    builder.seal_block(advance_block);
+    let next_offset = builder.ins().iadd(offset, written);
+    let next_remaining = builder.ins().isub(remaining, written);
+    builder.ins().jump(
+        loop_block,
+        &[
+            BlockArg::Value(next_offset),
+            BlockArg::Value(next_remaining),
+        ],
+    );
+    builder.seal_block(loop_block);
+
+    builder.switch_to_block(error_block);
+    builder.seal_block(error_block);
+    lower_native_error_return(builder);
+
+    builder.switch_to_block(done_block);
+    builder.seal_block(done_block);
+
+    Ok(())
+}
+
+fn lower_native_windows_echo_string_literal(
+    builder: &mut FunctionBuilder,
+    value: &str,
+    data_pointer: Value,
+    resources: &mut NativeSmokeLoweringResources<'_>,
+) -> Result<(), BackendError> {
+    // Stage 7b's stdout smoke path uses Kernel32 directly on Windows so it can
+    // work with Doria's generated `main` entrypoint without CRT startup.
+    let byte_count = i64::try_from(value.len())
+        .ok()
+        .and_then(|len| i32::try_from(len).ok())
+        .ok_or_else(|| {
+            BackendError::new(
+                "unsupported native echo statement for Stage 7b: Windows string-literal stdout smoke path supports literals up to 2147483647 bytes",
+            )
+        })?;
+    let pointer_type = resources.module.target_config().pointer_type();
+    let get_std_handle_id = resources.declare_get_std_handle_function()?;
+    let get_std_handle = resources
+        .module
+        .declare_func_in_func(get_std_handle_id, builder.func);
+    let std_output_handle = builder.ins().iconst(types::I32, -11);
+    let handle_call = builder.ins().call(get_std_handle, &[std_output_handle]);
+    let handle = builder.inst_results(handle_call)[0];
+
+    let written_slot =
+        builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 4, 2));
+    let zero = builder.ins().iconst(types::I32, 0);
+    builder.ins().stack_store(zero, written_slot, 0);
+    let written_pointer = builder.ins().stack_addr(pointer_type, written_slot, 0);
+    let overlapped_pointer = builder.ins().iconst(pointer_type, 0);
+
+    let write_file_id = resources.declare_write_file_function()?;
+    let write_file = resources
+        .module
+        .declare_func_in_func(write_file_id, builder.func);
+
+    let loop_block = builder.create_block();
+    let write_block = builder.create_block();
+    let check_written_block = builder.create_block();
+    let advance_block = builder.create_block();
+    let error_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder.append_block_param(loop_block, pointer_type);
+    builder.append_block_param(loop_block, types::I32);
+
+    let offset_zero = builder.ins().iconst(pointer_type, 0);
+    let remaining_count = builder.ins().iconst(types::I32, i64::from(byte_count));
+    builder.ins().jump(
+        loop_block,
+        &[
+            BlockArg::Value(offset_zero),
+            BlockArg::Value(remaining_count),
+        ],
+    );
+
+    builder.switch_to_block(loop_block);
+    let offset = builder.block_params(loop_block)[0];
+    let remaining = builder.block_params(loop_block)[1];
+    let is_done = builder.ins().icmp_imm(IntCC::Equal, remaining, 0);
+    builder
+        .ins()
+        .brif(is_done, done_block, &[], write_block, &[]);
+
+    builder.switch_to_block(write_block);
+    builder.seal_block(write_block);
+    builder.ins().stack_store(zero, written_slot, 0);
+    let current_pointer = builder.ins().iadd(data_pointer, offset);
+    let write_call = builder.ins().call(
+        write_file,
+        &[
+            handle,
+            current_pointer,
+            remaining,
+            written_pointer,
+            overlapped_pointer,
+        ],
+    );
+    let write_ok = builder.inst_results(write_call)[0];
+    let succeeded = builder.ins().icmp_imm(IntCC::NotEqual, write_ok, 0);
+    builder
+        .ins()
+        .brif(succeeded, check_written_block, &[], error_block, &[]);
+
+    builder.switch_to_block(check_written_block);
+    builder.seal_block(check_written_block);
+    let written = builder.ins().stack_load(types::I32, written_slot, 0);
+    let made_progress = builder.ins().icmp_imm(IntCC::NotEqual, written, 0);
+    builder
+        .ins()
+        .brif(made_progress, advance_block, &[], error_block, &[]);
+
+    builder.switch_to_block(advance_block);
+    builder.seal_block(advance_block);
+    let written_offset = builder.ins().uextend(pointer_type, written);
+    let next_offset = builder.ins().iadd(offset, written_offset);
+    let next_remaining = builder.ins().isub(remaining, written);
+    builder.ins().jump(
+        loop_block,
+        &[
+            BlockArg::Value(next_offset),
+            BlockArg::Value(next_remaining),
+        ],
+    );
+    builder.seal_block(loop_block);
+
+    builder.switch_to_block(error_block);
+    builder.seal_block(error_block);
+    lower_native_error_return(builder);
+
+    builder.switch_to_block(done_block);
+    builder.seal_block(done_block);
+
+    Ok(())
 }
 
 fn lower_native_return(
@@ -2543,6 +2996,60 @@ mod tests {
     fn validate_test_source(source: &str) -> NativeSmokeModule {
         let program = lower_test_source(source);
         validate(&program).expect("expected native smoke validation to pass")
+    }
+
+    #[test]
+    fn stdout_platform_selection_supports_unix_and_windows() {
+        assert_eq!(
+            native_smoke_stdout_platform(false, true),
+            NativeSmokeStdoutPlatform::Unix
+        );
+        assert_eq!(
+            native_smoke_stdout_platform(true, false),
+            NativeSmokeStdoutPlatform::Windows
+        );
+        assert_eq!(
+            native_smoke_stdout_platform(false, false),
+            NativeSmokeStdoutPlatform::Unsupported
+        );
+    }
+
+    #[test]
+    fn validation_accepts_string_literal_echo_without_platform_gate() {
+        let module = validate_test_source(
+            r#"
+function main(): void
+{
+    echo "Hello Doria!";
+}
+"#,
+        );
+
+        assert!(matches!(
+            module.body.statements.as_slice(),
+            [NativeSmokeStmt::EchoStringLiteral { value }] if value == "Hello Doria!"
+        ));
+        assert_eq!(module.body.terminator, NativeSmokeTerminator::ExitSuccess);
+    }
+
+    #[test]
+    fn validation_accepts_void_guard_if_with_implicit_success_fallback() {
+        let module = validate_test_source(
+            r#"
+function main(): void
+{
+    if (true) {
+        return;
+    }
+}
+"#,
+        );
+
+        assert!(matches!(
+            module.body.terminator,
+            NativeSmokeTerminator::Guard { .. }
+        ));
+        assert_eq!(evaluate_exit_code(&module), 0);
     }
 
     #[test]
