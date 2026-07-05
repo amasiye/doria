@@ -79,6 +79,33 @@ fn parses_boolean_word_operators() {
 }
 
 #[test]
+fn parses_string_concat_operator() {
+    let expr = parse_echo_expr(r#"echo "Hello " . $name . "!";"#);
+    let Expr::Binary {
+        left,
+        op: BinaryOp::Concat,
+        right,
+        ..
+    } = expr
+    else {
+        panic!("expected outer concat expression");
+    };
+
+    assert!(matches!(right.as_ref(), Expr::String { value, .. } if value == "!"));
+    let Expr::Binary {
+        left: inner_left,
+        op: BinaryOp::Concat,
+        right: inner_right,
+        ..
+    } = left.as_ref()
+    else {
+        panic!("expected left-associative inner concat expression");
+    };
+    assert!(matches!(inner_left.as_ref(), Expr::String { value, .. } if value == "Hello "));
+    assert!(matches!(inner_right.as_ref(), Expr::Variable { name, .. } if name == "name"));
+}
+
+#[test]
 fn rejects_ambiguous_xor_expressions() {
     for source in [
         "echo true xor false xor true;",

@@ -122,6 +122,43 @@ function main(): void
 }
 
 #[test]
+fn php_backend_preserves_main_string_concat_echo() {
+    let php = doriac::compile_source_to_php(
+        "test.doria",
+        r#"
+function main(): void
+{
+    let $name = "Doria";
+    echo "Hello " . $name . "!";
+}
+"#,
+    )
+    .expect("compilation should succeed");
+
+    assert!(php.contains("$name = \"Doria\";"));
+    assert!(php.contains("echo \"Hello \" . $name . \"!\";"));
+}
+
+#[test]
+fn php_backend_preserves_main_string_concat_local_initializer() {
+    let php = doriac::compile_source_to_php(
+        "test.doria",
+        r#"
+function main(): void
+{
+    let $name = "Doria";
+    let $message = "Hello " . $name . "!";
+    echo $message;
+}
+"#,
+    )
+    .expect("compilation should succeed");
+
+    assert!(php.contains("$message = \"Hello \" . $name . \"!\";"));
+    assert!(php.contains("echo $message;"));
+}
+
+#[test]
 fn lowers_checked_program_to_hir() {
     let lowered = doriac::lower_source(
         "test.doria",

@@ -220,6 +220,8 @@ fn infers_binary_expression_types_for_assignment_compatibility() {
 int $sum = 1 + 2;
 float $total = 1.5 + 2.5;
 string $message = "hello" . " world";
+let $concatName = "Doria";
+let $greeting = "Hello " . $concatName . "!";
 bool $less = 1 < 2;
 bool $floatLess = 1.5 <= 2.5;
 bool $stringLess = "a" < "b";
@@ -234,6 +236,8 @@ string $name = null ?? "Andrew";
 "#,
     )
     .expect("semantic check should succeed");
+
+    assert_diagnostic_code(r#"let $message = "Count: " . 42;"#, "E0425");
 
     for source in [
         r#"string $value = 1 + 2;"#,

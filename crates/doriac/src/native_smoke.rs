@@ -763,7 +763,7 @@ fn validate_stage_6c_local(
     decl: &hir::VarDecl,
     local_states: &HashMap<String, NativeSmokeLocalState>,
 ) -> Result<NativeSmokeLocal, BackendError> {
-    if let Some(local) = validate_stage_8a_string_local(decl)? {
+    if let Some(local) = validate_stage_8_string_local(decl, local_states)? {
         return Ok(local);
     }
 
@@ -789,10 +789,11 @@ fn validate_stage_6c_local(
     })
 }
 
-fn validate_stage_8a_string_local(
+fn validate_stage_8_string_local(
     decl: &hir::VarDecl,
+    local_states: &HashMap<String, NativeSmokeLocalState>,
 ) -> Result<Option<NativeSmokeLocal>, BackendError> {
-    let Some((expr, value)) = validate_stage_8a_string_local_initializer(&decl.initializer)? else {
+    let Some(expr) = try_validate_stage_8_string_expr(&decl.initializer, local_states)? else {
         return Ok(None);
     };
 
@@ -803,84 +804,117 @@ fn validate_stage_8a_string_local(
     }
 
     if decl.writable {
-        return Err(unsupported_stage_8a_writable_string_local());
+        return Err(unsupported_stage_8_writable_string_local());
     }
+
+    let NativeSmokeExpr::StringLiteral(value) = &expr else {
+        return Err(BackendError::new(
+            "backend validation failure: validated native string local was not compile-time-known",
+        ));
+    };
+    let evaluated_value = NativeSmokeValue::StringLiteral(value.clone());
 
     Ok(Some(NativeSmokeLocal {
         name: decl.name.clone(),
         writable: false,
         expr,
-        evaluated_value: NativeSmokeValue::StringLiteral(value),
+        evaluated_value,
     }))
 }
 
-fn validate_stage_8a_string_local_initializer(
+fn try_validate_stage_8_string_expr(
     expr: &Expr,
-) -> Result<Option<(NativeSmokeExpr, String)>, BackendError> {
+    local_states: &HashMap<String, NativeSmokeLocalState>,
+) -> Result<Option<NativeSmokeExpr>, BackendError> {
     match expr {
-        Expr::String { value, .. } => Ok(Some((
-            NativeSmokeExpr::StringLiteral(value.clone()),
-            value.clone(),
-        ))),
-        Expr::Grouped { expr, .. } => validate_stage_8a_string_local_initializer(expr),
-        Expr::InterpolatedString { .. } => Err(unsupported_stage_8a_string_interpolation()),
+        Expr::String { value, .. } => Ok(Some(NativeSmokeExpr::StringLiteral(value.clone()))),
+        Expr::Grouped { expr, .. } => try_validate_stage_8_string_expr(expr, local_states),
+        Expr::Variable { name, .. } => Ok(local_states
+            .get(name)
+            .and_then(|state| state.value.as_string_literal())
+            .map(|value| NativeSmokeExpr::StringLiteral(value.to_string()))),
+        Expr::Binary {
+            left,
+            op: BinaryOp::Concat,
+            right,
+            ..
+        } => {
+            let left = validate_stage_8_string_expr(left, local_states)?;
+            let right = validate_stage_8_string_expr(right, local_states)?;
+            let NativeSmokeExpr::StringLiteral(left_value) = left else {
+                return Err(BackendError::new(
+                    "backend validation failure: validated native string concat left operand was not compile-time-known",
+                ));
+            };
+            let NativeSmokeExpr::StringLiteral(right_value) = right else {
+                return Err(BackendError::new(
+                    "backend validation failure: validated native string concat right operand was not compile-time-known",
+                ));
+            };
+            Ok(Some(NativeSmokeExpr::StringLiteral(format!(
+                "{left_value}{right_value}"
+            ))))
+        }
+        Expr::InterpolatedString { .. } => Err(unsupported_stage_8_string_interpolation()),
         _ => Ok(None),
     }
+}
+
+fn validate_stage_8_string_expr(
+    expr: &Expr,
+    local_states: &HashMap<String, NativeSmokeLocalState>,
+) -> Result<NativeSmokeExpr, BackendError> {
+    try_validate_stage_8_string_expr(expr, local_states)?
+        .ok_or_else(|| unsupported_stage_8_string_expression(expr))
+}
+
+fn validate_stage_8_echo_expr(
+    expr: &Expr,
+    local_states: &HashMap<String, NativeSmokeLocalState>,
+) -> Result<NativeSmokeExpr, BackendError> {
+    try_validate_stage_8_string_expr(expr, local_states)?
+        .ok_or_else(|| unsupported_stage_8_echo_expression(expr))
 }
 
 fn validate_stage_6c_echo(
     expr: &Expr,
     local_states: &HashMap<String, NativeSmokeLocalState>,
 ) -> Result<NativeSmokeStmt, BackendError> {
-    Ok(NativeSmokeStmt::Echo(validate_stage_8a_echo_expr(
+    Ok(NativeSmokeStmt::Echo(validate_stage_8_echo_expr(
         expr,
         local_states,
     )?))
 }
 
-fn validate_stage_8a_echo_expr(
-    expr: &Expr,
-    local_states: &HashMap<String, NativeSmokeLocalState>,
-) -> Result<NativeSmokeExpr, BackendError> {
-    match expr {
-        Expr::String { value, .. } => Ok(NativeSmokeExpr::StringLiteral(value.clone())),
-        Expr::Grouped { expr, .. } => validate_stage_8a_echo_expr(expr, local_states),
-        Expr::Variable { name, .. } => {
-            let Some(value) = local_states
-                .get(name)
-                .and_then(|state| state.value.as_string_literal())
-            else {
-                return Err(unsupported_stage_8a_echo_expression(expr));
-            };
-            Ok(NativeSmokeExpr::StringLiteral(value.to_string()))
-        }
-        Expr::InterpolatedString { .. } => Err(unsupported_stage_8a_string_interpolation()),
-        _ => Err(unsupported_stage_8a_echo_expression(expr)),
-    }
-}
-
 fn unsupported_current_native_local() -> BackendError {
     BackendError::new(
-        "unsupported native local for current native smoke backend: expected readonly or writable `int` local initialized from integer literals, supported integer locals, or supported integer arithmetic, or readonly `string` local initialized from a string literal",
+        "unsupported native local for current native smoke backend: expected readonly or writable `int` local initialized from integer literals, supported integer locals, or supported integer arithmetic, or readonly `string` local initialized from a supported string expression",
     )
 }
 
-fn unsupported_stage_8a_writable_string_local() -> BackendError {
+fn unsupported_stage_8_writable_string_local() -> BackendError {
     BackendError::new(
-        "unsupported native string local for Stage 8a: writable string locals are future work",
+        "unsupported native string local for Stage 8: writable string locals are future work",
     )
 }
 
-fn unsupported_stage_8a_echo_expression(expr: &Expr) -> BackendError {
+fn unsupported_stage_8_string_expression(expr: &Expr) -> BackendError {
     BackendError::new(format!(
-        "unsupported native echo expression for Stage 8a: expected string literal or supported readonly string local, found `{}`",
+        "unsupported native string expression for Stage 8: expected supported string expression, found `{}`",
         describe_expression(expr)
     ))
 }
 
-fn unsupported_stage_8a_string_interpolation() -> BackendError {
+fn unsupported_stage_8_echo_expression(expr: &Expr) -> BackendError {
+    BackendError::new(format!(
+        "unsupported native echo expression for Stage 8: expected supported string expression, found `{}`",
+        describe_expression(expr)
+    ))
+}
+
+fn unsupported_stage_8_string_interpolation() -> BackendError {
     BackendError::new(
-        "unsupported native string interpolation for Stage 8a: interpolation is future native string work",
+        "unsupported native string interpolation for Stage 8: interpolation is future native string work",
     )
 }
 
@@ -908,7 +942,7 @@ fn validate_stage_6c_assignment(
 
     let Some(target_value) = target.value.as_int() else {
         return Err(BackendError::new(
-            "unsupported native string assignment for Stage 8a: string assignments are future work",
+            "unsupported native string assignment for Stage 8: string assignments are future work",
         ));
     };
 
@@ -1386,7 +1420,7 @@ fn validate_stage_6c_loop_local(
     decl: &hir::VarDecl,
     local_states: &HashMap<String, NativeSmokeLocalState>,
 ) -> Result<NativeSmokeLocal, BackendError> {
-    if let Some(local) = validate_stage_8a_string_local(decl)? {
+    if let Some(local) = validate_stage_8_string_local(decl, local_states)? {
         return Ok(local);
     }
 
@@ -1437,7 +1471,7 @@ fn validate_stage_6c_loop_assignment(
 
     if target.value.as_int().is_none() {
         return Err(BackendError::new(
-            "unsupported native string assignment for Stage 8a: string assignments are future work",
+            "unsupported native string assignment for Stage 8: string assignments are future work",
         ));
     }
 

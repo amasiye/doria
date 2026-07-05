@@ -450,10 +450,8 @@ fn compiles_and_runs_current_native_smoke_examples() {
             compile_native_source(native_smoke_source(stem), &output);
         }
 
-        let run = Command::new(&output)
-            .status()
-            .expect("native executable should run");
-        assert_eq!(run.code(), Some(expected_code), "{stem}");
+        let run = run_native_executable(&output).expect("native executable should run");
+        assert_eq!(run.status.code(), Some(expected_code), "{stem}");
 
         let _ = fs::remove_file(output);
     }
@@ -490,6 +488,18 @@ fn compiles_and_runs_void_main_string_literal_echo() {
     );
     let _ = fs::remove_file(string_local_output);
 
+    let string_concat_output = temp_executable_path("main_string_concat_hello");
+    compile_native_file(
+        &workspace.join("examples/native/main_string_concat_hello.doria"),
+        &string_concat_output,
+    );
+    assert_native_run_output(
+        &string_concat_output,
+        "main_string_concat_hello",
+        b"Hello Doria!",
+    );
+    let _ = fs::remove_file(string_concat_output);
+
     for (stem, expected_stdout) in [
         ("main_void_multiple_echo", b"Hello Doria!".as_slice()),
         ("main_void_empty_echo", b"".as_slice()),
@@ -507,6 +517,22 @@ fn compiles_and_runs_void_main_string_literal_echo() {
         ),
         (
             "main_void_grouped_string_local_echo",
+            b"Hello Doria!".as_slice(),
+        ),
+        (
+            "main_void_direct_string_concat_echo",
+            b"Hello Doria!".as_slice(),
+        ),
+        (
+            "main_void_string_local_concat_initializer_echo",
+            b"Hello Doria!".as_slice(),
+        ),
+        (
+            "main_void_string_concat_locals_echo",
+            b"Hello Doria!".as_slice(),
+        ),
+        (
+            "main_void_string_local_after_guard_echo",
             b"Hello Doria!".as_slice(),
         ),
         ("main_void_string_local_guard_skip", b"".as_slice()),
@@ -625,6 +651,49 @@ function main(): void
 {
     let $message = ("Hello Doria!");
     echo ($message);
+}
+"#
+        }
+        "main_void_direct_string_concat_echo" => {
+            r#"
+function main(): void
+{
+    let $name = "Doria";
+    echo "Hello " . $name . "!";
+}
+"#
+        }
+        "main_void_string_local_concat_initializer_echo" => {
+            r#"
+function main(): void
+{
+    let $name = "Doria";
+    let $message = "Hello " . $name . "!";
+    echo $message;
+}
+"#
+        }
+        "main_void_string_concat_locals_echo" => {
+            r#"
+function main(): void
+{
+    let $hello = "Hello ";
+    let $name = "Doria";
+    let $punctuation = "!";
+    echo $hello . $name . $punctuation;
+}
+"#
+        }
+        "main_void_string_local_after_guard_echo" => {
+            r#"
+function main(): void
+{
+    if (false) {
+        return;
+    }
+
+    let $message = "Hello Doria!";
+    echo $message;
 }
 "#
         }
@@ -2727,7 +2796,7 @@ function main(): int
 }
 "#,
             "B0001",
-            "unsupported native echo expression for Stage 8a",
+            "unsupported native echo expression for Stage 8",
         ),
         (
             "int local echo",
@@ -2740,7 +2809,19 @@ function main(): int
 }
 "#,
             "B0001",
-            "unsupported native echo expression for Stage 8a",
+            "unsupported native echo expression for Stage 8",
+        ),
+        (
+            "string concat int operand",
+            r#"
+function main(): void
+{
+    let $message = "Count: " . 42;
+    echo $message;
+}
+"#,
+            "E0425",
+            "string concatenation operator `.` requires `string` operands",
         ),
         (
             "writable string local",
@@ -2752,7 +2833,7 @@ function main(): void
 }
 "#,
             "B0001",
-            "unsupported native string local for Stage 8a",
+            "unsupported native string local for Stage 8",
         ),
         (
             "explicit writable string local",
@@ -2764,7 +2845,7 @@ function main(): void
 }
 "#,
             "B0001",
-            "unsupported native string local for Stage 8a",
+            "unsupported native string local for Stage 8",
         ),
         (
             "string assignment",
@@ -2789,7 +2870,7 @@ function main(): void
 }
 "#,
             "B0001",
-            "unsupported native string interpolation for Stage 8a",
+            "unsupported native string interpolation for Stage 8",
         ),
         (
             "top-level statement",

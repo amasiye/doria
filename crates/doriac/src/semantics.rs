@@ -1474,6 +1474,9 @@ impl<'program> Checker<'program> {
             BinaryOp::Equal | BinaryOp::NotEqual => {
                 self.check_equality_operands(left, right, span, scopes, method_context);
             }
+            BinaryOp::Concat => {
+                self.check_concat_operands(left, right, span, scopes, method_context);
+            }
             _ => {}
         }
     }
@@ -1530,10 +1533,42 @@ impl<'program> Checker<'program> {
         ));
     }
 
+    fn check_concat_operands(
+        &mut self,
+        left: &Expr,
+        right: &Expr,
+        span: Span,
+        scopes: &ScopeStack,
+        method_context: Option<&MethodContext>,
+    ) {
+        let left_ty = self.infer_expr_type(left, scopes, method_context);
+        let right_ty = self.infer_expr_type(right, scopes, method_context);
+        if self.is_string_or_recovery_type(left_ty) && self.is_string_or_recovery_type(right_ty) {
+            return;
+        }
+
+        self.diagnostics.push(Diagnostic::new(
+            "E0425",
+            format!(
+                "string concatenation operator `.` requires `string` operands, got `{}` and `{}`",
+                self.types.display(left_ty),
+                self.types.display(right_ty)
+            ),
+            span,
+        ));
+    }
+
     fn is_bool_or_recovery_type(&self, ty: TypeId) -> bool {
         matches!(
             self.types.kind(ty),
             TypeKind::Bool | TypeKind::Mixed | TypeKind::Unknown
+        )
+    }
+
+    fn is_string_or_recovery_type(&self, ty: TypeId) -> bool {
+        matches!(
+            self.types.kind(ty),
+            TypeKind::String | TypeKind::Mixed | TypeKind::Unknown
         )
     }
 
