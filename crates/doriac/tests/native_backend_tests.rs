@@ -1,7 +1,9 @@
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command, Output};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use doriac::backend::BackendTarget;
 
@@ -2783,9 +2785,7 @@ function main(): int
 }
 
 fn assert_native_run_output(output: &Path, stem: &str, expected_stdout: &[u8]) {
-    let run = Command::new(output)
-        .output()
-        .expect("native executable should run");
+    let run = run_native_executable(output).expect("native executable should run");
     assert_eq!(run.status.code(), Some(0), "{stem}");
     assert_eq!(run.stdout, expected_stdout, "{stem}");
     assert!(
@@ -2793,6 +2793,26 @@ fn assert_native_run_output(output: &Path, stem: &str, expected_stdout: &[u8]) {
         "{stem}: expected empty stderr, got {}",
         String::from_utf8_lossy(&run.stderr)
     );
+}
+
+fn run_native_executable(output: &Path) -> io::Result<Output> {
+    const MAX_ATTEMPTS: usize = 20;
+
+    for attempt in 0..MAX_ATTEMPTS {
+        match Command::new(output).output() {
+            Ok(output) => return Ok(output),
+            Err(error) if is_transient_executable_busy(&error) && attempt + 1 < MAX_ATTEMPTS => {
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    unreachable!("retry loop returns on final attempt")
+}
+
+fn is_transient_executable_busy(error: &io::Error) -> bool {
+    cfg!(unix) && error.raw_os_error() == Some(26)
 }
 
 fn compile_native_file(input: &Path, output: &Path) {
