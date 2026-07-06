@@ -63,7 +63,7 @@ Increment and decrement are accepted as standalone mutation statements and as `f
 
 ```doria
 $i++;
-+$i;
+++$i;
 $i--;
 --$i;
 ```

@@ -183,7 +183,7 @@ Standalone `++` and `--` mutation statements require a declared writable `int` t
 
 ```doria
 $i++;
-+$i;
+++$i;
 $i--;
 --$i;
 ```
