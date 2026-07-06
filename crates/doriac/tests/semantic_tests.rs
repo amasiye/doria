@@ -372,6 +372,87 @@ function greet(string $name = Person::age()): void
 }
 
 #[test]
+fn checks_stage_10_free_function_call_semantics() {
+    doriac::check_source(
+        "test.doria",
+        r#"
+function add(int $left, int $right): int
+{
+    return $left + $right;
+}
+
+function main(): int
+{
+    return add(20, 22);
+}
+"#,
+    )
+    .expect("semantic check should accept int helper calls");
+
+    doriac::check_source(
+        "test.doria",
+        r#"
+function printHello(): void
+{
+    echo "Hello";
+}
+
+function main(): void
+{
+    printHello();
+}
+"#,
+    )
+    .expect("semantic check should accept void helper statement calls");
+
+    for (source, code) in [
+        (
+            r#"
+function add(int $left, int $right): int
+{
+    return $left + $right;
+}
+
+function main(): int
+{
+    return add(42);
+}
+"#,
+            "E0409",
+        ),
+        (
+            r#"
+function add(int $left, int $right): int
+{
+    return $left + $right;
+}
+
+function main(): int
+{
+    return add("20", 22);
+}
+"#,
+            "E0408",
+        ),
+        (
+            r#"
+function doThing(): void
+{
+}
+
+function main(): int
+{
+    return doThing();
+}
+"#,
+            "E0404",
+        ),
+    ] {
+        assert_diagnostic_code(source, code);
+    }
+}
+
+#[test]
 fn checks_function_call_arguments() {
     doriac::check_source(
         "test.doria",

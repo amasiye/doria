@@ -86,7 +86,7 @@ Stage 8 does not implement:
 - `echo` of `int`, `bool`, objects, resources, or collections
 - native string return values
 - native string parameters
-- user-defined native function calls
+- native string-parameter or string-returning function calls
 - stdin, stderr, file I/O, or general runtime I/O
 - runtime exceptions or error machinery
 - public FFI string representation
@@ -95,6 +95,8 @@ Stage 8 does not implement:
 - Baton work
 
 Unsupported native string shapes must produce clear semantic or unsupported-feature diagnostics instead of silently lowering through PHP behavior or treating valid Doria as invalid.
+
+Stage 10 later adds a bounded native free-function call path for `int` parameters and `int`/`void` returns. Stage 8 remains the string/echo path and still does not define native string parameters or string returns.
 
 ## Assumption
 

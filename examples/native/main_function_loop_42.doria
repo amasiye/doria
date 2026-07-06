@@ -1,0 +1,15 @@
+function countTo42(): int
+{
+    let writable $sum = 0;
+
+    foreach (0..<42 as $i) {
+        $sum += 1;
+    }
+
+    return $sum;
+}
+
+function main(): int
+{
+    return countTo42();
+}
