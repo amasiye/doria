@@ -331,6 +331,25 @@ function main(): void
 }
 
 #[test]
+fn rejects_standalone_range_before_php_codegen() {
+    let err = doriac::compile_source_to_php(
+        "test.doria",
+        r#"
+function main(): void
+{
+    let $range = 0..10;
+}
+"#,
+    )
+    .expect_err("semantic checking should reject standalone ranges before PHP codegen");
+
+    assert!(
+        err.iter().any(|diagnostic| diagnostic.code == "E0426"),
+        "expected E0426, got {err:?}"
+    );
+}
+
+#[test]
 fn emits_void_main_without_exit_wrapper_for_php() {
     let php = doriac::compile_source_to_php(
         "test.doria",

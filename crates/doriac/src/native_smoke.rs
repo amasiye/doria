@@ -1042,9 +1042,16 @@ fn validate_stage_9_for(
     local_states: &HashMap<String, NativeSmokeLocalState>,
 ) -> Result<NativeSmokeFor, BackendError> {
     let mut loop_states = local_states.clone();
+    let mut shadowed_initializer_binding = None;
     let initializer = match &for_stmt.initializer {
         Some(ForInitializer::VarDecl(decl)) => {
-            let local = validate_stage_6c_local(decl, &loop_states)?;
+            let mut local = validate_stage_6c_local(decl, &loop_states)?;
+            let source_binding_name = local.name.clone();
+            if local_states.contains_key(&source_binding_name) {
+                let native_binding_name = native_for_initializer_shadow_name(&source_binding_name);
+                local.name = native_binding_name.clone();
+                shadowed_initializer_binding = Some((source_binding_name, native_binding_name));
+            }
             loop_states.insert(
                 local.name.clone(),
                 NativeSmokeLocalState {
@@ -1067,8 +1074,18 @@ fn validate_stage_9_for(
         None => None,
     };
 
+    let mut validation_loop_states = loop_states.clone();
+    if let Some((source_binding_name, native_binding_name)) = &shadowed_initializer_binding {
+        let Some(binding_state) = loop_states.get(native_binding_name).cloned() else {
+            return Err(BackendError::new(
+                "backend validation failure: validated native for initializer shadow binding was not declared",
+            ));
+        };
+        validation_loop_states.insert(source_binding_name.clone(), binding_state);
+    }
+
     let condition = if let Some(condition) = &for_stmt.condition {
-        validate_stage_6c_loop_condition(condition, &loop_states).map_err(|error| {
+        validate_stage_6c_loop_condition(condition, &validation_loop_states).map_err(|error| {
             if should_preserve_native_expression_error(&error.message) {
                 error
             } else {
@@ -1080,13 +1097,25 @@ fn validate_stage_9_for(
     } else {
         NativeSmokeCondition::Bool(true)
     };
+    let condition =
+        rename_native_shadowed_for_condition(condition, shadowed_initializer_binding.as_ref());
 
-    let body = validate_stage_6c_while_branch_body(&for_stmt.body.statements, &loop_states)?;
+    let body =
+        validate_stage_6c_while_branch_body(&for_stmt.body.statements, &validation_loop_states)?;
+    let body =
+        if let Some((source_binding_name, native_binding_name)) = &shadowed_initializer_binding {
+            rename_native_fallthrough_binding(body, source_binding_name, native_binding_name)
+        } else {
+            body
+        };
     let increment = for_stmt
         .increment
         .as_ref()
-        .map(|increment| validate_stage_9_for_increment(increment, &loop_states))
-        .transpose()?;
+        .map(|increment| validate_stage_9_for_increment(increment, &validation_loop_states))
+        .transpose()?
+        .map(|increment| {
+            rename_native_shadowed_for_increment(increment, shadowed_initializer_binding.as_ref())
+        });
 
     validate_stage_9_for_like(
         initializer,
@@ -1096,6 +1125,10 @@ fn validate_stage_9_for(
         &loop_states,
         local_states,
     )
+}
+
+fn native_for_initializer_shadow_name(source_name: &str) -> String {
+    format!("<for_initializer:{source_name}>")
 }
 
 fn validate_stage_9_range_foreach(
@@ -1182,6 +1215,26 @@ fn validate_stage_9_range_foreach(
 
 fn native_range_foreach_shadow_name(source_name: &str) -> String {
     format!("<range_foreach:{source_name}>")
+}
+
+fn rename_native_shadowed_for_condition(
+    mut condition: NativeSmokeCondition,
+    binding: Option<&(String, String)>,
+) -> NativeSmokeCondition {
+    if let Some((source_name, native_name)) = binding {
+        rename_native_condition_binding(&mut condition, source_name, native_name);
+    }
+    condition
+}
+
+fn rename_native_shadowed_for_increment(
+    mut increment: NativeSmokeAssign,
+    binding: Option<&(String, String)>,
+) -> NativeSmokeAssign {
+    if let Some((source_name, native_name)) = binding {
+        rename_native_assignment_binding(&mut increment, source_name, native_name);
+    }
+    increment
 }
 
 fn rename_native_fallthrough_binding(

@@ -420,6 +420,11 @@ fn compiles_and_runs_current_native_smoke_examples() {
             42,
         ),
         (
+            "main_for_initializer_shadow_preserves_outer_5",
+            "inline_main_for_initializer_shadow_preserves_outer_5.doria",
+            5,
+        ),
+        (
             "main_foreach_range_45",
             "examples/native/main_foreach_range_45.doria",
             45,
@@ -1865,6 +1870,19 @@ function main(): int
     let writable $i = 5;
 
     foreach (0..1 as $i) {
+    }
+
+    return $i;
+}
+"#
+        }
+        "main_for_initializer_shadow_preserves_outer_5" => {
+            r#"
+function main(): int
+{
+    let writable $i = 5;
+
+    for (let writable $i = 0; $i < 2; $i++) {
     }
 
     return $i;

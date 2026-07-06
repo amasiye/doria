@@ -1571,6 +1571,32 @@ function main(): void
 }
 
 #[test]
+fn rejects_standalone_range_expressions() {
+    for source in [
+        r#"
+function main(): void
+{
+    let $range = 0..10;
+}
+"#,
+        r#"
+function main(): void
+{
+    echo 0..<10;
+}
+"#,
+        r#"
+function main(): void
+{
+    let $range = (0..10);
+}
+"#,
+    ] {
+        assert_diagnostic_code(source, "E0426");
+    }
+}
+
+#[test]
 fn rejects_invalid_stage_9_foreach_ranges() {
     assert_diagnostic_code(
         r#"

@@ -750,7 +750,16 @@ impl<'program> Checker<'program> {
             }
             Stmt::Foreach(foreach) => {
                 let range_iterable = matches!(foreach.iterable, Expr::Range { .. });
-                self.check_expr(&foreach.iterable, scopes, method_context);
+                if range_iterable {
+                    self.check_expr_with_range_context(
+                        &foreach.iterable,
+                        scopes,
+                        method_context,
+                        true,
+                    );
+                } else {
+                    self.check_expr(&foreach.iterable, scopes, method_context);
+                }
                 scopes.push();
                 if let Some(key) = &foreach.key {
                     let ty = if range_iterable {
@@ -1262,6 +1271,16 @@ impl<'program> Checker<'program> {
         scopes: &ScopeStack,
         method_context: Option<&MethodContext>,
     ) {
+        self.check_expr_with_range_context(expr, scopes, method_context, false);
+    }
+
+    fn check_expr_with_range_context(
+        &mut self,
+        expr: &Expr,
+        scopes: &ScopeStack,
+        method_context: Option<&MethodContext>,
+        allow_range_expr: bool,
+    ) {
         match expr {
             Expr::Variable { name, span } => {
                 if scopes.lookup(name).is_none() {
@@ -1364,11 +1383,20 @@ impl<'program> Checker<'program> {
                 self.check_int_constant_arithmetic(left, op, right, *span, scopes);
                 self.check_binary_operands(left, op, right, *span, scopes, method_context);
             }
-            Expr::Range { start, end, .. } => {
+            Expr::Range {
+                start, end, span, ..
+            } => {
                 self.check_expr(start, scopes, method_context);
                 self.check_expr(end, scopes, method_context);
                 self.check_range_endpoint_type(start, scopes, method_context);
                 self.check_range_endpoint_type(end, scopes, method_context);
+                if !allow_range_expr {
+                    self.diagnostics.push(Diagnostic::new(
+                        "E0426",
+                        "range expressions are only supported as foreach iterables",
+                        *span,
+                    ));
+                }
             }
             Expr::Identifier { .. }
             | Expr::String { .. }
