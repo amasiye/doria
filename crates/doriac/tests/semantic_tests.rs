@@ -1523,6 +1523,19 @@ function main(): void
 "#,
         "E0423",
     );
+
+    assert_diagnostic_code(
+        r#"
+function main(): void
+{
+    let writable $name = "a";
+
+    for ($name += "b"; false;) {
+    }
+}
+"#,
+        "E0403",
+    );
 }
 
 #[test]

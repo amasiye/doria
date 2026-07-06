@@ -1122,22 +1122,30 @@ fn validate_stage_9_range_foreach(
 
     let start = validate_stage_6c_int_expr(start, local_states)?;
     let end = validate_stage_6c_int_expr(end, local_states)?;
-    let binding_name = foreach.value.name.clone();
+    let source_binding_name = foreach.value.name.clone();
+    let native_binding_name = if local_states.contains_key(&source_binding_name) {
+        native_range_foreach_shadow_name(&source_binding_name)
+    } else {
+        source_binding_name.clone()
+    };
+    let binding_state = NativeSmokeLocalState {
+        writable: false,
+        value: NativeSmokeValue::Int(start.value),
+    };
     let initializer = NativeSmokeForInitializer::Local(NativeSmokeLocal {
-        name: binding_name.clone(),
+        name: native_binding_name.clone(),
         writable: false,
         expr: NativeSmokeExpr::Int(start.value),
         evaluated_value: NativeSmokeValue::Int(start.value),
     });
 
     let mut loop_states = local_states.clone();
-    loop_states.insert(
-        binding_name.clone(),
-        NativeSmokeLocalState {
-            writable: false,
-            value: NativeSmokeValue::Int(start.value),
-        },
-    );
+    loop_states.insert(native_binding_name.clone(), binding_state.clone());
+
+    let mut body_validation_states = loop_states.clone();
+    if native_binding_name != source_binding_name {
+        body_validation_states.insert(source_binding_name.clone(), binding_state);
+    }
 
     let condition = NativeSmokeCondition::Compare {
         op: if *inclusive {
@@ -1145,16 +1153,22 @@ fn validate_stage_9_range_foreach(
         } else {
             NativeSmokeCompareOp::LessThan
         },
-        left: NativeSmokeExpr::Local(binding_name.clone()),
+        left: NativeSmokeExpr::Local(native_binding_name.clone()),
         right: NativeSmokeExpr::Int(end.value),
     };
     let increment = NativeSmokeAssign {
-        target: binding_name,
+        target: native_binding_name.clone(),
         op: NativeSmokeAssignOp::AddAssign,
         expr: NativeSmokeExpr::Int(1),
         evaluated_value: 0,
     };
-    let body = validate_stage_6c_while_branch_body(&foreach.body.statements, &loop_states)?;
+    let body =
+        validate_stage_6c_while_branch_body(&foreach.body.statements, &body_validation_states)?;
+    let body = if native_binding_name != source_binding_name {
+        rename_native_fallthrough_binding(body, &source_binding_name, &native_binding_name)
+    } else {
+        body
+    };
 
     validate_stage_9_for_like(
         Some(initializer),
@@ -1166,6 +1180,223 @@ fn validate_stage_9_range_foreach(
     )
 }
 
+fn native_range_foreach_shadow_name(source_name: &str) -> String {
+    format!("<range_foreach:{source_name}>")
+}
+
+fn rename_native_fallthrough_binding(
+    mut block: NativeSmokeFallthroughBlock,
+    source_name: &str,
+    native_name: &str,
+) -> NativeSmokeFallthroughBlock {
+    rename_native_fallthrough_binding_in_scope(&mut block, source_name, native_name, true);
+    block
+}
+
+fn rename_native_fallthrough_binding_in_scope(
+    block: &mut NativeSmokeFallthroughBlock,
+    source_name: &str,
+    native_name: &str,
+    rename_active: bool,
+) {
+    let mut active = rename_active;
+    for statement in &mut block.statements {
+        active = rename_native_statement_binding(statement, source_name, native_name, active);
+    }
+    if rename_active {
+        rename_native_state_binding(&mut block.final_states, source_name, native_name);
+    }
+}
+
+fn rename_native_statement_binding(
+    statement: &mut NativeSmokeStmt,
+    source_name: &str,
+    native_name: &str,
+    rename_active: bool,
+) -> bool {
+    match statement {
+        NativeSmokeStmt::Local(local) => {
+            if rename_active {
+                rename_native_expr_binding(&mut local.expr, source_name, native_name);
+            }
+            rename_active && local.name != source_name
+        }
+        NativeSmokeStmt::Assign(assignment) => {
+            if rename_active {
+                rename_native_assignment_binding(assignment, source_name, native_name);
+            }
+            rename_active
+        }
+        NativeSmokeStmt::Echo(expr) => {
+            if rename_active {
+                rename_native_expr_binding(expr, source_name, native_name);
+            }
+            rename_active
+        }
+        NativeSmokeStmt::While(native_while) => {
+            if rename_active {
+                rename_native_condition_binding(
+                    &mut native_while.condition,
+                    source_name,
+                    native_name,
+                );
+                rename_native_fallthrough_binding_in_scope(
+                    &mut native_while.body,
+                    source_name,
+                    native_name,
+                    true,
+                );
+                rename_native_value_entries(
+                    &mut native_while.final_values,
+                    source_name,
+                    native_name,
+                );
+            }
+            rename_active
+        }
+        NativeSmokeStmt::For(native_for) => {
+            if rename_active {
+                if let Some(initializer) = &mut native_for.initializer {
+                    rename_native_for_initializer_binding(initializer, source_name, native_name);
+                }
+                rename_native_condition_binding(
+                    &mut native_for.condition,
+                    source_name,
+                    native_name,
+                );
+                if let Some(increment) = &mut native_for.increment {
+                    rename_native_assignment_binding(increment, source_name, native_name);
+                }
+                rename_native_fallthrough_binding_in_scope(
+                    &mut native_for.body,
+                    source_name,
+                    native_name,
+                    true,
+                );
+                rename_native_value_entries(
+                    &mut native_for.carried_values,
+                    source_name,
+                    native_name,
+                );
+                rename_native_value_entries(&mut native_for.final_values, source_name, native_name);
+            }
+            rename_active
+        }
+        NativeSmokeStmt::If(native_if) => {
+            if rename_active {
+                rename_native_condition_binding(&mut native_if.condition, source_name, native_name);
+                rename_native_fallthrough_binding_in_scope(
+                    &mut native_if.then_block,
+                    source_name,
+                    native_name,
+                    true,
+                );
+                if let Some(else_block) = &mut native_if.else_block {
+                    rename_native_fallthrough_binding_in_scope(
+                        else_block,
+                        source_name,
+                        native_name,
+                        true,
+                    );
+                }
+                rename_native_value_entries(&mut native_if.merged_values, source_name, native_name);
+            }
+            rename_active
+        }
+        NativeSmokeStmt::Break | NativeSmokeStmt::Continue => rename_active,
+    }
+}
+
+fn rename_native_for_initializer_binding(
+    initializer: &mut NativeSmokeForInitializer,
+    source_name: &str,
+    native_name: &str,
+) {
+    match initializer {
+        NativeSmokeForInitializer::Local(local) => {
+            rename_native_expr_binding(&mut local.expr, source_name, native_name);
+        }
+        NativeSmokeForInitializer::Assign(assignment) => {
+            rename_native_assignment_binding(assignment, source_name, native_name);
+        }
+    }
+}
+
+fn rename_native_assignment_binding(
+    assignment: &mut NativeSmokeAssign,
+    source_name: &str,
+    native_name: &str,
+) {
+    if assignment.target == source_name {
+        assignment.target = native_name.to_string();
+    }
+    rename_native_expr_binding(&mut assignment.expr, source_name, native_name);
+}
+
+fn rename_native_expr_binding(expr: &mut NativeSmokeExpr, source_name: &str, native_name: &str) {
+    match expr {
+        NativeSmokeExpr::Local(name) if name == source_name => {
+            *name = native_name.to_string();
+        }
+        NativeSmokeExpr::Binary { left, right, .. } => {
+            rename_native_expr_binding(left, source_name, native_name);
+            rename_native_expr_binding(right, source_name, native_name);
+        }
+        NativeSmokeExpr::Int(_) | NativeSmokeExpr::Local(_) | NativeSmokeExpr::StringLiteral(_) => {
+        }
+    }
+}
+
+fn rename_native_condition_binding(
+    condition: &mut NativeSmokeCondition,
+    source_name: &str,
+    native_name: &str,
+) {
+    match condition {
+        NativeSmokeCondition::Compare { left, right, .. } => {
+            rename_native_expr_binding(left, source_name, native_name);
+            rename_native_expr_binding(right, source_name, native_name);
+        }
+        NativeSmokeCondition::Not(condition) => {
+            rename_native_condition_binding(condition, source_name, native_name);
+        }
+        NativeSmokeCondition::And { left, right }
+        | NativeSmokeCondition::Or { left, right }
+        | NativeSmokeCondition::Xor { left, right } => {
+            rename_native_condition_binding(left, source_name, native_name);
+            rename_native_condition_binding(right, source_name, native_name);
+        }
+        NativeSmokeCondition::Bool(_) => {}
+    }
+}
+
+fn rename_native_state_binding(
+    states: &mut HashMap<String, NativeSmokeLocalState>,
+    source_name: &str,
+    native_name: &str,
+) {
+    if let Some(state) = states.remove(source_name) {
+        states.insert(native_name.to_string(), state);
+    }
+}
+
+fn rename_native_value_entries(
+    entries: &mut Vec<(String, NativeSmokeValue)>,
+    source_name: &str,
+    native_name: &str,
+) {
+    let mut renamed = HashMap::new();
+    for (name, value) in entries.drain(..) {
+        let name = if name == source_name {
+            native_name.to_string()
+        } else {
+            name
+        };
+        renamed.insert(name, value);
+    }
+    *entries = renamed.into_iter().collect();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+}
 fn validate_stage_9_for_increment(
     increment: &ForIncrement,
     local_states: &HashMap<String, NativeSmokeLocalState>,

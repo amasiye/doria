@@ -439,6 +439,11 @@ fn compiles_and_runs_current_native_smoke_examples() {
             "inline_main_foreach_range_continue_42.doria",
             42,
         ),
+        (
+            "main_foreach_range_shadow_preserves_outer_5",
+            "inline_main_foreach_range_shadow_preserves_outer_5.doria",
+            5,
+        ),
     ];
 
     for (stem, source, expected_code) in cases {
@@ -1850,6 +1855,19 @@ function main(): int
     }
 
     return $sum;
+}
+"#
+        }
+        "main_foreach_range_shadow_preserves_outer_5" => {
+            r#"
+function main(): int
+{
+    let writable $i = 5;
+
+    foreach (0..1 as $i) {
+    }
+
+    return $i;
 }
 "#
         }

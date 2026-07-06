@@ -653,41 +653,7 @@ impl<'program> Checker<'program> {
                     method_context,
                     constructor_init_context,
                 ) {
-                    match assignment.op {
-                        AssignOp::Assign => {
-                            let target_ty = target.ty;
-                            let assignment_ok = self.check_expr_assignable(
-                                target.ty,
-                                &assignment.value,
-                                scopes,
-                                method_context,
-                                target.destination,
-                            );
-                            if assignment_ok {
-                                let value_ty =
-                                    self.infer_expr_type(&assignment.value, scopes, method_context);
-                                self.narrow_empty_collection_assignment(
-                                    &assignment.target,
-                                    target_ty,
-                                    value_ty,
-                                    scopes,
-                                );
-                            }
-                        }
-                        AssignOp::AddAssign | AssignOp::SubAssign => {
-                            let value_ty =
-                                self.infer_expr_type(&assignment.value, scopes, method_context);
-                            let result_ty = self.infer_numeric_binary_type(target.ty, value_ty);
-                            if !self.is_assignable(target.ty, result_ty) {
-                                self.check_assignable(
-                                    target.ty,
-                                    result_ty,
-                                    assignment.value.span(),
-                                    target.destination,
-                                );
-                            }
-                        }
-                    }
+                    self.check_assignment_value(assignment, target, scopes, method_context);
                 }
             }
             Stmt::Echo { expr, .. } | Stmt::Expr { expr, .. } => {
@@ -914,13 +880,7 @@ impl<'program> Checker<'program> {
                     method_context,
                     constructor_init_context,
                 ) {
-                    self.check_expr_assignable(
-                        target.ty,
-                        &assignment.value,
-                        scopes,
-                        method_context,
-                        target.destination,
-                    );
+                    self.check_assignment_value(assignment, target, scopes, method_context);
                 }
             }
         }
@@ -945,30 +905,48 @@ impl<'program> Checker<'program> {
                     method_context,
                     None,
                 ) {
-                    match assignment.op {
-                        AssignOp::Assign => {
-                            self.check_expr_assignable(
-                                target.ty,
-                                &assignment.value,
-                                scopes,
-                                method_context,
-                                target.destination,
-                            );
-                        }
-                        AssignOp::AddAssign | AssignOp::SubAssign => {
-                            let value_ty =
-                                self.infer_expr_type(&assignment.value, scopes, method_context);
-                            let result_ty = self.infer_numeric_binary_type(target.ty, value_ty);
-                            if !self.is_assignable(target.ty, result_ty) {
-                                self.check_assignable(
-                                    target.ty,
-                                    result_ty,
-                                    assignment.value.span(),
-                                    target.destination,
-                                );
-                            }
-                        }
-                    }
+                    self.check_assignment_value(assignment, target, scopes, method_context);
+                }
+            }
+        }
+    }
+    fn check_assignment_value(
+        &mut self,
+        assignment: &Assignment,
+        target: AssignmentTarget,
+        scopes: &mut ScopeStack,
+        method_context: Option<&MethodContext>,
+    ) {
+        match assignment.op {
+            AssignOp::Assign => {
+                let target_ty = target.ty;
+                let assignment_ok = self.check_expr_assignable(
+                    target.ty,
+                    &assignment.value,
+                    scopes,
+                    method_context,
+                    target.destination,
+                );
+                if assignment_ok {
+                    let value_ty = self.infer_expr_type(&assignment.value, scopes, method_context);
+                    self.narrow_empty_collection_assignment(
+                        &assignment.target,
+                        target_ty,
+                        value_ty,
+                        scopes,
+                    );
+                }
+            }
+            AssignOp::AddAssign | AssignOp::SubAssign => {
+                let value_ty = self.infer_expr_type(&assignment.value, scopes, method_context);
+                let result_ty = self.infer_numeric_binary_type(target.ty, value_ty);
+                if !self.is_assignable(target.ty, result_ty) {
+                    self.check_assignable(
+                        target.ty,
+                        result_ty,
+                        assignment.value.span(),
+                        target.destination,
+                    );
                 }
             }
         }
