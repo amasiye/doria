@@ -8,6 +8,8 @@ pub mod lexer;
 pub mod lowering;
 pub mod lsp;
 pub mod mir;
+pub mod mir_interpreter;
+pub mod mir_lowering;
 mod native_smoke;
 pub mod parser;
 pub mod semantics;
@@ -18,7 +20,7 @@ pub mod types;
 use ast::Program;
 use backend::BackendTarget;
 use diagnostics::{Diagnostic, DiagnosticResult};
-use source::SourceFile;
+use source::{SourceFile, Span};
 
 pub fn lex_source(
     path: impl Into<String>,
@@ -49,7 +51,7 @@ pub fn compile_source_to_php(
         _ => Err(vec![Diagnostic::new(
             "B0002",
             "PHP backend did not return text output",
-            crate::source::Span::default(),
+            Span::default(),
         )]),
     }
 }
@@ -62,19 +64,26 @@ pub fn lower_source(
     Ok(lowering::lower_program(&program))
 }
 
+pub fn lower_source_to_mir(
+    path: impl Into<String>,
+    text: impl Into<String>,
+) -> DiagnosticResult<mir::Program> {
+    let hir = lower_source(path, text)?;
+    mir_lowering::lower_program(&hir)
+}
+
 pub fn compile_source(
     path: impl Into<String>,
     text: impl Into<String>,
     target: BackendTarget,
 ) -> Result<backend::BackendOutput, Vec<Diagnostic>> {
     let hir = lower_source(path, text)?;
-    backend::emit(&hir, target).map_err(|error| {
-        vec![Diagnostic::new(
-            "B0001",
-            error.message,
-            crate::source::Span::default(),
-        )]
-    })
+    if target == BackendTarget::Debug {
+        return compile_hir_to_debug_output(&hir);
+    }
+
+    backend::emit(&hir, target)
+        .map_err(|error| vec![Diagnostic::new("B0001", error.message, Span::default())])
 }
 
 pub fn parse_source_file(source: &SourceFile) -> DiagnosticResult<Program> {
@@ -93,4 +102,22 @@ pub fn render_diagnostics(
         .map(|diagnostic| diagnostic.render(&source))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn compile_hir_to_debug_output(
+    hir: &hir::Program,
+) -> Result<backend::BackendOutput, Vec<Diagnostic>> {
+    let mir = mir_lowering::lower_program(hir)?;
+    let output = mir_interpreter::interpret(&mir).map_err(|error| {
+        vec![Diagnostic::new(
+            "M1102",
+            format!("MIR interpreter failure: {}", error.message),
+            Span::default(),
+        )]
+    })?;
+
+    Ok(backend::BackendOutput::Text {
+        extension: "debug".to_string(),
+        contents: mir_interpreter::render_debug_output(&output),
+    })
 }

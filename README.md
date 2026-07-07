@@ -70,7 +70,7 @@ This repository contains the first working vertical slices of `doriac`:
 - Emits PHP for supported syntax through the optional PHP compatibility backend, including `not`, `and`, `or`, and `xor` lowering that preserves Doria boolean semantics.
 - Provides CLI commands and integration tests.
 
-It is intentionally not a complete language yet. The implementation should grow in small, tested compiler increments without compromising Doria's native-first semantics. The Doria End-to-End Development Plan is the master future execution plan; its next implementation stage is Stage 11: MIR + interpreter oracle, which retires NativeSmokeModule rather than expanding it.
+It is intentionally not a complete language yet. The implementation should grow in small, tested compiler increments without compromising Doria's native-first semantics. The Doria End-to-End Development Plan is the master future execution plan; its next implementation stage is Stage 11: MIR + interpreter oracle, which retires NativeSmokeModule rather than expanding it. Stage 11a now seeds inspectable MIR and a debug interpreter for main(): int literal returns, main(): void fallthrough or bare return, and exact string-literal echo; it is not complete Stage 11.
 
 ## Quick start
 
@@ -79,6 +79,7 @@ cargo test
 cargo run -p doriac -- --help
 cargo run -p doriac -- check examples/native/main_void_hello.doria
 cargo run -p doriac -- hir examples/native/main_void_hello.doria
+cargo run -p doriac -- mir examples/debug/main_void_hello.doria
 cargo run -p doriac -- compile examples/native/main_void_hello.doria --out build/native/main_void_hello
 ./build/native/main_void_hello
 ```

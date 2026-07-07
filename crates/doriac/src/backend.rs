@@ -48,7 +48,10 @@ impl BackendTarget {
     }
 
     pub fn is_available(self) -> bool {
-        matches!(self, BackendTarget::Native | BackendTarget::Php)
+        matches!(
+            self,
+            BackendTarget::Native | BackendTarget::Php | BackendTarget::Debug
+        )
     }
 
     pub fn description(self) -> &'static str {
