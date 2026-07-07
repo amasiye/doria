@@ -247,6 +247,30 @@ fn rejects_unsupported_local_variable_as_mir_coverage() {
 }
 
 #[test]
+fn rejects_unsupported_helper_function_as_mir_coverage() {
+    let diagnostics = doriac::lower_source_to_mir(
+        "test.doria",
+        r#"function helper(): int
+{
+    return 1;
+}
+
+function main(): int
+{
+    return 42;
+}
+"#,
+    )
+    .expect_err("helper functions should be outside Stage 11a MIR coverage");
+
+    assert_eq!(diagnostics[0].code, "M1101");
+    assert!(diagnostics[0]
+        .message
+        .contains("unsupported MIR Stage 11a coverage"));
+    assert!(diagnostics[0].message.contains("no helper functions"));
+}
+
+#[test]
 fn mirrors_native_smoke_exit_for_literal_main_shapes_without_linker() {
     for (source, expected) in [
         (
