@@ -1,9 +1,9 @@
 # Doria End-to-End Development Plan
 
 **Document ID:** docs/doria-end-to-end-plan.md
-**Status:** Proposed master plan for Doria v0.1 → v1.0
+**Status:** Accepted master execution plan for Doria v0.1 → v1.0
 **Audience:** The implementing agent (Codex) and the language designer
-**Supersedes nothing.** This plan extends SPEC.md and the accepted decisions in `docs/decisions/`. Where this plan resolves something SPEC.md marked "future work", this plan is the accepted direction once the language designer approves the decision list in Section 1.
+**Supersedes:** This plan is the authoritative future-work execution plan. It supersedes older roadmap, SPEC, and decision wording only where it explicitly resolves a future-work fork or scheduling question. Already-implemented behavior remains governed by current compiler behavior and accepted decisions until a later stage migrates it.
 
 ---
 
@@ -27,13 +27,13 @@ This is the single authoritative execution plan. It exists so that implementatio
 
 ## 1. Decisions this plan makes — designer review checklist
 
-These are the load-bearing choices. Each becomes a decision record before its first implementing stage lands. Approve, amend, or veto these first; everything downstream is consistent with them.
+These are the load-bearing choices. Each becomes a decision record before its first implementing stage lands. Andrew has approved this plan as the current master direction; later amendments should update this file and, where appropriate, the corresponding decision record.
 
 | # | Decision | Accepted default in this plan |
 |---|----------|-------------------------------|
 | D1 | Memory model | **Full ownership + borrow checking — Rust's model in PHP spelling.** Single ownership with move semantics for classes/collections, deterministic `__destruct` at end of owning scope, Copy semantics for primitives/strings, opt-in `Shared<T>`/`Weak<T>`/`SharedMut<T>` for shared ownership. **No tracing GC, no pervasive ARC, no Rust sigils or lifetime annotations in surface syntax** |
-| D2 | Borrow spelling | readonly = shared borrow, `writable` = exclusive borrow, `take` = ownership transfer into the callee. Borrow rules (many readers XOR one writer; borrows cannot outlive owners; moved values unusable) enforced entirely at compile time by a non-lexical borrow checker over MIR — zero runtime cost, no dynamic fallback, plain-vocabulary diagnostics |
-| D3 | Copy vs move | Copy types: primitives, `bool`, `string`, ranges, enums with Copy payloads. Move types: classes, `List`/`Dictionary`/`Set`, `Bytes`, closures. Explicit duplication via `->clone()` (`Cloneable` interface). No user-defined `struct` in v1.0 — classes are the owned record type (revisit inline layout post-1.0 if engine profiling demands it) |
+| D2 | Borrow spelling | readonly = shared borrow, `writable` = exclusive borrow, `take` = ownership transfer into the callee. Ordinary borrow rules (many readers XOR one writer; borrows cannot outlive owners; moved values unusable) are enforced entirely at compile time by a non-lexical borrow checker over MIR, with zero runtime cost and no dynamic fallback. Explicit `SharedMut<T>` is the named dynamic-check escape hatch. |
+| D3 | Copy vs move | Copy types: primitives, `bool`, `string`, ranges, enums with Copy payloads. Move types: classes, `List`/`Dictionary`/`Set`, `Bytes`, closures. Explicit duplication uses the future `->clone()` / `Cloneable` surface once method and interface support exist; before that, move-type duplication is deliberately unavailable. No user-defined `struct` in v1.0 — classes are the owned record type (revisit inline layout post-1.0 if engine profiling demands it) |
 | D4 | Integer overflow | Arithmetic overflow panics in both dev and release profiles. Explicit `Int::wrappingAdd(...)`, `Int::saturatingAdd(...)`, `Int::checkedAdd(...)` for other behavior. A `declare` key may later relax this per-module for engine hot paths |
 | D5 | Nullability | `?Type` optional types (PHP spelling), `??` null coalescing, `?->` null-safe access. `null` is not assignable to non-`?` types. No implicit truthiness |
 | D6 | Enums | PHP 8.1-shaped `enum` declarations extended with payload cases (tagged unions): `case Some(int $value);`. This is Doria's sum type |
@@ -43,7 +43,7 @@ These are the load-bearing choices. Each becomes a decision record before its fi
 | D10 | Closures | PHP-shaped anonymous `function (...) with (...) { }` plus auto-capturing arrow functions `fn($x) => ...`. The capture clause is spelled `with`, not PHP's `use` — in Doria `use` belongs exclusively to namespace imports. Captures are borrows by default (`with ($x)` readonly, `with (writable $x)` exclusive) or moves via `with (take $x)`. A borrow-capturing closure is itself borrow-bound, so the borrow checker rejects escapes automatically and suggests `take` |
 | D11 | Concurrency | Structured concurrency with `async function` / `await` / task groups; data-race freedom falls out of the ownership model via auto-derived `Sendable` / `Shareable` marker interfaces (Rust's Send/Sync payoff) checked at spawn boundaries. Detailed design gated behind its own decision record in Phase H |
 | D12 | Unsafe & FFI | `unsafe { }` blocks gate raw pointers (`Ptr<T>`, `MutPtr<T>`), foreign calls, and manual memory. `extern` declarations bind C ABI symbols. Everything outside `unsafe` keeps full safety guarantees |
-| D13 | PHP bridge (the strategic pillar) | Three interop products: (a) existing Doria→PHP compat backend, (b) `doriac migrate php`, and **(c) `doriac build --php-lib`: compile Doria libraries to a C-ABI shared library plus generated PHP FFI stub classes, so PHP applications call native Doria directly.** (c) is the "powerful backends for PHP" product and gets its own phase |
+| D13 | PHP bridge (the strategic pillar) | Three interop products: (a) existing Doria→PHP compat backend, (b) `doriac migrate php`, and **(c) `baton build --php-lib` workflow: Baton orchestrates doriac native compilation, C-ABI shared-library emission, and generated PHP FFI stub classes, so PHP applications call native Doria directly.** doriac remains the compiler and exposes only narrow emission primitives needed by Baton. (c) is the powerful backends for PHP product and gets its own phase |
 | D14 | Division/modulo | `/` on `int` is truncating integer division; `%` is remainder with sign of dividend (C/PHP `intdiv`-consistent). Division/modulo by zero panics. `float` division follows IEEE 754 |
 | D15 | Numeric widening | No implicit conversions anywhere, including int→float. Explicit `Int::toFloat($x)`, `Float::toInt($x)` (truncating, panics on NaN/out-of-range), and fixed-width conversions via `Int32::from($x)` (panics on overflow) / `Int32::tryFrom($x)` (nullable) |
 | D16 | String encoding | `string` is immutable UTF-8. Byte-level work uses `Bytes` (a mutable move-type buffer). Indexing a `string` by integer is not allowed; iteration yields grapheme clusters via `$s->chars` is deferred, `$s->bytes` ships first |
@@ -98,7 +98,7 @@ error[D0203]: $user was given to store() on line 12, so it can no longer be used
 help: call $user->clone() before line 12 if you need to keep a copy
 ```
 
-- Explicit duplication is `->clone()` via the `Cloneable` interface (auto-derivable with `#[Derive(Cloneable)]` once attributes land).
+- Explicit duplication is the future `->clone()` surface, backed by `Cloneable` once method and interface support exist. Until then, move-type duplication is intentionally unavailable except for compiler-internal lowering needs.
 
 ### 3.2 Borrowing is readonly/writable
 
@@ -118,7 +118,7 @@ store($person);                 // fine; $person is moved-from afterward
 
 Call sites are unmarked, as in Rust; the signature is the contract and the checker enforces it.
 - **Method receivers**: a normal method takes a readonly borrow of `$this`; a `writable function` takes an exclusive borrow — exactly the existing SPEC §5 semantics, now checked as true borrows.
-- **The borrow rules** (compile-time only, zero runtime cost, checked non-lexically on MIR): at most one live writable borrow XOR any number of readonly borrows of the same value; no borrow may outlive the value's owner; a moved value cannot be borrowed. Non-lexical means a borrow ends at its last use, not at the end of a block, so idiomatic PHP-shaped code rarely fights the checker.
+- **The ordinary borrow rules** (compile-time only, zero runtime cost, checked non-lexically on MIR, excluding explicit `SharedMut<T>` dynamic access checks): at most one live writable borrow XOR any number of readonly borrows of the same value; no borrow may outlive the value's owner; a moved value cannot be borrowed. Non-lexical means a borrow ends at its last use, not at the end of a block, so idiomatic PHP-shaped code rarely fights the checker.
 - **Place expressions borrow implicitly**: `$obj->prop`, `$list[0]`, and chained access borrow for the duration of the enclosing operation — no sigils at use sites.
 - **`foreach` borrows elements**: `foreach ($users as $user)` takes a readonly borrow per iteration (the existing readonly-loop-binding rule, now real); `foreach ($users as writable $user)` takes exclusive borrows for in-place mutation, requiring the collection binding itself to be writable.
 - **Returned borrows use fixed elision rules, never annotations.** In v1.0 a function or method may return a borrow only when it derives from `$this` or from exactly the one borrowed parameter — Rust's elision rules, which cover getters, views, and accessors. APIs needing multi-source lifetime relationships must restructure to return owned values or use `Shared<T>`. Named lifetime/region annotations are rejected for v1.0 and may only be revisited post-1.0 with concrete evidence, and even then never in Rust spelling.
@@ -350,7 +350,7 @@ class Post extends Model
 
 - Classes are **closed by default**; `open class` permits subclassing. This is the Rust/Kotlin idea (inheritance as a deliberate API) in plain spelling, and it lets the compiler devirtualize aggressively — important for engine performance.
 - Methods are non-virtual by default; `open function` creates a vtable slot; `override function` is mandatory at override sites (typo-proof).
-- Single inheritance; construction order: property initializers of the subclass run, then `__construct` body, which must call `parent::__construct(...)` first if the parent declares a constructor with required parameters (checked).
+- Single inheritance; construction order is parent-first. Allocation creates storage for the whole object, then the parent initializer/constructor chain completes before subclass property initializers run and before the remaining subclass constructor body executes. If the parent declares a constructor with required parameters, the subclass constructor must contain `parent::__construct(...)` as its first source-level action; lowering treats subclass property initializers as running after that parent call and before the rest of the subclass body.
 - `internal` members are never inherited-visible — not even to subclasses. **Doria's member model is permanently two states: externally accessible by default, or `internal` to the declaring class.** `protected` is not deferred, not under evaluation, and never becomes Doria syntax; inheritance does not add a third visibility tier. If a subclass needs access to a parent's `internal` member, the parent must expose a deliberate accessible API instead.
 - Upcasts implicit; downcasts via `$x is Post` narrowing and `match`; no unchecked cast spelling exists.
 
@@ -450,14 +450,14 @@ source → lexer → parser → AST
 
 ### 8.2 Dual backend (decision 0012, made concrete)
 
-- **Dev profile** (`doriac build`, `doriac run`): Cranelift, fast compile, overflow checks on, debug info.
-- **Release profile** (`doriac build --release`): LLVM (via `inkwell`), optimizations, overflow checks still on per D4. Exclusive borrows give both backends `noalias`-grade optimization license, the same performance story as Rust.
+- **Dev compiler profile** (direct `doriac compile` / `doriac run` while Baton is unavailable; later Baton default `baton build` / `baton run` selects the same profile): Cranelift, fast compile, overflow checks on, debug info.
+- **Release compiler profile** (direct `doriac compile --release` while Baton is unavailable; later `baton build --release` selects the same profile): LLVM (via `inkwell`), optimizations, overflow checks still on per D4. Exclusive borrows give both backends `noalias`-grade optimization license, the same performance story as Rust.
 - Identical Doria-visible semantics across profiles is a tested invariant: the differential test suite runs every `examples/native` program under both backends plus the interpreter and asserts identical stdout/exit status.
 - **Debug/interpreter backend** (SPEC §1's listed backend) is implemented in Phase A as a direct MIR interpreter. It is the semantic oracle for differential testing and makes the test suite backend-independent — this is the single highest-leverage correctness investment in the plan.
 
 ### 8.3 doria-rt (D18)
 
-A Rust `crates/doria-rt` static library linked into every native binary:
+A Rust `crates/doria-rt` static library, introduced as a minimal runtime/panic foundation in Stage 12 and expanded by later runtime stages, is linked into every native binary:
 
 - Allocator (system malloc initially; pluggable arena hooks reserved for the engine later).
 - Drop-glue dispatch, `Shared<T>`/`Weak<T>` refcount and upgrade machinery.
@@ -485,10 +485,10 @@ Adopt error codes now (`D0001`-style) before the count explodes; every diagnosti
 
 Two layers, both written in Doria as early as possible (self-hosting on-ramp):
 
-- **core** (no I/O, always available): `Int`/`Int8`.../`Float`/`Bool`/`String` companion APIs (`Int::parse`, `Int::toFloat`, `Int::wrappingAdd`, ...), `Option`-free nullable helpers, `Cloneable`, `Shared<T>`/`Weak<T>`/`SharedMut<T>`, `Comparable<T>`, `Equatable<T>`, `Hashable`, `Displayable`, `Error`, `Iterable<T>`/`Iterator<T>` (powers `foreach` over collections), range types, `math` basics.
+- **core** (no I/O, always available): `Int`/`Int8`.../`Float`/`Bool`/`String` companion APIs (`Int::parse`, `Int::toFloat`, `Int::wrappingAdd`, ...), `Option`-free nullable helpers, `Cloneable` (Stage 35 interface contract), `Shared<T>`/`Weak<T>`/`SharedMut<T>`, `Comparable<T>`, `Equatable<T>`, `Hashable`, `Displayable`, `Error`, `Iterable<T>`/`Iterator<T>` (Stage 35 user conformance; collections use compiler-internal iteration earlier), range types, `math` basics.
 - **std** (hosted): `io` (files, stdin/out streams), `fs`, `env`, `process`, `time`, `random`, `json` (drives enum/match/mixed ergonomics and the PHP bridge), `net` (TCP first), later `http`.
 
-`foreach (collection as ...)` desugars to `Iterable<T>` in Phase D, making user types iterable — required for engine scene graphs and UI trees.
+`foreach (collection as ...)` uses compiler-internal iteration machinery in Phase D for built-in collections. The public `Iterable<T>` / `Iterator<T>` protocol that makes user types iterable lands with interface conformance in Stage 35.
 
 Stdlib API style follows SPEC §6's nouns-are-properties rule and the collection method surface gets its own decision record (List: `add`, `insertAt`, `removeAt`, `contains`, `count` property, `isEmpty` property, `map`/`filter`/`reduce` after closures land; Dictionary: `get` returning `?V`, `set`, `remove`, `has`, `keys`, `values`; Set: `add`, `remove`, `has`, `union`, `intersect`).
 
@@ -502,9 +502,9 @@ Keeps growing opportunistically for migration/debugging; never gates a language 
 ### 10.2 PHP → Doria migration (`doriac migrate php`)
 Phase I product, per SPEC §12: conservative output, diagnostics for dynamic PHP (variable variables, `eval`, magic methods, loose comparisons become explicit conversions or `mixed` + TODO diagnostics). Architecturally separate crate `crates/doria-migrate` with its own PHP parser (use `mago`/`php-parser-rs` class of dependency; do not touch the Doria parser).
 
-### 10.3 The strategic product: `doriac build --php-lib`
+### 10.3 The strategic product: `baton build --php-lib`
 
-Compile a Doria library to something a running PHP application calls natively:
+Baton builds a Doria library into something a running PHP application calls natively, using doriac as the compiler underneath:
 
 ```doria
 namespace App\Native;
@@ -520,7 +520,7 @@ class ImageResizer
 ```
 
 ```bash
-doriac build src/native --php-lib --out build/app_native
+baton build src/native --php-lib --out build/app_native
 # emits: build/app_native/libapp_native.so
 #        build/app_native/php/ImageResizer.php   (generated FFI stubs)
 ```
@@ -536,7 +536,7 @@ Design:
 
 - Exported surface restricted to a bridgeable type set: numerics, `bool`, `string`, `Bytes`, `?T` of those, `List`/`Dictionary` of bridgeable types, and `#[PhpExport]` classes (marshaled as opaque handles rooted as `Shared<T>` on the Doria side; the generated PHP stub holds the handle and releases it in its `__destruct`).
 - `throws` errors surface as generated PHP exception classes.
-- Transport: C ABI shim generated by `doriac` + PHP ≥ 8.0 `FFI` stubs first (zero build tooling required on the PHP side); a Zend-extension emission mode (`--php-ext`) is a later optimization stage for call-overhead-sensitive users.
+- Transport: C ABI shim generated by `doriac` under Baton orchestration + PHP ≥ 8.0 `FFI` stubs first (zero build tooling required on the PHP side); a Zend-extension emission mode (`--php-ext`) is a later optimization stage for call-overhead-sensitive users.
 - Threading: v1 bridge is single-threaded per PHP request (matches PHP's model); `Shareable` interactions revisited with Phase H.
 - This product plus `std::json`/`net` also covers the sidecar pattern (Doria service, PHP client), but the in-process bridge is the headline.
 
@@ -555,7 +555,7 @@ Baton lands mid-plan (Phase F), once multi-file compilation exists to orchestrat
 
 ## 12. Decision records to author (numbering continues from 0037)
 
-0038 ownership and move semantics (D1, D3) · 0039 borrowing rules, elision, and the borrow checker (D2) · 0040 panics & overflow policy (D4, §3.5) · 0041 division/modulo/shifts (D14) · 0042 numeric conversions (D15) · 0043 MIR + interpreter oracle (§8.1–8.2) · 0044 doria-rt ABI (D18) · 0045 runtime strings/Bytes (D16) · 0046 nullable types & narrowing (D5) · 0047 enums & payload cases (D6) · 0048 match (D7) · 0049 checked errors full semantics (D8) · 0050 generics & monomorphization (D9) · 0051 collections runtime & API surface (§9) · 0052 iteration protocol · 0053 inheritance/open/override (D17) · 0054 traits & conflict resolution · 0055 property hooks · 0056 statics & const evaluation · 0057 closures (D10) · 0058 namespaces implementation notes (elaborating 0028) · 0059 attributes & compile-time evaluation policy · 0060 Baton manifest & test convention · 0061 unsafe/FFI (D12) · 0062 php-lib bridge (D13c) · 0063 async & Shareable (D11) · 0064 when grammar · 0065 SIMD/engine intrinsics direction · 0066 `Shared<T>` / `Weak<T>` / `SharedMut<T>`.
+0038 ownership and move semantics (D1, D3) · 0039 borrowing rules, elision, and the borrow checker (D2) · 0040 panics & overflow policy (D4, §3.5) · 0041 division/modulo/shifts (D14) · 0042 numeric conversions (D15) · 0043 MIR + interpreter oracle (§8.1–8.2) · 0044 doria-rt ABI (D18) · 0045 runtime strings/Bytes (D16) · 0046 nullable types & narrowing (D5) · 0047 enums & payload cases (D6) · 0048 match (D7) · 0049 checked errors full semantics (D8) · 0050 generics & monomorphization (D9) · 0051 collections runtime & API surface (§9) · 0052 compiler-internal iteration machinery · 0053 inheritance/open/override (D17) · 0054 interfaces, traits, Cloneable, and public Iterable conformance · 0055 property hooks · 0056 statics & const evaluation · 0057 closures (D10) · 0058 namespaces implementation notes (elaborating 0028) · 0059 attributes & compile-time evaluation policy · 0060 Baton manifest & test convention · 0061 unsafe/FFI (D12) · 0062 php-lib bridge (D13c) · 0063 async & Shareable (D11) · 0064 when grammar · 0065 SIMD/engine intrinsics direction · 0066 `Shared<T>` / `Weak<T>` / `SharedMut<T>`.
 
 Each record follows the existing template: context, decision, alternatives considered, consequences, affected components.
 
@@ -569,8 +569,8 @@ Stages continue the existing numbering. Every stage = decision record(s) + tests
 Retire the smoke architecture; make the native path general.
 
 - **Stage 11 — MIR + interpreter oracle.** Introduce MIR; port all Stage ≤10 lowering onto it; delete `NativeSmokeModule`; ship the MIR interpreter as `--target debug`; stand up the differential test harness. AC: every existing native example produces identical output under interpreter and Cranelift; no smoke-module code remains.
-- **Stage 12 — General control flow.** Arbitrary/nested loops, `return` anywhere, unbounded `while`, `break`/`continue` everywhere, recursion and mutual recursion; shared dataflow framework replaces the final-statement-return rule with returns-on-all-paths. AC: recursive fibonacci, nested-loop matrix example, early-return search all run natively; loop-verification cap removed.
-- **Stage 13 — Full integer family + operators.** All fixed-width types in the compiler; `/`, `%`, shifts, bitwise across widths; contextual integer literals; overflow/div-zero panics with runtime messages via doria-rt panic machinery. AC: differential tests over an arithmetic torture fixture; panic exit status 101 with message.
+- **Stage 12 — General control flow + runtime foundation.** Arbitrary/nested loops, `return` anywhere, unbounded `while`, `break`/`continue` everywhere, recursion and mutual recursion; shared dataflow framework replaces the final-statement-return rule with returns-on-all-paths. Create the minimal `crates/doria-rt`, native entry glue, and abort-only panic ABI so later checked panics have a runtime target. AC: recursive fibonacci, nested-loop matrix example, early-return search all run natively; loop-verification cap removed; a minimal explicit panic smoke exits 101 through doria-rt.
+- **Stage 13 — Full integer family + operators.** All fixed-width types in the compiler; `/`, `%`, shifts, bitwise across widths; contextual integer literals; overflow/div-zero panics with runtime messages through the Stage 12 doria-rt panic machinery. AC: differential tests over an arithmetic torture fixture; panic exit status 101 with message.
 - **Stage 14 — Floats + bool runtime.** `float32/64` arithmetic/comparison codegen, bool as runtime value (not just conditions), `Float`/`Int` conversion companions. AC: numeric integration examples match interpreter bit-for-bit for f64 ops.
 - **Stage 15 — LLVM release backend.** `--release` through LLVM over the same MIR; differential suite triples. AC: all examples identical across interpreter/Cranelift/LLVM; release binaries pass the suite.
 
@@ -580,16 +580,16 @@ Retire the smoke architecture; make the native path general.
 - **Stage 18 — Interpolation of expressions + Displayable.** Full `{expr}` interpolation; `Displayable` interface (compiler-known); parser fuzzing job lands. AC: `echo "sum: {a() + b()}"`; interpolating a non-Displayable class is a compile error with suggestion.
 
 ### Phase C — Classes go native (Stages 19–22)
-- **Stage 19 — Ownership, moves, destruction.** Native class layout, `new`, property init expressions, promoted params; classes become Doria's first move types: move analysis, use-after-move diagnostics in plain vocabulary, drop elaboration placing deterministic `__destruct` at end of owning scope, `take` parameters, `Cloneable` / `->clone()`. AC: destructor-order example; use-after-move diagnostic snapshots; RAII file-handle example; leak CI clean.
-- **Stage 20 — Methods, statics, internal.** Instance/static method codegen, `internal` enforcement in native path, class constants + const evaluation tier. AC: the SPEC §6 `Parser` class runs natively.
-- **Stage 21 — The borrow checker.** Non-lexical borrow checking on MIR: readonly/writable parameters and `$this` become enforced borrows, place-expression borrows, borrow-returning accessors under the §3.2 elision rule, one-writer-XOR-many-readers conflict diagnostics in owns/gives vocabulary; constructor definite-initialization on all paths (finishing SPEC §5's future-work note) lands on the same dataflow framework. `Shared<T>`/`Weak<T>`/`SharedMut<T>` ship here as the pressure valve. AC: legal/illegal borrow and ctor fixture matrix; borrow-conflict diagnostic snapshots; getter-returning-borrow example; zero runtime checks emitted.
+- **Stage 19 — Ownership, moves, destruction.** Native class layout, `new`, property init expressions, promoted params; classes become the first Doria move types: move analysis, use-after-move diagnostics in plain vocabulary, drop elaboration placing deterministic `__destruct` at end of owning scope, `take` parameters. Explicit user clone syntax and the `Cloneable` interface are deferred until method/interface support exists. AC: destructor-order example; use-after-move diagnostic snapshots; RAII file-handle example; leak CI clean.
+- **Stage 20 — Methods, statics, internal.** Instance/static method codegen, `internal` enforcement in native path, class constants + const evaluation tier. This stage may add compiler-recognized `->clone()` lowering for explicit built-in duplication where needed, but the public `Cloneable` interface waits for Stage 35 conformance. AC: the SPEC §6 `Parser` class runs natively.
+- **Stage 21 — The borrow checker.** Non-lexical borrow checking on MIR: readonly/writable parameters and `$this` become enforced borrows, place-expression borrows, borrow-returning accessors under the §3.2 elision rule, one-writer-XOR-many-readers conflict diagnostics in owns/gives vocabulary; constructor definite-initialization on all paths (finishing SPEC §5 future-work note) lands on the same dataflow framework. `Shared<T>`/`Weak<T>`/`SharedMut<T>` ship here as the pressure valve; `SharedMut<T>` explicitly emits dynamic access checks. AC: legal/illegal borrow and ctor fixture matrix; borrow-conflict diagnostic snapshots; getter-returning-borrow example; zero runtime checks emitted for ordinary borrow checking outside explicit `SharedMut<T>` use.
 - **Stage 22 — Nullable + narrowing + `is`.** D5 complete. AC: null-safe chaining example; narrowing snapshot diagnostics.
 
 ### Phase D — Collections and generics (Stages 23–26)
 - **Stage 23 — Runtime collections + Bytes.** Owned `List/Dictionary/Set` and `Bytes` intrinsics in doria-rt as move types; literals, indexing (`$list[0]` borrows the element; panic OOB), insertion moves values in, `foreach` element borrows (`as $item` readonly, `as writable $item` exclusive). AC: move/borrow fixture matrix over collections; in-place mutation loop example; use-after-move-into-list diagnostic snapshot.
 - **Stage 24 — Generic functions.** D9 for free functions/methods, monomorphization in MIR. AC: `first<T>` works across int/string/class lists.
-- **Stage 25 — Generic classes/interfaces/traits + iteration protocol.** `Stack<T>`; `Iterable<T>`/`Iterator<T>`; `foreach` desugars to protocol. AC: user-defined iterable consumed by `foreach`.
-- **Stage 26 — Collection API surface.** Decision 0051 methods incl. `map`/`filter` once Stage 30 closures exist (split: non-closure API here, closure API revisited in Stage 30). AC: stdlib written in Doria compiles via `include` (pre-Baton).
+- **Stage 25 — Generic classes + compiler-internal iteration machinery.** `Stack<T>` and generic collection/runtime machinery; `foreach` over built-in collections lowers through compiler-internal iteration support. Public generic interfaces, traits, and user-defined `Iterable<T>`/`Iterator<T>` conformance are deferred to Stage 35. AC: generic classes run natively; built-in collections are consumed by `foreach` without user-visible interface conformance.
+- **Stage 26 — Collection API surface.** Decision 0051 methods incl. `map`/`filter` once Stage 30 closures exist (split: non-closure API here, closure API revisited in Stage 30). Before Stage 31 include/multi-file support, required stdlib fragments are compiler-bundled or prelude-style rather than source-included. AC: non-closure collection APIs compile and run from the compiler-provided stdlib surface.
 
 ### Phase E — Enums, match, errors (Stages 27–29)
 - **Stage 27 — Enums + payload cases.** D6, inline tagged layout, Copy/move classification per payloads. AC: `Shape` example native.
@@ -598,13 +598,13 @@ Retire the smoke architecture; make the native path general.
 
 ### Phase F — Multi-file, namespaces, Baton (Stages 30–33)
 - **Stage 30 — Closures.** D10: borrow and `take` captures, function types in type position; collection closure APIs unlock. AC: sort-with-comparator example; borrow-bound closure escape rejected with a `take` suggestion fixture.
-- **Stage 31 — Namespaces/use/include/declare.** Decision 0028 implemented; multi-file compilation; first declare keys. AC: multi-file example project builds; duplicate-symbol diagnostics.
+- **Stage 31 — Namespaces/use/include/declare.** Decision 0028 implemented; multi-file compilation; first declare keys. AC: multi-file example project builds; duplicate-symbol diagnostics; Doria stdlib fragments that were compiler-provided in Stage 26 now compile through `include`.
 - **Stage 32 — Attributes.** `#[...]` parsing, type-checked against attribute classes, const-evaluation-tier arguments (resolving SPEC §11's evaluation-policy question: compile-time const evaluation only, no side effects); reflection deferred — attributes are compiler/tooling metadata in v1.0. AC: `#[Test]`, `#[PhpExport]` representable.
 - **Stage 33 — Baton MVP.** §11 scope: new/build/run/test/check, path deps, `#[Test]` runner. AC: `baton new game && baton test` green out of the box.
 
 ### Phase G — OOP completion (Stages 34–36)
 - **Stage 34 — Inheritance.** D17: `open`/`override`, vtables, parent construction rules, devirtualization in LLVM profile. AC: `Post extends Model` native; missing-override diagnostics.
-- **Stage 35 — Interfaces + traits.** Conformance checking, interface-typed values (fat pointer or vtable-embedded — decide in 0053/0054), trait flattening + `insteadof`/`as`. AC: SPEC §8 examples native.
+- **Stage 35 — Interfaces + traits.** Conformance checking, interface-typed values (fat pointer or vtable-embedded — decide in 0053/0054), trait flattening + `insteadof`/`as`. `Cloneable` becomes the public explicit-duplication contract here, and user-defined `Iterable<T>`/`Iterator<T>` conformance plugs into `foreach`. AC: SPEC §8 examples native; a user-defined iterable is consumed by `foreach`; a Cloneable class can be cloned through the interface contract.
 - **Stage 36 — Property hooks + when.** §6.4 hooks; `when` grammar per 0064. AC: `Temperature` example; when-chain example.
 
 ### Phase H — Concurrency (Stages 37–39)
@@ -614,7 +614,7 @@ Retire the smoke architecture; make the native path general.
 
 ### Phase I — Systems and PHP bridge (Stages 40–42)
 - **Stage 40 — unsafe/FFI.** D12: `unsafe`, `Ptr<T>`, `extern "C"`, linking foreign libs via Baton manifest. AC: bind and call a C function (e.g., zlib) from Doria.
-- **Stage 41 — php-lib bridge.** D13c end-to-end: export analysis, C-ABI shim gen, PHP FFI stub gen, handle lifetime tests against real PHP 8 in CI. AC: the `ImageResizer` scenario runs from a PHP script in CI.
+- **Stage 41 — php-lib bridge.** D13c end-to-end behind public `baton build --php-lib`: export analysis, C-ABI shim gen, PHP FFI stub gen, handle lifetime tests against real PHP 8 in CI. doriac provides compiler emission primitives only as needed by Baton. AC: the `ImageResizer` scenario runs from a PHP script in CI through Baton.
 - **Stage 42 — migrate php v0.** §10.2 conservative converter. AC: converts a small idiomatic PHP 8 fixture app; dynamic features produce diagnostics not silent guesses.
 
 ### Phase J — Engine enablers and 1.0 hardening (Stages 43+)
