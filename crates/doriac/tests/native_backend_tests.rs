@@ -3388,6 +3388,38 @@ function main(): int
             "unsupported native recursive function call for Stage 10",
         ),
         (
+            "unused parameterized recursion",
+            r#"
+function f(int $n): int
+{
+    return f($n);
+}
+
+function main(): int
+{
+    return 0;
+}
+"#,
+            "B0001",
+            "unsupported native recursive function call for Stage 10",
+        ),
+        (
+            "unused parameterized helper",
+            r#"
+function identity(int $n): int
+{
+    return $n;
+}
+
+function main(): int
+{
+    return 0;
+}
+"#,
+            "B0001",
+            "no concrete native call site",
+        ),
+        (
             "wrong argument count",
             r#"
 function add(int $left, int $right): int

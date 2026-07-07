@@ -490,6 +490,7 @@ fn validate_stage_10(program: &hir::Program) -> Result<NativeSmokeModule, Backen
         ));
     }
 
+    validate_stage_10_call_graph(&context)?;
     validate_stage_10_function("main", &[], &mut context)?;
     for name in context.function_order.clone() {
         if name == "main" {
@@ -508,6 +509,7 @@ fn validate_stage_10(program: &hir::Program) -> Result<NativeSmokeModule, Backen
             validate_stage_10_function(&name, &[], &mut context)?;
         }
     }
+    reject_unvalidated_stage_10_parameterized_helpers(&context)?;
 
     let functions = context
         .function_order
@@ -520,6 +522,240 @@ fn validate_stage_10(program: &hir::Program) -> Result<NativeSmokeModule, Backen
     };
     validate_native_process_exit_boundary(&module)?;
     Ok(module)
+}
+
+fn validate_stage_10_call_graph(
+    context: &NativeSmokeValidationContext<'_>,
+) -> Result<(), BackendError> {
+    let mut graph = HashMap::new();
+    for name in &context.function_order {
+        let function = context.declarations.get(name).ok_or_else(|| {
+            BackendError::new(format!(
+                "backend validation failure: native function `{name}` declaration was not collected"
+            ))
+        })?;
+        let mut calls = Vec::new();
+        collect_stage_10_function_calls_in_block(&function.body, &mut calls);
+        calls.retain(|callee| context.declarations.contains_key(callee));
+        graph.insert(name.clone(), calls);
+    }
+
+    let mut visited = HashSet::new();
+    let mut visiting = HashSet::new();
+    for name in &context.function_order {
+        validate_stage_10_call_graph_from(name, &graph, &mut visiting, &mut visited)?;
+    }
+
+    Ok(())
+}
+
+fn validate_stage_10_call_graph_from(
+    name: &str,
+    graph: &HashMap<String, Vec<String>>,
+    visiting: &mut HashSet<String>,
+    visited: &mut HashSet<String>,
+) -> Result<(), BackendError> {
+    if visited.contains(name) {
+        return Ok(());
+    }
+    if !visiting.insert(name.to_string()) {
+        return Err(BackendError::new(
+            "unsupported native recursive function call for Stage 10",
+        ));
+    }
+
+    if let Some(callees) = graph.get(name) {
+        for callee in callees {
+            validate_stage_10_call_graph_from(callee, graph, visiting, visited)?;
+        }
+    }
+
+    visiting.remove(name);
+    visited.insert(name.to_string());
+    Ok(())
+}
+
+fn collect_stage_10_function_calls_in_block(block: &hir::Block, calls: &mut Vec<String>) {
+    for statement in &block.statements {
+        collect_stage_10_function_calls_in_statement(statement, calls);
+    }
+}
+
+fn collect_stage_10_function_calls_in_statement(statement: &Stmt, calls: &mut Vec<String>) {
+    match statement {
+        Stmt::VarDecl(decl) => collect_stage_10_function_calls_in_expr(&decl.initializer, calls),
+        Stmt::Assignment(assignment) => {
+            collect_stage_10_function_calls_in_expr(&assignment.target, calls);
+            collect_stage_10_function_calls_in_expr(&assignment.value, calls);
+        }
+        Stmt::Echo { expr, .. } | Stmt::Expr { expr, .. } => {
+            collect_stage_10_function_calls_in_expr(expr, calls);
+        }
+        Stmt::Return {
+            expr: Some(expr), ..
+        } => {
+            collect_stage_10_function_calls_in_expr(expr, calls);
+        }
+        Stmt::Return { expr: None, .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::If(if_stmt) => {
+            collect_stage_10_function_calls_in_expr(&if_stmt.condition, calls);
+            collect_stage_10_function_calls_in_block(&if_stmt.then_block, calls);
+            if let Some(else_branch) = &if_stmt.else_branch {
+                collect_stage_10_function_calls_in_else_branch(else_branch, calls);
+            }
+        }
+        Stmt::While(while_stmt) => {
+            collect_stage_10_function_calls_in_expr(&while_stmt.condition, calls);
+            collect_stage_10_function_calls_in_block(&while_stmt.body, calls);
+        }
+        Stmt::For(for_stmt) => {
+            if let Some(initializer) = &for_stmt.initializer {
+                collect_stage_10_function_calls_in_for_initializer(initializer, calls);
+            }
+            if let Some(condition) = &for_stmt.condition {
+                collect_stage_10_function_calls_in_expr(condition, calls);
+            }
+            if let Some(increment) = &for_stmt.increment {
+                collect_stage_10_function_calls_in_for_increment(increment, calls);
+            }
+            collect_stage_10_function_calls_in_block(&for_stmt.body, calls);
+        }
+        Stmt::Foreach(foreach) => {
+            collect_stage_10_function_calls_in_expr(&foreach.iterable, calls);
+            collect_stage_10_function_calls_in_block(&foreach.body, calls);
+        }
+        Stmt::Increment(increment) => {
+            collect_stage_10_function_calls_in_expr(&increment.target, calls);
+        }
+    }
+}
+
+fn collect_stage_10_function_calls_in_else_branch(
+    else_branch: &ElseBranch,
+    calls: &mut Vec<String>,
+) {
+    match else_branch {
+        ElseBranch::If(if_stmt) => {
+            collect_stage_10_function_calls_in_expr(&if_stmt.condition, calls);
+            collect_stage_10_function_calls_in_block(&if_stmt.then_block, calls);
+            if let Some(else_branch) = &if_stmt.else_branch {
+                collect_stage_10_function_calls_in_else_branch(else_branch, calls);
+            }
+        }
+        ElseBranch::Block(block) => collect_stage_10_function_calls_in_block(block, calls),
+    }
+}
+
+fn collect_stage_10_function_calls_in_for_initializer(
+    initializer: &ForInitializer,
+    calls: &mut Vec<String>,
+) {
+    match initializer {
+        ForInitializer::VarDecl(decl) => {
+            collect_stage_10_function_calls_in_expr(&decl.initializer, calls);
+        }
+        ForInitializer::Assignment(assignment) => {
+            collect_stage_10_function_calls_in_expr(&assignment.target, calls);
+            collect_stage_10_function_calls_in_expr(&assignment.value, calls);
+        }
+    }
+}
+
+fn collect_stage_10_function_calls_in_for_increment(
+    increment: &ForIncrement,
+    calls: &mut Vec<String>,
+) {
+    match increment {
+        ForIncrement::Increment(increment) => {
+            collect_stage_10_function_calls_in_expr(&increment.target, calls);
+        }
+        ForIncrement::Assignment(assignment) => {
+            collect_stage_10_function_calls_in_expr(&assignment.target, calls);
+            collect_stage_10_function_calls_in_expr(&assignment.value, calls);
+        }
+    }
+}
+
+fn collect_stage_10_function_calls_in_expr(expr: &Expr, calls: &mut Vec<String>) {
+    match expr {
+        Expr::FunctionCall { name, args, .. } => {
+            calls.push(name.clone());
+            for arg in args {
+                collect_stage_10_function_calls_in_expr(arg, calls);
+            }
+        }
+        Expr::InterpolatedString { parts, .. } => {
+            for part in parts {
+                if let hir::InterpolatedStringPart::Expr(expr) = part {
+                    collect_stage_10_function_calls_in_expr(expr, calls);
+                }
+            }
+        }
+        Expr::Array { elements, .. } => {
+            for element in elements {
+                if let Some(key) = &element.key {
+                    collect_stage_10_function_calls_in_expr(key, calls);
+                }
+                collect_stage_10_function_calls_in_expr(&element.value, calls);
+            }
+        }
+        Expr::PropertyAccess { object, .. } => {
+            collect_stage_10_function_calls_in_expr(object, calls);
+        }
+        Expr::MethodCall { object, args, .. } => {
+            collect_stage_10_function_calls_in_expr(object, calls);
+            for arg in args {
+                collect_stage_10_function_calls_in_expr(arg, calls);
+            }
+        }
+        Expr::StaticCall { args, .. } | Expr::New { args, .. } => {
+            for arg in args {
+                collect_stage_10_function_calls_in_expr(arg, calls);
+            }
+        }
+        Expr::Grouped { expr, .. } | Expr::Unary { expr, .. } => {
+            collect_stage_10_function_calls_in_expr(expr, calls);
+        }
+        Expr::Binary { left, right, .. }
+        | Expr::Range {
+            start: left,
+            end: right,
+            ..
+        } => {
+            collect_stage_10_function_calls_in_expr(left, calls);
+            collect_stage_10_function_calls_in_expr(right, calls);
+        }
+        Expr::Variable { .. }
+        | Expr::This { .. }
+        | Expr::Identifier { .. }
+        | Expr::String { .. }
+        | Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Bool { .. }
+        | Expr::Null { .. } => {}
+    }
+}
+
+fn reject_unvalidated_stage_10_parameterized_helpers(
+    context: &NativeSmokeValidationContext<'_>,
+) -> Result<(), BackendError> {
+    for name in &context.function_order {
+        if context.validated.contains_key(name) {
+            continue;
+        }
+        let signature = context.signatures.get(name).ok_or_else(|| {
+            BackendError::new(format!(
+                "backend validation failure: native function `{name}` signature was not collected"
+            ))
+        })?;
+        if !signature.params.is_empty() {
+            return Err(BackendError::new(format!(
+                "unsupported native parameterized helper for Stage 10: function `{name}` has no concrete native call site for argument-dependent validation"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_native_function_signature(
