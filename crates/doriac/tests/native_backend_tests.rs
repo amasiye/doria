@@ -498,6 +498,253 @@ fn compiles_and_runs_current_native_smoke_examples() {
 }
 
 #[test]
+fn compiles_and_runs_stage_10_native_free_functions() {
+    if !host_linker_is_available() {
+        eprintln!(
+            "native function smoke test unavailable: host linker `{}` was not found",
+            host_linker()
+        );
+        return;
+    }
+
+    let exit_cases = [
+        (
+            "main_function_add_42",
+            r#"
+function add(int $left, int $right): int
+{
+    return $left + $right;
+}
+
+function main(): int
+{
+    return add(20, 22);
+}
+"#,
+            42,
+        ),
+        (
+            "main_function_chained_helpers_42",
+            r#"
+function forty(): int
+{
+    return 40;
+}
+
+function answer(): int
+{
+    return forty() + 2;
+}
+
+function main(): int
+{
+    return answer();
+}
+"#,
+            42,
+        ),
+        (
+            "main_function_big_helper_unbounded",
+            r#"
+function big(): int
+{
+    return 9223372036854775807;
+}
+
+function main(): int
+{
+    let $value = big();
+
+    return 0;
+}
+"#,
+            0,
+        ),
+        (
+            "main_function_if_else_42",
+            r#"
+function answer(int $flag): int
+{
+    if ($flag == 1) {
+        return 42;
+    } else {
+        return 0;
+    }
+}
+
+function main(): int
+{
+    return answer(1);
+}
+"#,
+            42,
+        ),
+        (
+            "main_function_loop_42",
+            r#"
+function countTo42(): int
+{
+    let writable $sum = 0;
+
+    foreach (0..<42 as $i) {
+        $sum += 1;
+    }
+
+    return $sum;
+}
+
+function main(): int
+{
+    return countTo42();
+}
+"#,
+            42,
+        ),
+        (
+            "main_function_helper_loop_uses_call_argument",
+            r#"
+function prove(writable int $n): int
+{
+    while ($n == 0) {
+        $n = $n;
+    }
+
+    return 42;
+}
+
+function main(): int
+{
+    return prove(1);
+}
+"#,
+            42,
+        ),
+    ];
+
+    for (stem, source, expected_code) in exit_cases {
+        let output = temp_executable_path(stem);
+        compile_native_source(source, &output);
+        let run = run_native_executable(&output).expect("native executable should run");
+        assert_eq!(run.status.code(), Some(expected_code), "{stem}");
+        assert!(
+            run.stderr.is_empty(),
+            "{stem}: expected empty stderr, got {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let _ = fs::remove_file(output);
+    }
+
+    let stdout_cases = [
+        (
+            "main_function_void_echo",
+            r#"
+function hello(): void
+{
+    echo "Hello Doria!";
+}
+
+function main(): void
+{
+    hello();
+}
+"#,
+            b"Hello Doria!".as_slice(),
+        ),
+        (
+            "main_function_two_void_calls",
+            r#"
+function hello(): void
+{
+    echo "Hello ";
+}
+
+function subject(): void
+{
+    echo "Doria!";
+}
+
+function main(): void
+{
+    hello();
+    subject();
+}
+"#,
+            b"Hello Doria!".as_slice(),
+        ),
+        (
+            "main_function_void_string_concat",
+            r#"
+function hello(): void
+{
+    let $name = "Doria";
+
+    echo "Hello " . $name . "!";
+}
+
+function main(): void
+{
+    hello();
+}
+"#,
+            b"Hello Doria!".as_slice(),
+        ),
+        (
+            "main_function_range_bound_helpers_call_once",
+            r#"
+function start(): int
+{
+    echo "s";
+
+    return 0;
+}
+
+function limit(): int
+{
+    echo "e";
+
+    return 2;
+}
+
+function main(): void
+{
+    foreach (start()..<limit() as $i) {
+        echo "x";
+    }
+}
+"#,
+            b"sexx".as_slice(),
+        ),
+        (
+            "main_function_void_call_in_while_body",
+            r#"
+function tick(): void
+{
+    echo ".";
+}
+
+function main(): void
+{
+    let writable $i = 0;
+
+    while ($i < 2) {
+        tick();
+        $i += 1;
+    }
+}
+"#,
+            b"..".as_slice(),
+        ),
+    ];
+
+    for (stem, source, expected_stdout) in stdout_cases {
+        let output = temp_executable_path(stem);
+        compile_native_source(source, &output);
+        assert_native_run_output(&output, stem, expected_stdout);
+        let _ = fs::remove_file(output);
+    }
+}
+
+#[test]
 fn compiles_and_runs_void_main_string_literal_echo() {
     if !host_linker_is_available() {
         eprintln!(
@@ -3048,12 +3295,104 @@ function main(): int
             "B0001",
             "class `Person`",
         ),
+    ];
+
+    for (name, source, expected_code, expected_message) in cases {
+        let diagnostics =
+            doriac::compile_source(format!("{name}.doria"), source, BackendTarget::Native)
+                .expect_err("unsupported current native smoke source should fail");
+
+        assert_eq!(diagnostics[0].code, expected_code, "{name}");
+        assert!(
+            diagnostics[0].message.contains(expected_message),
+            "{name}: expected message containing `{expected_message}`, got `{}`",
+            diagnostics[0].message
+        );
+    }
+}
+
+#[test]
+fn rejects_unsupported_stage_10_native_free_function_shapes() {
+    let cases = [
         (
-            "extra top-level function",
+            "string parameter",
             r#"
-function helper(): int
+function hello(string $name): void
 {
-    return 0;
+    echo $name;
+}
+
+function main(): void
+{
+    hello("Doria");
+}
+"#,
+            "B0001",
+            "unsupported native function signature for Stage 10",
+        ),
+        (
+            "string return",
+            r#"
+function hello(): string
+{
+    return "Hello Doria!";
+}
+
+function main(): void
+{
+    echo hello();
+}
+"#,
+            "B0001",
+            "unsupported native function signature for Stage 10",
+        ),
+        (
+            "recursion",
+            r#"
+function count(int $n): int
+{
+    if ($n == 0) {
+        return 0;
+    }
+
+    return count($n - 1);
+}
+
+function main(): int
+{
+    return count(1);
+}
+"#,
+            "B0001",
+            "unsupported native recursive function call for Stage 10",
+        ),
+        (
+            "mutual recursion",
+            r#"
+function a(): int
+{
+    return b();
+}
+
+function b(): int
+{
+    return a();
+}
+
+function main(): int
+{
+    return a();
+}
+"#,
+            "B0001",
+            "unsupported native recursive function call for Stage 10",
+        ),
+        (
+            "unused parameterized recursion",
+            r#"
+function f(int $n): int
+{
+    return f($n);
 }
 
 function main(): int
@@ -3062,14 +3401,78 @@ function main(): int
 }
 "#,
             "B0001",
-            "extra top-level function `helper`",
+            "unsupported native recursive function call for Stage 10",
+        ),
+        (
+            "unused parameterized helper",
+            r#"
+function identity(int $n): int
+{
+    return $n;
+}
+
+function main(): int
+{
+    return 0;
+}
+"#,
+            "B0001",
+            "no concrete native call site",
+        ),
+        (
+            "wrong argument count",
+            r#"
+function add(int $left, int $right): int
+{
+    return $left + $right;
+}
+
+function main(): int
+{
+    return add(42);
+}
+"#,
+            "E0409",
+            "function `add` expects 2 arguments, got 1",
+        ),
+        (
+            "wrong argument type",
+            r#"
+function add(int $left, int $right): int
+{
+    return $left + $right;
+}
+
+function main(): int
+{
+    return add("20", 22);
+}
+"#,
+            "E0408",
+            "argument 1 of function `add` expects `int`, got `string`",
+        ),
+        (
+            "int helper used as statement",
+            r#"
+function one(): int
+{
+    return 1;
+}
+
+function main(): void
+{
+    one();
+}
+"#,
+            "B0001",
+            "non-void function `one` cannot be used as a statement",
         ),
     ];
 
     for (name, source, expected_code, expected_message) in cases {
         let diagnostics =
             doriac::compile_source(format!("{name}.doria"), source, BackendTarget::Native)
-                .expect_err("unsupported current native smoke source should fail");
+                .expect_err("unsupported Stage 10 native function source should fail");
 
         assert_eq!(diagnostics[0].code, expected_code, "{name}");
         assert!(

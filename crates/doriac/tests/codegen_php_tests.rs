@@ -159,6 +159,54 @@ function main(): void
 }
 
 #[test]
+fn emits_php_for_stage_10_helper_function_call() {
+    let php = doriac::compile_source_to_php(
+        "test.doria",
+        r#"
+function add(int $left, int $right): int
+{
+    return $left + $right;
+}
+
+function main(): int
+{
+    return add(20, 22);
+}
+"#,
+    )
+    .expect("compilation should succeed");
+
+    assert!(php.contains("function add(int $left, int $right): int"));
+    assert!(php.contains("return $left + $right;"));
+    assert!(php.contains("function main(): int"));
+    assert!(php.contains("return add(20, 22);"));
+}
+
+#[test]
+fn emits_php_for_stage_10_void_helper_call() {
+    let php = doriac::compile_source_to_php(
+        "test.doria",
+        r#"
+function hello(): void
+{
+    echo "Hello Doria!";
+}
+
+function main(): void
+{
+    hello();
+}
+"#,
+    )
+    .expect("compilation should succeed");
+
+    assert!(php.contains("function hello(): void"));
+    assert!(php.contains("echo \"Hello Doria!\";"));
+    assert!(php.contains("function main(): void"));
+    assert!(php.contains("hello();"));
+}
+
+#[test]
 fn lowers_checked_program_to_hir() {
     let lowered = doriac::lower_source(
         "test.doria",
