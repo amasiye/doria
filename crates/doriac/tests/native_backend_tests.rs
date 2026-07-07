@@ -689,6 +689,32 @@ function main(): void
             b"Hello Doria!".as_slice(),
         ),
         (
+            "main_function_range_bound_helpers_call_once",
+            r#"
+function start(): int
+{
+    echo "s";
+
+    return 0;
+}
+
+function limit(): int
+{
+    echo "e";
+
+    return 2;
+}
+
+function main(): void
+{
+    foreach (start()..<limit() as $i) {
+        echo "x";
+    }
+}
+"#,
+            b"sexx".as_slice(),
+        ),
+        (
             "main_function_void_call_in_while_body",
             r#"
 function tick(): void

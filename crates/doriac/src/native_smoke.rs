@@ -115,6 +115,11 @@ struct NativeSmokeForLikeParts {
     body: NativeSmokeFallthroughBlock,
 }
 
+struct NativeSmokeRangeForeach {
+    prelude: Vec<NativeSmokeStmt>,
+    for_loop: NativeSmokeFor,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NativeSmokeForInitializer {
     Local(NativeSmokeLocal),
@@ -795,9 +800,11 @@ fn validate_stage_6c_block(
                 terminal_index += 1;
             }
             Stmt::Foreach(foreach) if grouped_range_expr(&foreach.iterable).is_some() => {
-                let native_for = validate_stage_9_range_foreach(foreach, &block_states, context)?;
-                merge_native_values(&mut block_states, &native_for.final_values)?;
-                native_statements.push(NativeSmokeStmt::For(Box::new(native_for)));
+                let range_foreach =
+                    validate_stage_9_range_foreach(foreach, &block_states, context)?;
+                merge_native_values(&mut block_states, &range_foreach.for_loop.final_values)?;
+                native_statements.extend(range_foreach.prelude);
+                native_statements.push(NativeSmokeStmt::For(Box::new(range_foreach.for_loop)));
                 terminal_index += 1;
             }
             Stmt::If(if_stmt) => {
@@ -1595,7 +1602,7 @@ fn validate_stage_9_range_foreach(
     foreach: &hir::ForeachStmt,
     local_states: &HashMap<String, NativeSmokeLocalState>,
     context: &mut NativeSmokeValidationContext<'_>,
-) -> Result<NativeSmokeFor, BackendError> {
+) -> Result<NativeSmokeRangeForeach, BackendError> {
     if foreach.key.is_some() {
         return Err(BackendError::new(
             "unsupported native foreach range for Stage 9: key bindings are future work",
@@ -1616,18 +1623,44 @@ fn validate_stage_9_range_foreach(
     } else {
         source_binding_name.clone()
     };
+    let start_binding_name = native_range_foreach_start_name(&source_binding_name);
+    let end_binding_name = native_range_foreach_end_name(&source_binding_name);
     let binding_state = NativeSmokeLocalState {
         writable: false,
         value: NativeSmokeValue::Int(start.value),
     };
+    let start_binding_state = NativeSmokeLocalState {
+        writable: false,
+        value: NativeSmokeValue::Int(start.value),
+    };
+    let end_binding_state = NativeSmokeLocalState {
+        writable: false,
+        value: NativeSmokeValue::Int(end.value),
+    };
     let initializer = NativeSmokeForInitializer::Local(NativeSmokeLocal {
         name: native_binding_name.clone(),
         writable: false,
-        expr: NativeSmokeExpr::Int(start.value),
+        expr: NativeSmokeExpr::Local(start_binding_name.clone()),
         evaluated_value: NativeSmokeValue::Int(start.value),
     });
+    let prelude = vec![
+        NativeSmokeStmt::Local(NativeSmokeLocal {
+            name: start_binding_name.clone(),
+            writable: false,
+            expr: start.expr,
+            evaluated_value: NativeSmokeValue::Int(start.value),
+        }),
+        NativeSmokeStmt::Local(NativeSmokeLocal {
+            name: end_binding_name.clone(),
+            writable: false,
+            expr: end.expr,
+            evaluated_value: NativeSmokeValue::Int(end.value),
+        }),
+    ];
 
     let mut loop_states = local_states.clone();
+    loop_states.insert(start_binding_name.clone(), start_binding_state);
+    loop_states.insert(end_binding_name.clone(), end_binding_state);
     loop_states.insert(native_binding_name.clone(), binding_state.clone());
 
     let mut body_validation_states = loop_states.clone();
@@ -1642,7 +1675,7 @@ fn validate_stage_9_range_foreach(
             NativeSmokeCompareOp::LessThan
         },
         left: NativeSmokeExpr::Local(native_binding_name.clone()),
-        right: NativeSmokeExpr::Int(end.value),
+        right: NativeSmokeExpr::Local(end_binding_name.clone()),
     };
     let increment = NativeSmokeAssign {
         target: native_binding_name.clone(),
@@ -1653,7 +1686,7 @@ fn validate_stage_9_range_foreach(
     let increment_exit_condition = inclusive.then(|| NativeSmokeCondition::Compare {
         op: NativeSmokeCompareOp::Equal,
         left: NativeSmokeExpr::Local(native_binding_name.clone()),
-        right: NativeSmokeExpr::Int(end.value),
+        right: NativeSmokeExpr::Local(end_binding_name.clone()),
     });
     let body = validate_stage_6c_while_branch_body(
         &foreach.body.statements,
@@ -1666,7 +1699,7 @@ fn validate_stage_9_range_foreach(
         body
     };
 
-    validate_stage_9_for_like(
+    let for_loop = validate_stage_9_for_like(
         NativeSmokeForLikeParts {
             initializer: Some(initializer),
             condition,
@@ -1677,7 +1710,17 @@ fn validate_stage_9_range_foreach(
         &loop_states,
         local_states,
         context,
-    )
+    )?;
+
+    Ok(NativeSmokeRangeForeach { prelude, for_loop })
+}
+
+fn native_range_foreach_start_name(source_name: &str) -> String {
+    format!("<range_foreach_start:{source_name}>")
+}
+
+fn native_range_foreach_end_name(source_name: &str) -> String {
+    format!("<range_foreach_end:{source_name}>")
 }
 
 fn native_range_foreach_shadow_name(source_name: &str) -> String {
@@ -5469,6 +5512,63 @@ function main(): int
         );
 
         assert_eq!(evaluate_exit_code(&module), 42);
+    }
+
+    #[test]
+    fn validation_preserves_range_bound_calls_for_lowering() {
+        let module = validate_test_source(
+            r#"
+function start(): int
+{
+    return 1;
+}
+
+function limit(): int
+{
+    return 3;
+}
+
+function main(): int
+{
+    let writable $sum = 0;
+
+    foreach (start()..<limit() as $i) {
+        $sum += 1;
+    }
+
+    return $sum;
+}
+"#,
+        );
+
+        let [NativeSmokeStmt::Local(_sum), NativeSmokeStmt::Local(start_bound), NativeSmokeStmt::Local(end_bound), NativeSmokeStmt::For(native_for)] =
+            main_function(&module).body.statements.as_slice()
+        else {
+            panic!("expected range foreach to lower with start/end bound preludes");
+        };
+        assert!(matches!(
+            &start_bound.expr,
+            NativeSmokeExpr::Call { function, .. } if function == "start"
+        ));
+        assert!(matches!(
+            &end_bound.expr,
+            NativeSmokeExpr::Call { function, .. } if function == "limit"
+        ));
+        assert!(matches!(
+            &native_for.initializer,
+            Some(NativeSmokeForInitializer::Local(NativeSmokeLocal {
+                expr: NativeSmokeExpr::Local(name),
+                ..
+            })) if name == &start_bound.name
+        ));
+        assert!(matches!(
+            &native_for.condition,
+            NativeSmokeCondition::Compare {
+                right: NativeSmokeExpr::Local(name),
+                ..
+            } if name == &end_bound.name
+        ));
+        assert_eq!(evaluate_exit_code(&module), 2);
     }
 
     #[test]
