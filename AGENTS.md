@@ -116,6 +116,8 @@ At completion, report assumptions made and critical decisions encountered. If no
 - Do not make PHP output the semantic oracle for Doria OOP behavior.
 - Do not make Doria editor support VS Code-only. Keep VS Code and IntelliJ / JetBrains syntax highlighting aligned.
 - Treat TextMate/editor highlighting as editor UX only, not lexer, parser, compiler, or LSP semantic-token support.
+- Use `doria` fences for Doria Markdown examples. Keep `php` fences only for generated PHP, PHP interop, or PHP migration input/output.
+- Planned Doria keywords may be highlighted in editor tooling to keep docs readable, but highlighting must never be described as compiler implementation.
 - Do not mark rejected Doria syntax such as `===`, `!==`, `#define`, or `#include` as accepted language syntax in editor tooling.
 - Keep self-hosting in mind when designing compiler APIs, diagnostics, source management, Doria IR, and the standard library.
 - Keep native desktop, game engine, C-library binding, and raylib goals visible when designing Doria IR, future native-oriented IR, runtime, memory representation, FFI, and performance benchmarks.

@@ -185,6 +185,8 @@ Doria has first-pass editor tooling for `.doria` files:
 
 VS Code and IntelliJ / JetBrains highlighting should stay aligned as accepted Doria vocabulary evolves. The shared smoke fixture is `editors/fixtures/latest-tokens.doria`, and `scripts/check_editor_highlighting.php` checks the current editor token guardrails.
 
+Syntax highlighting is editor grammar support, not compiler support. Planned keywords may be highlighted so docs and examples are readable before their compiler stages land. Markdown examples that contain Doria source should use the `doria` fence; generated PHP or PHP interop examples should keep the `php` fence. JetBrains Markdown highlighting depends on the IntelliJ plugin registering Doria as a language id that Markdown can inject for `doria` fences, while `.doria` diagnostics, hover, and completion come from `doria-lsp` when configured.
+
 Build the server before starting either editor extension:
 
 ```bash
