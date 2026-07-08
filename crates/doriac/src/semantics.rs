@@ -333,7 +333,7 @@ impl<'program> Checker<'program> {
     }
 
     fn infer_unannotated_mixed_return_signatures(&mut self) {
-        let max_iterations = self.program.items.len().saturating_mul(4).max(1);
+        let max_iterations = self.mixed_return_inference_signature_count();
 
         for _ in 0..max_iterations {
             let mut changed = false;
@@ -360,6 +360,29 @@ impl<'program> Checker<'program> {
                 break;
             }
         }
+    }
+
+    fn mixed_return_inference_signature_count(&self) -> usize {
+        self.program
+            .items
+            .iter()
+            .map(|item| match item {
+                Item::Function(function) if function.return_type.is_none() => 1,
+                Item::Class(class_decl) => class_decl
+                    .members
+                    .iter()
+                    .filter(|member| match member {
+                        ClassMember::Method(method) => {
+                            method.return_type.is_none()
+                                && LifecycleMethod::from_method_name(&method.name).is_none()
+                        }
+                        ClassMember::Property(_) => false,
+                    })
+                    .count(),
+                _ => 0,
+            })
+            .sum::<usize>()
+            .max(1)
     }
 
     fn update_function_mixed_return_signature(&mut self, function: &FunctionDecl) -> bool {
@@ -444,15 +467,33 @@ impl<'program> Checker<'program> {
             );
         }
 
-        for statement in &function.body.statements {
-            if let Some(ty) =
-                self.infer_mixed_return_from_statement(statement, &mut scopes, method_context)
-            {
-                return ty;
+        self.infer_mixed_return_from_statements(
+            &function.body.statements,
+            &mut scopes,
+            method_context,
+        )
+        .unwrap_or_else(|| self.types.unknown())
+    }
+
+    fn infer_mixed_return_from_statements(
+        &mut self,
+        statements: &[Stmt],
+        scopes: &mut ScopeStack,
+        method_context: Option<&MethodContext>,
+    ) -> Option<TypeId> {
+        let mut inferred = None;
+
+        for statement in statements {
+            let statement_ty =
+                self.infer_mixed_return_from_statement(statement, scopes, method_context);
+            inferred = self.merge_optional_mixed_return_types(inferred, statement_ty);
+
+            if Self::statement_is_terminal(statement) {
+                break;
             }
         }
 
-        self.types.unknown()
+        inferred
     }
 
     fn infer_mixed_return_from_statement(
@@ -498,15 +539,16 @@ impl<'program> Checker<'program> {
                 self.type_contains_mixed(ty).then_some(ty)
             }
             Stmt::If(if_stmt) => {
-                if let Some(ty) =
-                    self.infer_mixed_return_from_block(&if_stmt.then_block, scopes, method_context)
-                {
-                    return Some(ty);
+                let mut inferred =
+                    self.infer_mixed_return_from_block(&if_stmt.then_block, scopes, method_context);
+
+                if let Some(branch) = &if_stmt.else_branch {
+                    let branch_ty =
+                        self.infer_mixed_return_from_else_branch(branch, scopes, method_context);
+                    inferred = self.merge_optional_mixed_return_types(inferred, branch_ty);
                 }
 
-                if_stmt.else_branch.as_ref().and_then(|branch| {
-                    self.infer_mixed_return_from_else_branch(branch, scopes, method_context)
-                })
+                inferred
             }
             Stmt::While(while_stmt) => {
                 self.infer_mixed_return_from_block(&while_stmt.body, scopes, method_context)
@@ -539,16 +581,10 @@ impl<'program> Checker<'program> {
         method_context: Option<&MethodContext>,
     ) -> Option<TypeId> {
         scopes.push();
-        for statement in &block.statements {
-            if let Some(ty) =
-                self.infer_mixed_return_from_statement(statement, scopes, method_context)
-            {
-                scopes.pop();
-                return Some(ty);
-            }
-        }
+        let inferred =
+            self.infer_mixed_return_from_statements(&block.statements, scopes, method_context);
         scopes.pop();
-        None
+        inferred
     }
 
     fn infer_mixed_return_from_else_branch(
@@ -646,16 +682,57 @@ impl<'program> Checker<'program> {
             },
         );
 
-        for statement in &foreach.body.statements {
-            if let Some(ty) =
-                self.infer_mixed_return_from_statement(statement, scopes, method_context)
-            {
-                scopes.pop();
-                return Some(ty);
-            }
-        }
+        let inferred = self.infer_mixed_return_from_statements(
+            &foreach.body.statements,
+            scopes,
+            method_context,
+        );
         scopes.pop();
-        None
+        inferred
+    }
+
+    fn merge_optional_mixed_return_types(
+        &mut self,
+        current: Option<TypeId>,
+        next: Option<TypeId>,
+    ) -> Option<TypeId> {
+        let next = next?;
+        if !self.type_contains_mixed(next) {
+            return current;
+        }
+
+        Some(match current {
+            Some(current) => self.merge_mixed_return_types(current, next),
+            None => next,
+        })
+    }
+
+    fn merge_mixed_return_types(&mut self, left: TypeId, right: TypeId) -> TypeId {
+        if left == right {
+            return left;
+        }
+
+        let left_kind = self.types.kind(left).clone();
+        let right_kind = self.types.kind(right).clone();
+        match (left_kind, right_kind) {
+            (TypeKind::List(left), TypeKind::List(right)) => {
+                let element = self.merge_mixed_return_types(left, right);
+                self.types.intern(TypeKind::List(element))
+            }
+            (
+                TypeKind::Dictionary(left_key, left_value),
+                TypeKind::Dictionary(right_key, right_value),
+            ) => {
+                let key = self.merge_mixed_return_types(left_key, right_key);
+                let value = self.merge_mixed_return_types(left_value, right_value);
+                self.types.intern(TypeKind::Dictionary(key, value))
+            }
+            (TypeKind::Set(left), TypeKind::Set(right)) => {
+                let element = self.merge_mixed_return_types(left, right);
+                self.types.intern(TypeKind::Set(element))
+            }
+            _ => self.types.intern(TypeKind::Mixed),
+        }
     }
 
     fn infer_foreach_binding_types(

@@ -293,6 +293,48 @@ $payload += 1;
 }
 
 #[test]
+fn propagates_mixed_return_through_long_method_chains() {
+    let mut source = String::from("class Chain\n{\n");
+    for index in 0..16 {
+        source.push_str(&format!(
+            "    function m{index}(mixed $value)\n    {{\n        return $this->m{}($value);\n    }}\n\n",
+            index + 1
+        ));
+    }
+    source.push_str(
+        r#"    function m16(mixed $value)
+    {
+        return $value;
+    }
+}
+
+let $chain = new Chain();
+string $payload = $chain->m0(1);
+"#,
+    );
+
+    assert_type_mismatch(&source);
+}
+
+#[test]
+fn merges_mixed_return_shapes_before_updating_unannotated_signatures() {
+    assert_type_mismatch(
+        r#"
+function leak(mixed $payload, bool $asList)
+{
+    if ($asList) {
+        return [$payload];
+    }
+
+    return $payload;
+}
+
+List<mixed> $payloads = leak(1, false);
+"#,
+    );
+}
+
+#[test]
 fn rejects_d21_dynamic_boundary_type_positions() {
     let cases = [
         ("null $empty = null;", "E0431", "`null` is a literal"),
