@@ -86,6 +86,39 @@ Dictionary<string, mixed> $byName = [
 }
 
 #[test]
+fn keeps_broad_array_call_refinements_call_scoped() {
+    doriac::check_source(
+        "test.doria",
+        r#"
+function identity(array $items)
+{
+    return $items;
+}
+
+mixed $payload = 1;
+identity([$payload]);
+
+List<int> $items = identity([1]);
+"#,
+    )
+    .expect("mixed-bearing array call evidence should not poison later calls");
+}
+
+#[test]
+fn preserves_nested_mixed_collection_shape() {
+    doriac::check_source(
+        "test.doria",
+        r#"
+mixed $payload = 1;
+let $rows = [[$payload], [1]];
+
+List<List<mixed>> $copy = $rows;
+"#,
+    )
+    .expect("nested collection shape should be preserved while widening inner mixed values");
+}
+
+#[test]
 fn rejects_mixed_operations_before_narrowing() {
     for (source, code) in [
         (
@@ -374,6 +407,121 @@ mixed $payload = 1;
 echo [[$payload], [1]];
 "#,
             "E0433",
+        ),
+        (
+            r#"
+function first(array $items)
+{
+    foreach ($items as $item) {
+        return $item;
+    }
+}
+
+function forward(array $items)
+{
+    return first($items);
+}
+
+mixed $payload = 1;
+string $value = forward([$payload]);
+"#,
+            "E0403",
+        ),
+        (
+            r#"
+class Box
+{
+    writable array $items;
+
+    writable function set(array $items): void
+    {
+        $this->items = $items;
+    }
+
+    function leak()
+    {
+        foreach ($this->items as $item) {
+            return $item;
+        }
+    }
+}
+
+let writable $box = new Box();
+mixed $payload = 1;
+$box->set([$payload]);
+string $value = $box->leak();
+"#,
+            "E0403",
+        ),
+        (
+            r#"
+class Box
+{
+    array $items;
+
+    function __construct(array $items)
+    {
+        $this->items = $items;
+    }
+
+    function leak()
+    {
+        foreach ($this->items as $item) {
+            return $item;
+        }
+    }
+}
+
+mixed $payload = 1;
+let $box = new Box([$payload]);
+string $value = $box->leak();
+"#,
+            "E0403",
+        ),
+        (
+            r#"
+function sourceMixed(): mixed
+{
+    return 1;
+}
+
+class Box
+{
+    array $items = [sourceMixed()];
+
+    function leak()
+    {
+        foreach ($this->items as $item) {
+            return $item;
+        }
+    }
+}
+
+let $box = new Box();
+string $value = $box->leak();
+"#,
+            "E0403",
+        ),
+        (
+            r#"
+class Box
+{
+    writable array $items;
+}
+
+function first(Box $box)
+{
+    foreach ($box->items as $item) {
+        return $item;
+    }
+}
+
+let writable $box = new Box();
+mixed $payload = 1;
+$box->items = [$payload];
+string $value = first($box);
+"#,
+            "E0403",
         ),
     ] {
         let err =

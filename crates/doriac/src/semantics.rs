@@ -24,6 +24,8 @@ struct Checker<'program> {
     classes: HashMap<String, ClassInfo>,
     functions: HashMap<String, FunctionInfo>,
     function_signatures: HashMap<usize, FunctionInfo>,
+    call_inference_stack: Vec<CallInferenceKey>,
+    call_effect_stack: Vec<CallInferenceKey>,
     types: TypeRegistry,
     diagnostics: Vec<Diagnostic>,
 }
@@ -132,6 +134,12 @@ struct ParamTypeRefinement {
     ty: TypeId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CallInferenceKey {
+    Function(String),
+    Method { class_name: String, method: String },
+}
+
 #[derive(Debug, Clone)]
 enum AssignmentDestination {
     Type,
@@ -153,6 +161,8 @@ impl<'program> Checker<'program> {
             classes: HashMap::new(),
             functions: HashMap::new(),
             function_signatures: HashMap::new(),
+            call_inference_stack: Vec::new(),
+            call_effect_stack: Vec::new(),
             types: TypeRegistry::new(),
             diagnostics: Vec::new(),
         }
@@ -862,6 +872,11 @@ impl<'program> Checker<'program> {
                 name: property.name.clone(),
             },
         );
+        let value_ty = self.infer_expr_type(initializer, &scopes, Some(&initializer_context));
+        let preserved_ty = self.preserve_known_mixed_collection_shape(target_ty, value_ty);
+        if preserved_ty != target_ty {
+            self.preserve_known_mixed_collection_property(class_name, &property.name, preserved_ty);
+        }
     }
 
     fn declare_property(
@@ -2588,7 +2603,7 @@ impl<'program> Checker<'program> {
             scopes,
             method_context,
         );
-        self.apply_function_param_refinements(name, &refinements);
+        self.apply_function_call_side_effects(name, &refinements, args, scopes, method_context);
     }
 
     fn check_method_call(
@@ -2654,7 +2669,14 @@ impl<'program> Checker<'program> {
             scopes,
             method_context,
         );
-        self.apply_method_param_refinements(&class_name, method, &refinements);
+        self.apply_method_call_side_effects(
+            &class_name,
+            method,
+            &refinements,
+            args,
+            scopes,
+            method_context,
+        );
     }
 
     fn check_static_call(
@@ -2705,7 +2727,14 @@ impl<'program> Checker<'program> {
             scopes,
             method_context,
         );
-        self.apply_method_param_refinements(class_name, method, &refinements);
+        self.apply_method_call_side_effects(
+            class_name,
+            method,
+            &refinements,
+            args,
+            scopes,
+            method_context,
+        );
     }
 
     fn check_direct_lifecycle_method_call(
@@ -2784,7 +2813,14 @@ impl<'program> Checker<'program> {
             scopes,
             method_context,
         );
-        self.apply_method_param_refinements(class_name, "__construct", &refinements);
+        self.apply_method_call_side_effects(
+            class_name,
+            "__construct",
+            &refinements,
+            args,
+            scopes,
+            method_context,
+        );
     }
 
     fn check_call_arguments(
@@ -2833,60 +2869,45 @@ impl<'program> Checker<'program> {
         refinements
     }
 
-    fn apply_function_param_refinements(
+    fn apply_function_call_side_effects(
         &mut self,
         name: &str,
         refinements: &[ParamTypeRefinement],
+        _args: &[Expr],
+        _scopes: &ScopeStack,
+        _method_context: Option<&MethodContext>,
     ) {
-        if refinements.is_empty() {
-            return;
-        }
-
-        let Some(function) = self.program.items.iter().find_map(|item| match item {
-            Item::Function(function) if function.name == name => Some(function.clone()),
-            _ => None,
-        }) else {
+        let Some(function) = self.find_function_decl(name).cloned() else {
             return;
         };
 
         let Some(function_info) = self.functions.get(name).cloned() else {
             return;
         };
-        let mut params = function_info.params;
-        if !self.apply_param_refinements_to_params(&mut params, refinements) {
+        let Some(params) = self.refined_params(&function_info.params, refinements) else {
+            return;
+        };
+
+        let key = CallInferenceKey::Function(name.to_string());
+        if self.call_effect_stack.contains(&key) {
             return;
         }
 
-        if let Some(function_info) = self.functions.get_mut(name) {
-            function_info.params = params.clone();
-        }
-        if let Some(signature) = self.function_signatures.get_mut(&function.span.start) {
-            signature.params = params;
-        }
-        self.update_function_mixed_return_signature(&function);
+        self.call_effect_stack.push(key);
+        self.apply_function_body_side_effects(&function, &params, None);
+        self.call_effect_stack.pop();
     }
 
-    fn apply_method_param_refinements(
+    fn apply_method_call_side_effects(
         &mut self,
         class_name: &str,
         method_name: &str,
         refinements: &[ParamTypeRefinement],
+        _args: &[Expr],
+        _scopes: &ScopeStack,
+        _method_context: Option<&MethodContext>,
     ) {
-        if refinements.is_empty() {
-            return;
-        }
-
-        let Some(method) = self.program.items.iter().find_map(|item| match item {
-            Item::Class(class_decl) if class_decl.name == class_name => {
-                class_decl.members.iter().find_map(|member| match member {
-                    ClassMember::Method(method) if method.name == method_name => {
-                        Some(method.clone())
-                    }
-                    ClassMember::Property(_) | ClassMember::Method(_) => None,
-                })
-            }
-            _ => None,
-        }) else {
+        let Some(method) = self.find_method_decl(class_name, method_name).cloned() else {
             return;
         };
 
@@ -2898,29 +2919,38 @@ impl<'program> Checker<'program> {
         else {
             return;
         };
-        let mut params = method_info.params;
-        if !self.apply_param_refinements_to_params(&mut params, refinements) {
+        let Some(params) = self.refined_params(&method_info.params, refinements) else {
+            return;
+        };
+
+        let key = CallInferenceKey::Method {
+            class_name: class_name.to_string(),
+            method: method_name.to_string(),
+        };
+        if self.call_effect_stack.contains(&key) {
             return;
         }
 
-        if let Some(method_info) = self
-            .classes
-            .get_mut(class_name)
-            .and_then(|class_info| class_info.methods.get_mut(method_name))
-        {
-            method_info.params = params.clone();
-        }
-        if let Some(signature) = self.function_signatures.get_mut(&method.span.start) {
-            signature.params = params;
-        }
-        self.update_method_mixed_return_signature(class_name, &method);
+        let method_context = MethodContext {
+            class_name: class_name.to_string(),
+            writable_this: method.writable_this,
+            this_available: true,
+        };
+        self.call_effect_stack.push(key);
+        self.apply_function_body_side_effects(&method, &params, Some(&method_context));
+        self.call_effect_stack.pop();
     }
 
-    fn apply_param_refinements_to_params(
+    fn refined_params(
         &mut self,
-        params: &mut [ParamInfo],
+        params: &[ParamInfo],
         refinements: &[ParamTypeRefinement],
-    ) -> bool {
+    ) -> Option<Vec<ParamInfo>> {
+        if refinements.is_empty() {
+            return None;
+        }
+
+        let mut params = params.to_vec();
         let mut changed = false;
 
         for refinement in refinements {
@@ -2935,7 +2965,7 @@ impl<'program> Checker<'program> {
             }
         }
 
-        changed
+        changed.then_some(params)
     }
 
     fn merge_refined_mixed_collection_type(&mut self, current: TypeId, next: TypeId) -> TypeId {
@@ -2948,6 +2978,528 @@ impl<'program> Checker<'program> {
             self.merge_mixed_return_types(current, next)
         } else {
             next
+        }
+    }
+
+    fn find_function_decl(&self, name: &str) -> Option<&FunctionDecl> {
+        self.program.items.iter().find_map(|item| match item {
+            Item::Function(function) if function.name == name => Some(function),
+            _ => None,
+        })
+    }
+
+    fn find_method_decl(&self, class_name: &str, method_name: &str) -> Option<&FunctionDecl> {
+        self.program.items.iter().find_map(|item| match item {
+            Item::Class(class_decl) if class_decl.name == class_name => {
+                class_decl.members.iter().find_map(|member| match member {
+                    ClassMember::Method(method) if method.name == method_name => Some(method),
+                    ClassMember::Property(_) | ClassMember::Method(_) => None,
+                })
+            }
+            _ => None,
+        })
+    }
+
+    fn call_param_refinements(
+        &mut self,
+        params: &[ParamInfo],
+        args: &[Expr],
+        scopes: &ScopeStack,
+        method_context: Option<&MethodContext>,
+    ) -> Vec<ParamTypeRefinement> {
+        params
+            .iter()
+            .zip(args.iter())
+            .enumerate()
+            .filter_map(|(index, (param, arg))| {
+                let got = self.infer_expr_type(arg, scopes, method_context);
+                let ty = self.preserve_known_mixed_collection_shape(param.ty, got);
+                (ty != param.ty).then_some(ParamTypeRefinement { index, ty })
+            })
+            .collect()
+    }
+
+    fn infer_function_call_return_type(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        scopes: &ScopeStack,
+        method_context: Option<&MethodContext>,
+    ) -> TypeId {
+        let Some(function_info) = self.functions.get(name).cloned() else {
+            return self.types.unknown();
+        };
+        let fallback = function_info.return_ty;
+        let Some(function) = self.find_function_decl(name).cloned() else {
+            return fallback;
+        };
+        if function.return_type.is_some() {
+            return fallback;
+        }
+
+        let refinements =
+            self.call_param_refinements(&function_info.params, args, scopes, method_context);
+        let Some(params) = self.refined_params(&function_info.params, &refinements) else {
+            return fallback;
+        };
+
+        let key = CallInferenceKey::Function(name.to_string());
+        self.infer_call_specific_return_type(key, &function, &params, None, fallback)
+    }
+
+    fn infer_method_call_return_type(
+        &mut self,
+        class_name: &str,
+        method_name: &str,
+        args: &[Expr],
+        scopes: &ScopeStack,
+        method_context: Option<&MethodContext>,
+    ) -> TypeId {
+        let Some(method_info) = self
+            .classes
+            .get(class_name)
+            .and_then(|class_info| class_info.methods.get(method_name))
+            .cloned()
+        else {
+            return self.types.unknown();
+        };
+        let fallback = method_info.return_ty;
+        let Some(method) = self.find_method_decl(class_name, method_name).cloned() else {
+            return fallback;
+        };
+        if method.return_type.is_some() || LifecycleMethod::from_method_name(method_name).is_some()
+        {
+            return fallback;
+        }
+
+        let refinements =
+            self.call_param_refinements(&method_info.params, args, scopes, method_context);
+        let Some(params) = self.refined_params(&method_info.params, &refinements) else {
+            return fallback;
+        };
+
+        let key = CallInferenceKey::Method {
+            class_name: class_name.to_string(),
+            method: method_name.to_string(),
+        };
+        let call_context = MethodContext {
+            class_name: class_name.to_string(),
+            writable_this: method.writable_this,
+            this_available: true,
+        };
+        self.infer_call_specific_return_type(key, &method, &params, Some(&call_context), fallback)
+    }
+
+    fn infer_call_specific_return_type(
+        &mut self,
+        key: CallInferenceKey,
+        function: &FunctionDecl,
+        params: &[ParamInfo],
+        method_context: Option<&MethodContext>,
+        fallback: TypeId,
+    ) -> TypeId {
+        if self.call_inference_stack.contains(&key) {
+            return fallback;
+        }
+
+        self.call_inference_stack.push(key);
+        let inferred = self.infer_unannotated_mixed_return_type(function, params, method_context);
+        self.call_inference_stack.pop();
+
+        if self.type_contains_mixed(inferred) {
+            inferred
+        } else {
+            fallback
+        }
+    }
+
+    fn apply_function_body_side_effects(
+        &mut self,
+        function: &FunctionDecl,
+        params: &[ParamInfo],
+        method_context: Option<&MethodContext>,
+    ) {
+        let mut scopes = ScopeStack::new();
+        for param in params {
+            let _ = scopes.declare(
+                param.name.clone(),
+                Binding {
+                    writable: false,
+                    ty: param.ty,
+                    int_constant: None,
+                },
+            );
+        }
+
+        self.apply_block_side_effects(&function.body, &mut scopes, method_context);
+    }
+
+    fn apply_block_side_effects(
+        &mut self,
+        block: &Block,
+        scopes: &mut ScopeStack,
+        method_context: Option<&MethodContext>,
+    ) {
+        scopes.push();
+        for statement in &block.statements {
+            self.apply_statement_side_effects(statement, scopes, method_context);
+        }
+        scopes.pop();
+    }
+
+    fn apply_statement_side_effects(
+        &mut self,
+        statement: &Stmt,
+        scopes: &mut ScopeStack,
+        method_context: Option<&MethodContext>,
+    ) {
+        match statement {
+            Stmt::VarDecl(decl) => {
+                self.apply_expr_side_effects(&decl.initializer, scopes, method_context);
+                let ty = self.infer_local_declaration_type(
+                    decl.ty.as_ref(),
+                    &decl.initializer,
+                    scopes,
+                    method_context,
+                );
+                let _ = scopes.declare(
+                    decl.name.clone(),
+                    Binding {
+                        writable: decl.writable,
+                        ty,
+                        int_constant: None,
+                    },
+                );
+            }
+            Stmt::Assignment(assignment) => {
+                self.apply_expr_side_effects(&assignment.value, scopes, method_context);
+                self.apply_assignment_side_effects(assignment, scopes, method_context);
+            }
+            Stmt::Echo { expr, .. }
+            | Stmt::Expr { expr, .. }
+            | Stmt::Return {
+                expr: Some(expr), ..
+            } => {
+                self.apply_expr_side_effects(expr, scopes, method_context);
+            }
+            Stmt::Return { expr: None, .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+            Stmt::If(if_stmt) => {
+                self.apply_expr_side_effects(&if_stmt.condition, scopes, method_context);
+                self.apply_block_side_effects(&if_stmt.then_block, scopes, method_context);
+                if let Some(else_branch) = &if_stmt.else_branch {
+                    self.apply_else_branch_side_effects(else_branch, scopes, method_context);
+                }
+            }
+            Stmt::While(while_stmt) => {
+                self.apply_expr_side_effects(&while_stmt.condition, scopes, method_context);
+                self.apply_block_side_effects(&while_stmt.body, scopes, method_context);
+            }
+            Stmt::For(for_stmt) => {
+                scopes.push();
+                if let Some(initializer) = &for_stmt.initializer {
+                    self.apply_for_initializer_side_effects(initializer, scopes, method_context);
+                }
+                if let Some(condition) = &for_stmt.condition {
+                    self.apply_expr_side_effects(condition, scopes, method_context);
+                }
+                self.apply_block_side_effects(&for_stmt.body, scopes, method_context);
+                if let Some(increment) = &for_stmt.increment {
+                    self.apply_for_increment_side_effects(increment, scopes, method_context);
+                }
+                scopes.pop();
+            }
+            Stmt::Foreach(foreach) => {
+                self.apply_expr_side_effects(&foreach.iterable, scopes, method_context);
+                scopes.push();
+                let (key_ty, value_ty) =
+                    self.infer_foreach_binding_types(foreach, scopes, method_context);
+                if let Some(key) = &foreach.key {
+                    let _ = scopes.declare(
+                        key.name.clone(),
+                        Binding {
+                            writable: false,
+                            ty: key_ty,
+                            int_constant: None,
+                        },
+                    );
+                }
+                let _ = scopes.declare(
+                    foreach.value.name.clone(),
+                    Binding {
+                        writable: false,
+                        ty: value_ty,
+                        int_constant: None,
+                    },
+                );
+                for statement in &foreach.body.statements {
+                    self.apply_statement_side_effects(statement, scopes, method_context);
+                }
+                scopes.pop();
+            }
+            Stmt::Increment(_) => {}
+        }
+    }
+
+    fn apply_else_branch_side_effects(
+        &mut self,
+        branch: &ElseBranch,
+        scopes: &mut ScopeStack,
+        method_context: Option<&MethodContext>,
+    ) {
+        match branch {
+            ElseBranch::If(if_stmt) => {
+                self.apply_statement_side_effects(
+                    &Stmt::If((**if_stmt).clone()),
+                    scopes,
+                    method_context,
+                );
+            }
+            ElseBranch::Block(block) => {
+                self.apply_block_side_effects(block, scopes, method_context)
+            }
+        }
+    }
+
+    fn apply_for_initializer_side_effects(
+        &mut self,
+        initializer: &ForInitializer,
+        scopes: &mut ScopeStack,
+        method_context: Option<&MethodContext>,
+    ) {
+        match initializer {
+            ForInitializer::VarDecl(decl) => {
+                self.apply_expr_side_effects(&decl.initializer, scopes, method_context);
+                let ty = self.infer_local_declaration_type(
+                    decl.ty.as_ref(),
+                    &decl.initializer,
+                    scopes,
+                    method_context,
+                );
+                let _ = scopes.declare(
+                    decl.name.clone(),
+                    Binding {
+                        writable: decl.writable,
+                        ty,
+                        int_constant: None,
+                    },
+                );
+            }
+            ForInitializer::Assignment(assignment) => {
+                self.apply_expr_side_effects(&assignment.value, scopes, method_context);
+                self.apply_assignment_side_effects(assignment, scopes, method_context);
+            }
+        }
+    }
+
+    fn apply_for_increment_side_effects(
+        &mut self,
+        increment: &ForIncrement,
+        scopes: &mut ScopeStack,
+        method_context: Option<&MethodContext>,
+    ) {
+        if let ForIncrement::Assignment(assignment) = increment {
+            self.apply_expr_side_effects(&assignment.value, scopes, method_context);
+            self.apply_assignment_side_effects(assignment, scopes, method_context);
+        }
+    }
+
+    fn apply_assignment_side_effects(
+        &mut self,
+        assignment: &Assignment,
+        scopes: &mut ScopeStack,
+        method_context: Option<&MethodContext>,
+    ) {
+        if !matches!(assignment.op, AssignOp::Assign) {
+            return;
+        }
+
+        let value_ty = self.infer_expr_type(&assignment.value, scopes, method_context);
+        match &assignment.target {
+            Expr::Variable { name, .. } => {
+                if let Some(binding) = scopes.lookup_mut(name) {
+                    binding.ty = self.merge_inferred_binding_type(binding.ty, value_ty);
+                }
+            }
+            Expr::PropertyAccess {
+                object, property, ..
+            } => {
+                self.apply_expr_side_effects(object, scopes, method_context);
+                let Some(class_name) = self.expr_class_name(object, scopes, method_context) else {
+                    return;
+                };
+                let Some(property_ty) = self
+                    .classes
+                    .get(&class_name)
+                    .and_then(|class_info| class_info.properties.get(property))
+                    .map(|property| property.ty)
+                else {
+                    return;
+                };
+                let preserved_ty =
+                    self.preserve_known_mixed_collection_shape(property_ty, value_ty);
+                if preserved_ty != property_ty {
+                    self.preserve_known_mixed_collection_property(
+                        &class_name,
+                        property,
+                        preserved_ty,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_expr_side_effects(
+        &mut self,
+        expr: &Expr,
+        scopes: &mut ScopeStack,
+        method_context: Option<&MethodContext>,
+    ) {
+        match expr {
+            Expr::Array { elements, .. } => {
+                for element in elements {
+                    if let Some(key) = &element.key {
+                        self.apply_expr_side_effects(key, scopes, method_context);
+                    }
+                    self.apply_expr_side_effects(&element.value, scopes, method_context);
+                }
+            }
+            Expr::PropertyAccess { object, .. } => {
+                self.apply_expr_side_effects(object, scopes, method_context);
+            }
+            Expr::MethodCall {
+                object,
+                method,
+                args,
+                ..
+            } => {
+                self.apply_expr_side_effects(object, scopes, method_context);
+                for arg in args {
+                    self.apply_expr_side_effects(arg, scopes, method_context);
+                }
+                let Some(class_name) = self.expr_class_name(object, scopes, method_context) else {
+                    return;
+                };
+                let Some(method_info) = self
+                    .classes
+                    .get(&class_name)
+                    .and_then(|class_info| class_info.methods.get(method))
+                    .cloned()
+                else {
+                    return;
+                };
+                let refinements =
+                    self.call_param_refinements(&method_info.params, args, scopes, method_context);
+                self.apply_method_call_side_effects(
+                    &class_name,
+                    method,
+                    &refinements,
+                    args,
+                    scopes,
+                    method_context,
+                );
+            }
+            Expr::FunctionCall { name, args, .. } => {
+                for arg in args {
+                    self.apply_expr_side_effects(arg, scopes, method_context);
+                }
+                let Some(function_info) = self.functions.get(name).cloned() else {
+                    return;
+                };
+                let refinements = self.call_param_refinements(
+                    &function_info.params,
+                    args,
+                    scopes,
+                    method_context,
+                );
+                self.apply_function_call_side_effects(
+                    name,
+                    &refinements,
+                    args,
+                    scopes,
+                    method_context,
+                );
+            }
+            Expr::StaticCall {
+                class_name,
+                method,
+                args,
+                ..
+            } => {
+                for arg in args {
+                    self.apply_expr_side_effects(arg, scopes, method_context);
+                }
+                let Some(method_info) = self
+                    .classes
+                    .get(class_name)
+                    .and_then(|class_info| class_info.methods.get(method))
+                    .cloned()
+                else {
+                    return;
+                };
+                let refinements =
+                    self.call_param_refinements(&method_info.params, args, scopes, method_context);
+                self.apply_method_call_side_effects(
+                    class_name,
+                    method,
+                    &refinements,
+                    args,
+                    scopes,
+                    method_context,
+                );
+            }
+            Expr::New {
+                class_name, args, ..
+            } => {
+                for arg in args {
+                    self.apply_expr_side_effects(arg, scopes, method_context);
+                }
+                let Some(constructor) = self
+                    .classes
+                    .get(class_name)
+                    .and_then(|class_info| class_info.methods.get("__construct"))
+                    .cloned()
+                else {
+                    return;
+                };
+                let refinements =
+                    self.call_param_refinements(&constructor.params, args, scopes, method_context);
+                self.apply_method_call_side_effects(
+                    class_name,
+                    "__construct",
+                    &refinements,
+                    args,
+                    scopes,
+                    method_context,
+                );
+            }
+            Expr::Grouped { expr, .. } | Expr::Unary { expr, .. } => {
+                self.apply_expr_side_effects(expr, scopes, method_context);
+            }
+            Expr::Binary { left, right, .. }
+            | Expr::Range {
+                start: left,
+                end: right,
+                ..
+            } => {
+                self.apply_expr_side_effects(left, scopes, method_context);
+                self.apply_expr_side_effects(right, scopes, method_context);
+            }
+            Expr::InterpolatedString { parts, .. } => {
+                for part in parts {
+                    if let InterpolatedStringPart::Expr(expr) = part {
+                        self.apply_expr_side_effects(expr, scopes, method_context);
+                    }
+                }
+            }
+            Expr::Variable { .. }
+            | Expr::This { .. }
+            | Expr::Identifier { .. }
+            | Expr::String { .. }
+            | Expr::Int { .. }
+            | Expr::Float { .. }
+            | Expr::Bool { .. }
+            | Expr::Null { .. } => {}
         }
     }
 
@@ -3355,32 +3907,7 @@ impl<'program> Checker<'program> {
             });
 
         if changed {
-            self.reinfer_class_mixed_return_signatures(class_name);
-        }
-    }
-
-    fn reinfer_class_mixed_return_signatures(&mut self, class_name: &str) {
-        let methods = self
-            .program
-            .items
-            .iter()
-            .find_map(|item| match item {
-                Item::Class(class_decl) if class_decl.name == class_name => Some(
-                    class_decl
-                        .members
-                        .iter()
-                        .filter_map(|member| match member {
-                            ClassMember::Method(method) => Some(method.clone()),
-                            ClassMember::Property(_) => None,
-                        })
-                        .collect::<Vec<_>>(),
-                ),
-                _ => None,
-            })
-            .unwrap_or_default();
-
-        for method in methods {
-            self.update_method_mixed_return_signature(class_name, &method);
+            self.infer_unannotated_mixed_return_signatures();
         }
     }
 
@@ -3565,29 +4092,34 @@ impl<'program> Checker<'program> {
                     .map(|property| property.ty)
                     .unwrap_or_else(|| self.types.unknown())
             }
-            Expr::MethodCall { object, method, .. } => {
+            Expr::MethodCall {
+                object,
+                method,
+                args,
+                ..
+            } => {
                 let Some(class_name) = self.expr_class_name(object, scopes, method_context) else {
                     return self.types.unknown();
                 };
-                self.classes
-                    .get(&class_name)
-                    .and_then(|class_info| class_info.methods.get(method))
-                    .map(|method| method.return_ty)
-                    .unwrap_or_else(|| self.types.unknown())
+                self.infer_method_call_return_type(
+                    &class_name,
+                    method,
+                    args,
+                    scopes,
+                    method_context,
+                )
             }
-            Expr::FunctionCall { name, .. } => self
-                .functions
-                .get(name)
-                .map(|function| function.return_ty)
-                .unwrap_or_else(|| self.types.unknown()),
+            Expr::FunctionCall { name, args, .. } => {
+                self.infer_function_call_return_type(name, args, scopes, method_context)
+            }
             Expr::StaticCall {
-                class_name, method, ..
-            } => self
-                .classes
-                .get(class_name)
-                .and_then(|class_info| class_info.methods.get(method))
-                .map(|method| method.return_ty)
-                .unwrap_or_else(|| self.types.unknown()),
+                class_name,
+                method,
+                args,
+                ..
+            } => {
+                self.infer_method_call_return_type(class_name, method, args, scopes, method_context)
+            }
             Expr::Grouped { expr, .. } => self.infer_expr_type(expr, scopes, method_context),
             Expr::Unary { op, expr, .. } => self.infer_unary_type(op, expr, scopes, method_context),
             Expr::Binary {
@@ -3760,12 +4292,12 @@ impl<'program> Checker<'program> {
         let mut common = None;
         let mut saw_empty_collection = false;
         let mut saw_mixed = false;
+        let mut saw_heterogeneous = false;
 
         for ty in types {
             let kind = self.types.kind(ty).clone();
             if self.type_contains_mixed(ty) {
                 saw_mixed = true;
-                continue;
             }
 
             match kind {
@@ -3779,7 +4311,11 @@ impl<'program> Checker<'program> {
                 _ => {
                     if let Some(common_ty) = common {
                         if common_ty != ty {
-                            return self.types.intern(TypeKind::Heterogeneous);
+                            if self.type_contains_mixed(common_ty) || self.type_contains_mixed(ty) {
+                                common = Some(self.merge_mixed_return_types(common_ty, ty));
+                            } else {
+                                saw_heterogeneous = true;
+                            }
                         }
                     } else {
                         common = Some(ty);
@@ -3788,9 +4324,14 @@ impl<'program> Checker<'program> {
             }
         }
 
-        if saw_mixed {
-            self.types.intern(TypeKind::Mixed)
-        } else if let Some(common) = common {
+        if saw_heterogeneous {
+            if saw_mixed {
+                return self.types.intern(TypeKind::Mixed);
+            }
+            return self.types.intern(TypeKind::Heterogeneous);
+        }
+
+        if let Some(common) = common {
             if saw_empty_collection && !self.is_collection_like_type(common) {
                 return self.types.intern(TypeKind::Heterogeneous);
             }
