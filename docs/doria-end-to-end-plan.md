@@ -3,7 +3,7 @@
 **Document ID:** docs/doria-end-to-end-plan.md
 **Status:** Accepted master execution plan for Doria v0.1 → v1.0
 **Audience:** The implementing agent (Codex) and the language designer
-**Supersedes:** This plan is the authoritative future-work execution plan. It supersedes older roadmap, SPEC, and decision wording only where it explicitly resolves a future-work fork or scheduling question. Already-implemented behavior remains governed by current compiler behavior and accepted decisions until a later stage migrates it.
+**Supersedes:** This plan is the authoritative future-work execution plan. It supersedes older planning, SPEC, and decision wording only where it explicitly resolves a future-work fork or scheduling question. Already-implemented behavior remains governed by current compiler behavior and accepted decisions until a later stage migrates it.
 
 ---
 

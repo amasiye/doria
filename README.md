@@ -234,8 +234,8 @@ Important project documents:
 
 ```text
 SPEC.md
-ROADMAP.md
 AGENTS.md
+docs/doria-end-to-end-plan.md
 docs/doria-development-plan.md
 docs/brand-positioning.md
 docs/self-hosting.md
