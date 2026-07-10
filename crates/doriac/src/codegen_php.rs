@@ -270,6 +270,20 @@ fn emit_statement(
             );
         }
         Stmt::Expr { expr, .. } => {
+            if let Expr::FunctionCall { name, args, .. } = expr {
+                if name == "panic" && args.len() == 1 {
+                    writeln(
+                        output,
+                        indent,
+                        &format!(
+                            "fwrite(STDERR, \"panic: \" . {} . \"\\n\");",
+                            emit_expr(&args[0], scopes)
+                        ),
+                    );
+                    writeln(output, indent, "exit(101);");
+                    return;
+                }
+            }
             writeln(output, indent, &format!("{};", emit_expr(expr, scopes)));
         }
     }

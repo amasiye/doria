@@ -570,6 +570,23 @@ echo $name;
 }
 
 #[test]
+fn php_backend_lowers_panic_to_stderr_and_status_101() {
+    let php = doriac::compile_source_to_php(
+        "test.doria",
+        r#"function main(): void
+{
+    panic("boom");
+}
+"#,
+    )
+    .expect("panic should lower through the compatibility backend");
+
+    assert!(php.contains("fwrite(STDERR, \"panic: \" . \"boom\" . \"\\n\");"));
+    assert!(php.contains("exit(101);"));
+    assert!(!php.contains("throw new"));
+}
+
+#[test]
 fn php_backend_uses_text_output_shape() {
     let output = doriac::compile_source(
         "test.doria",
