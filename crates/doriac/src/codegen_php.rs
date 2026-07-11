@@ -1,9 +1,17 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::backend::BackendError;
+use crate::diagnostics::Diagnostic;
 use crate::hir::*;
+use crate::numeric::{parse_decimal_magnitude, IntegerType};
+use crate::source::Span;
 use crate::types::TypeRef;
 
-pub fn generate(program: &Program) -> String {
+const PHP_INTEGER_UNSUPPORTED_CODE: &str = "B1301";
+
+pub fn generate(program: &Program) -> Result<String, BackendError> {
+    validate_program(program)?;
+
     let mut output = String::from("<?php\n\n");
     let mut scopes = PhpNameScopes::new();
     for item in &program.items {
@@ -13,7 +21,316 @@ pub fn generate(program: &Program) -> String {
         }
         output.push('\n');
     }
-    output
+    Ok(output)
+}
+
+fn validate_program(program: &Program) -> Result<(), BackendError> {
+    for item in &program.items {
+        validate_item(item)?;
+    }
+    Ok(())
+}
+
+fn validate_item(item: &Item) -> Result<(), BackendError> {
+    match item {
+        Item::Class(class_decl) => {
+            for member in &class_decl.members {
+                match member {
+                    ClassMember::Property(property) => {
+                        validate_type(&property.ty, property.span)?;
+                        if let Some(initializer) = &property.initializer {
+                            validate_expr(initializer)?;
+                        }
+                    }
+                    ClassMember::Method(method) => validate_function(method)?,
+                }
+            }
+            Ok(())
+        }
+        Item::Function(function) => validate_function(function),
+        Item::Statement(statement) => validate_statement(statement),
+    }
+}
+
+fn validate_function(function: &FunctionDecl) -> Result<(), BackendError> {
+    for param in &function.params {
+        validate_type(&param.ty, param.span)?;
+        if let Some(default) = &param.default {
+            validate_expr(default)?;
+        }
+    }
+    if let Some(return_type) = &function.return_type {
+        validate_type(return_type, function.span)?;
+    }
+    validate_block(&function.body)
+}
+
+fn validate_type(ty: &TypeRef, span: Span) -> Result<(), BackendError> {
+    if let Some(integer) = IntegerType::from_source_name(&ty.name) {
+        if !integer.is_default_int() {
+            return Err(unsupported_integer_shape(
+                span,
+                format!(
+                    "Doria `{}` width and signedness with PHP's single signed integer type",
+                    ty.name
+                ),
+            ));
+        }
+    }
+    for argument in &ty.args {
+        validate_type(argument, span)?;
+    }
+    Ok(())
+}
+
+fn validate_block(block: &Block) -> Result<(), BackendError> {
+    for statement in &block.statements {
+        validate_statement(statement)?;
+    }
+    Ok(())
+}
+
+fn validate_statement(statement: &Stmt) -> Result<(), BackendError> {
+    match statement {
+        Stmt::VarDecl(decl) => {
+            if let Some(ty) = &decl.ty {
+                validate_type(ty, decl.span)?;
+            }
+            validate_expr(&decl.initializer)
+        }
+        Stmt::Assignment(assignment) => validate_assignment(assignment),
+        Stmt::Echo { expr, .. } => validate_expr(expr),
+        Stmt::Return { expr, .. } => {
+            if let Some(expr) = expr {
+                validate_expr(expr)?;
+            }
+            Ok(())
+        }
+        Stmt::If(if_stmt) => validate_if(if_stmt),
+        Stmt::While(while_stmt) => {
+            validate_expr(&while_stmt.condition)?;
+            validate_block(&while_stmt.body)
+        }
+        Stmt::For(for_stmt) => {
+            if let Some(initializer) = &for_stmt.initializer {
+                match initializer {
+                    ForInitializer::VarDecl(decl) => {
+                        if let Some(ty) = &decl.ty {
+                            validate_type(ty, decl.span)?;
+                        }
+                        validate_expr(&decl.initializer)?;
+                    }
+                    ForInitializer::Assignment(assignment) => {
+                        validate_assignment(assignment)?;
+                    }
+                }
+            }
+            if let Some(condition) = &for_stmt.condition {
+                validate_expr(condition)?;
+            }
+            if let Some(increment) = &for_stmt.increment {
+                match increment {
+                    ForIncrement::Increment(increment) => {
+                        return Err(unsupported_increment(increment));
+                    }
+                    ForIncrement::Assignment(assignment) => {
+                        validate_assignment(assignment)?;
+                    }
+                }
+            }
+            validate_block(&for_stmt.body)
+        }
+        Stmt::Break { .. } | Stmt::Continue { .. } => Ok(()),
+        Stmt::Foreach(foreach) => {
+            validate_expr(&foreach.iterable)?;
+            if let Some(key) = &foreach.key {
+                if let Some(ty) = &key.ty {
+                    validate_type(ty, foreach.span)?;
+                }
+            }
+            if let Some(ty) = &foreach.value.ty {
+                validate_type(ty, foreach.span)?;
+            }
+            validate_block(&foreach.body)
+        }
+        Stmt::Increment(increment) => Err(unsupported_increment(increment)),
+        Stmt::Expr { expr, .. } => validate_expr(expr),
+    }
+}
+
+fn validate_if(if_stmt: &IfStmt) -> Result<(), BackendError> {
+    validate_expr(&if_stmt.condition)?;
+    validate_block(&if_stmt.then_block)?;
+    if let Some(else_branch) = &if_stmt.else_branch {
+        match else_branch {
+            ElseBranch::If(else_if) => validate_if(else_if)?,
+            ElseBranch::Block(block) => validate_block(block)?,
+        }
+    }
+    Ok(())
+}
+
+fn validate_assignment(assignment: &Assignment) -> Result<(), BackendError> {
+    let feature = match assignment.op {
+        AssignOp::Assign => None,
+        AssignOp::AddAssign => Some("checked integer overflow behavior for `+=`"),
+        AssignOp::SubAssign => Some("checked integer overflow behavior for `-=`"),
+        AssignOp::MulAssign => Some("checked integer overflow behavior for `*=`"),
+        AssignOp::DivAssign => Some("Doria integer division semantics for `/=`"),
+        AssignOp::ModAssign => Some("Doria integer remainder semantics for `%=`"),
+        AssignOp::ShiftLeftAssign => Some("Doria integer shift semantics for `<<=`"),
+        AssignOp::ShiftRightAssign => Some("Doria integer shift semantics for `>>=`"),
+        AssignOp::BitwiseAndAssign => Some("fixed-width Doria bitwise semantics for `&=`"),
+        AssignOp::BitwiseOrAssign => Some("fixed-width Doria bitwise semantics for `|=`"),
+        AssignOp::BitwiseXorAssign => Some("fixed-width Doria bitwise semantics for `^=`"),
+    };
+    if let Some(feature) = feature {
+        return Err(unsupported_integer_shape(assignment.span, feature));
+    }
+    validate_expr(&assignment.target)?;
+    validate_expr(&assignment.value)
+}
+
+fn unsupported_increment(increment: &IncrementStmt) -> BackendError {
+    let operator = match increment.op {
+        IncrementOp::Increment => "++",
+        IncrementOp::Decrement => "--",
+    };
+    unsupported_integer_shape(
+        increment.span,
+        format!("checked integer overflow behavior for `{operator}`"),
+    )
+}
+
+fn validate_expr(expr: &Expr) -> Result<(), BackendError> {
+    match expr {
+        Expr::Variable { .. }
+        | Expr::This { .. }
+        | Expr::Identifier { .. }
+        | Expr::String { .. }
+        | Expr::Float { .. }
+        | Expr::Bool { .. }
+        | Expr::Null { .. } => Ok(()),
+        Expr::Int { value, span } => {
+            if parse_decimal_magnitude(value).is_some_and(|value| value > i64::MAX as u128) {
+                return Err(unsupported_integer_shape(
+                    *span,
+                    format!(
+                        "integer literal `{value}` outside PHP's signed integer range; the `uint64` maximum must not become a PHP float"
+                    ),
+                ));
+            }
+            Ok(())
+        }
+        Expr::InterpolatedString { parts, .. } => {
+            for part in parts {
+                if let InterpolatedStringPart::Expr(expr) = part {
+                    validate_expr(expr)?;
+                }
+            }
+            Ok(())
+        }
+        Expr::Array { elements, .. } => {
+            for element in elements {
+                if let Some(key) = &element.key {
+                    validate_expr(key)?;
+                }
+                validate_expr(&element.value)?;
+            }
+            Ok(())
+        }
+        Expr::PropertyAccess { object, .. } => validate_expr(object),
+        Expr::MethodCall { object, args, .. } => {
+            validate_expr(object)?;
+            validate_exprs(args)
+        }
+        Expr::FunctionCall { args, .. } | Expr::New { args, .. } => validate_exprs(args),
+        Expr::StaticCall {
+            class_name,
+            method,
+            args,
+            span,
+        } => {
+            if IntegerType::from_companion_name(class_name).is_some() && method == "from" {
+                return Err(unsupported_integer_shape(
+                    *span,
+                    format!(
+                        "checked Doria integer conversion semantics for `{class_name}::from(...)`"
+                    ),
+                ));
+            }
+            validate_exprs(args)
+        }
+        Expr::Grouped { expr, .. } => validate_expr(expr),
+        Expr::Unary { op, expr, span } => {
+            let feature = match op {
+                UnaryOp::Not => None,
+                UnaryOp::Negate => Some("checked integer overflow behavior for unary `-`"),
+                UnaryOp::BitwiseNot => Some("fixed-width Doria bitwise semantics for `~`"),
+            };
+            if let Some(feature) = feature {
+                return Err(unsupported_integer_shape(*span, feature));
+            }
+            validate_expr(expr)
+        }
+        Expr::Binary {
+            left,
+            op,
+            right,
+            span,
+        } => {
+            let feature = match op {
+                BinaryOp::Add => Some("checked integer overflow behavior for `+`"),
+                BinaryOp::Sub => Some("checked integer overflow behavior for `-`"),
+                BinaryOp::Mul => Some("checked integer overflow behavior for `*`"),
+                BinaryOp::Div => Some("Doria integer division semantics for `/`"),
+                BinaryOp::Mod => Some("Doria integer remainder semantics for `%`"),
+                BinaryOp::ShiftLeft => Some("Doria integer shift semantics for `<<`"),
+                BinaryOp::ShiftRight => Some("Doria integer shift semantics for `>>`"),
+                BinaryOp::BitwiseAnd => Some("fixed-width Doria bitwise semantics for `&`"),
+                BinaryOp::BitwiseXor => Some("fixed-width Doria bitwise semantics for `^`"),
+                BinaryOp::BitwiseOr => Some("fixed-width Doria bitwise semantics for `|`"),
+                BinaryOp::Concat
+                | BinaryOp::Equal
+                | BinaryOp::NotEqual
+                | BinaryOp::Less
+                | BinaryOp::LessEqual
+                | BinaryOp::Greater
+                | BinaryOp::GreaterEqual
+                | BinaryOp::And
+                | BinaryOp::Or
+                | BinaryOp::Xor
+                | BinaryOp::Coalesce => None,
+            };
+            if let Some(feature) = feature {
+                return Err(unsupported_integer_shape(*span, feature));
+            }
+            validate_expr(left)?;
+            validate_expr(right)
+        }
+        Expr::Range { start, end, .. } => {
+            validate_expr(start)?;
+            validate_expr(end)
+        }
+    }
+}
+
+fn validate_exprs(expressions: &[Expr]) -> Result<(), BackendError> {
+    for expression in expressions {
+        validate_expr(expression)?;
+    }
+    Ok(())
+}
+
+fn unsupported_integer_shape(span: Span, feature: impl Into<String>) -> BackendError {
+    BackendError::from_diagnostics(vec![Diagnostic::new(
+        PHP_INTEGER_UNSUPPORTED_CODE,
+        format!(
+            "PHP compatibility backend cannot preserve {} exactly; use the `native` or `debug` target for this valid Doria program",
+            feature.into()
+        ),
+        span,
+    )])
 }
 
 #[derive(Debug, Default)]
@@ -214,8 +531,18 @@ fn emit_statement(
         Stmt::Assignment(assignment) => {
             let op = match assignment.op {
                 AssignOp::Assign => "=",
-                AssignOp::AddAssign => "+=",
-                AssignOp::SubAssign => "-=",
+                AssignOp::AddAssign
+                | AssignOp::SubAssign
+                | AssignOp::MulAssign
+                | AssignOp::DivAssign
+                | AssignOp::ModAssign
+                | AssignOp::ShiftLeftAssign
+                | AssignOp::ShiftRightAssign
+                | AssignOp::BitwiseAndAssign
+                | AssignOp::BitwiseOrAssign
+                | AssignOp::BitwiseXorAssign => {
+                    unreachable!("unsupported integer assignment passed PHP capability validation")
+                }
             };
             writeln(
                 output,
@@ -287,7 +614,7 @@ fn emit_panic(message: &Expr, output: &mut String, indent: usize, scopes: &mut P
         output,
         indent,
         &format!(
-            "fwrite(STDERR, \"panic: \" . {} . \"\\nstack trace:\\n\");",
+            "fwrite(STDERR, \"Panic: \" . {} . \"\\nStack Trace:\\n\");",
             emit_expr(message, scopes)
         ),
     );
@@ -364,8 +691,18 @@ fn emit_for_increment(increment: &ForIncrement, scopes: &PhpNameScopes) -> Strin
 fn emit_assignment(assignment: &Assignment, scopes: &PhpNameScopes) -> String {
     let op = match assignment.op {
         AssignOp::Assign => "=",
-        AssignOp::AddAssign => "+=",
-        AssignOp::SubAssign => "-=",
+        AssignOp::AddAssign
+        | AssignOp::SubAssign
+        | AssignOp::MulAssign
+        | AssignOp::DivAssign
+        | AssignOp::ModAssign
+        | AssignOp::ShiftLeftAssign
+        | AssignOp::ShiftRightAssign
+        | AssignOp::BitwiseAndAssign
+        | AssignOp::BitwiseOrAssign
+        | AssignOp::BitwiseXorAssign => {
+            unreachable!("unsupported integer assignment passed PHP capability validation")
+        }
     };
     format!(
         "{} {} {}",
@@ -616,6 +953,9 @@ fn emit_expr(expr: &Expr, scopes: &PhpNameScopes) -> String {
         Expr::Grouped { expr, .. } => format!("({})", emit_expr(expr, scopes)),
         Expr::Unary { op, expr, .. } => match op {
             UnaryOp::Not => format!("!({})", emit_expr(expr, scopes)),
+            UnaryOp::Negate | UnaryOp::BitwiseNot => {
+                unreachable!("unsupported integer unary operator passed PHP capability validation")
+            }
         },
         Expr::Binary {
             left, op, right, ..
@@ -681,11 +1021,18 @@ fn emit_php_string_literal(value: &str) -> String {
 
 fn emit_binary_op(op: &BinaryOp) -> &'static str {
     match op {
-        BinaryOp::Add => "+",
-        BinaryOp::Sub => "-",
-        BinaryOp::Mul => "*",
-        BinaryOp::Div => "/",
-        BinaryOp::Mod => "%",
+        BinaryOp::Add
+        | BinaryOp::Sub
+        | BinaryOp::Mul
+        | BinaryOp::Div
+        | BinaryOp::Mod
+        | BinaryOp::ShiftLeft
+        | BinaryOp::ShiftRight
+        | BinaryOp::BitwiseAnd
+        | BinaryOp::BitwiseXor
+        | BinaryOp::BitwiseOr => {
+            unreachable!("unsupported integer binary operator passed PHP capability validation")
+        }
         BinaryOp::Concat => ".",
         BinaryOp::Equal => "===",
         BinaryOp::NotEqual => "!==",
@@ -709,6 +1056,7 @@ fn emit_member_access(access: &MemberAccess) -> &'static str {
 
 fn php_type(ty: &TypeRef) -> String {
     match ty.name.as_str() {
+        "int" | "int64" => "int".to_string(),
         "List" | "Dictionary" | "Set" | "[]" => "array".to_string(),
         name => name.to_string(),
     }
