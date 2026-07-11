@@ -1,8 +1,8 @@
 use doriac::mir::{
-    BasicBlock, BlockId, Function, FunctionId, IntegerExpression, LocalId, Operand, Program,
-    ReturnType, Statement, Terminator,
+    BasicBlock, BlockId, FloatBinaryOp, FloatExpression, Function, FunctionId, IntegerExpression,
+    LocalId, Operand, Program, ReturnType, ScalarType, Statement, Terminator, ValueExpression,
 };
-use doriac::numeric::IntegerType;
+use doriac::numeric::{FloatType, FloatValue, IntegerType};
 
 fn assert_object(source: &str) {
     let program =
@@ -202,6 +202,47 @@ function main(): int
 }
 
 #[test]
+fn lowers_stage_14_float_bool_calls_short_circuit_and_conversions_to_object() {
+    for source in [
+        r#"
+function choose(float32 $left, float32 $right): float32
+{
+    return -(($left + $right) * 2.0 / 4.0);
+}
+function main(): int
+{
+    if (choose(20.0, 22.0) < 0.0) { return 42; }
+    return 0;
+}
+"#,
+        r#"
+function identity(float $value): float { return $value; }
+function main(): int { return Float::toInt(identity(Int::toFloat(42))); }
+"#,
+        r#"
+function left(): bool { return false; }
+function right(): bool { return true; }
+function combine(bool $left, bool $right): bool
+{
+    return ($left and $right) or ($left xor $right);
+}
+function main(): int
+{
+    bool $answer = combine(left(), right());
+    if ($answer) { return 42; }
+    return 0;
+}
+"#,
+        r#"
+function convert(float $value): int { return Float::toInt($value); }
+function main(): int { return convert(0.0 / 0.0); }
+"#,
+    ] {
+        assert_object(source);
+    }
+}
+
+#[test]
 fn lowers_non_terminating_loop_without_executing_it() {
     assert_object(include_str!(
         "../../../examples/compile-only/main_infinite_while.doria"
@@ -227,11 +268,12 @@ fn rejects_malformed_function_id() {
 #[test]
 fn rejects_malformed_local_id() {
     let mut program = void_program();
-    program.functions[0].return_type = ReturnType::Integer(IntegerType::Int64);
-    program.functions[0].blocks[0].terminator = Terminator::Return(IntegerExpression::use_operand(
-        IntegerType::Int64,
-        Operand::Local(LocalId(99)),
-    ));
+    program.functions[0].return_type =
+        ReturnType::Value(doriac::mir::ScalarType::Integer(IntegerType::Int64));
+    program.functions[0].blocks[0].terminator =
+        Terminator::Return(doriac::mir::ValueExpression::Integer(
+            IntegerExpression::use_operand(IntegerType::Int64, Operand::Local(LocalId(99))),
+        ));
 
     let error = doriac::codegen_cranelift::lower_mir_to_object(&program)
         .expect_err("malformed LocalId should fail before object emission");
@@ -242,7 +284,8 @@ fn rejects_malformed_local_id() {
 #[test]
 fn rejects_non_int64_process_main_return_type() {
     let mut program = void_program();
-    program.functions[0].return_type = ReturnType::Integer(IntegerType::UInt8);
+    program.functions[0].return_type =
+        ReturnType::Value(doriac::mir::ScalarType::Integer(IntegerType::UInt8));
 
     let error = doriac::codegen_cranelift::lower_mir_to_object(&program)
         .expect_err("narrow process entry return should fail before object emission");
@@ -250,6 +293,36 @@ fn rejects_non_int64_process_main_return_type() {
     assert!(error
         .message
         .contains("entry function must return void or int/int64"));
+}
+
+#[test]
+fn rejects_mixed_width_float_binary_operands() {
+    let mut program = void_program();
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "mixedWidth".to_string(),
+        params: Vec::new(),
+        return_type: ReturnType::Value(ScalarType::Float(FloatType::Float64)),
+        locals: Vec::new(),
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: Vec::new(),
+            terminator: Terminator::Return(ValueExpression::Float(FloatExpression::Binary {
+                ty: FloatType::Float64,
+                op: FloatBinaryOp::Add,
+                left: Box::new(FloatExpression::constant(FloatValue::from_f32(1.0))),
+                right: Box::new(FloatExpression::constant(FloatValue::from_f64(2.0))),
+            })),
+        }],
+        entry_block: BlockId(0),
+    });
+
+    let error = doriac::codegen_cranelift::lower_mir_to_object(&program)
+        .expect_err("mixed-width float operands should fail before object emission");
+    assert!(error.message.contains("malformed MIR"));
+    assert!(error
+        .message
+        .contains("float binary expression has float32 and float operands"));
 }
 
 #[test]
