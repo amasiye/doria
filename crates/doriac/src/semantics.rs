@@ -1322,7 +1322,9 @@ impl<'program> Checker<'program> {
                         target_ty
                     }
                     None => {
-                        self.contextualize_integer_literals(&decl.initializer, IntegerType::Int64);
+                        if let TypeKind::Integer(integer) = *self.types.kind(value_ty) {
+                            self.contextualize_integer_literals(&decl.initializer, integer);
+                        }
                         value_ty
                     }
                 };
@@ -1607,7 +1609,9 @@ impl<'program> Checker<'program> {
                         target_ty
                     }
                     None => {
-                        self.contextualize_integer_literals(&decl.initializer, IntegerType::Int64);
+                        if let TypeKind::Integer(integer) = *self.types.kind(value_ty) {
+                            self.contextualize_integer_literals(&decl.initializer, integer);
+                        }
                         value_ty
                     }
                 };
@@ -1735,7 +1739,8 @@ impl<'program> Checker<'program> {
 
                 let integers_only = matches!(
                     assignment.op,
-                    AssignOp::ShiftLeftAssign
+                    AssignOp::ModAssign
+                        | AssignOp::ShiftLeftAssign
                         | AssignOp::ShiftRightAssign
                         | AssignOp::BitwiseAndAssign
                         | AssignOp::BitwiseOrAssign
@@ -1748,11 +1753,11 @@ impl<'program> Checker<'program> {
                         TypeKind::Integer(_) | TypeKind::Unknown
                     )
                 {
-                    self.check_assignable(
+                    self.report_integer_operand_mismatch(
                         target.ty,
-                        result_ty,
-                        assignment.value.span(),
-                        target.destination,
+                        value_ty,
+                        assignment.span,
+                        "compound assignment",
                     );
                     return;
                 }
@@ -2564,10 +2569,11 @@ impl<'program> Checker<'program> {
             BinaryOp::Concat => {
                 self.check_concat_operands(left, right, span, scopes, method_context);
             }
-            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
                 self.check_numeric_binary_operands(left, right, span, scopes, method_context, false)
             }
-            BinaryOp::ShiftLeft
+            BinaryOp::Mod
+            | BinaryOp::ShiftLeft
             | BinaryOp::ShiftRight
             | BinaryOp::BitwiseAnd
             | BinaryOp::BitwiseXor

@@ -297,6 +297,41 @@ function identity(float32 $value): float32
 }
 
 #[test]
+fn php_backend_allows_negative_integer_literals_but_rejects_runtime_negation() {
+    let php = doriac::compile_source_to_php(
+        "test.doria",
+        r#"
+function negativeOne(): int
+{
+    return -1;
+}
+
+function minimum(): int
+{
+    return -9223372036854775808;
+}
+"#,
+    )
+    .expect("in-range signed integer literals should lower to PHP");
+
+    assert!(php.contains("return -(1);"));
+    assert!(php.contains("return (-9223372036854775807 - 1);"));
+
+    let diagnostics = doriac::compile_source_to_php(
+        "test.doria",
+        r#"
+function negate(int $value): int
+{
+    return -$value;
+}
+"#,
+    )
+    .expect_err("runtime checked integer negation must remain unsupported in PHP");
+    assert_eq!(diagnostics[0].code, "B1301");
+    assert!(diagnostics[0].message.contains("unary `-`"));
+}
+
+#[test]
 fn parenthesizes_unary_not_operands_for_php() {
     let php = doriac::compile_source_to_php(
         "test.doria",

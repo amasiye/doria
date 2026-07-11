@@ -290,6 +290,17 @@ fn validate_expr(expr: &Expr, semantic_info: &SemanticInfo) -> Result<(), Backen
         }
         Expr::Grouped { expr, .. } => validate_expr(expr, semantic_info),
         Expr::Unary { op, expr, span } => {
+            if *op == UnaryOp::Negate {
+                if let Some(magnitude) = integer_literal_magnitude(expr) {
+                    if magnitude <= (i64::MAX as u128) + 1 {
+                        return Ok(());
+                    }
+                    return Err(unsupported_integer_shape(
+                        *span,
+                        "an integer literal outside PHP's signed integer range",
+                    ));
+                }
+            }
             let feature = match op {
                 UnaryOp::Not => None,
                 UnaryOp::Negate if semantic_info.float_type(expr.span()).is_some() => None,
@@ -360,6 +371,14 @@ fn validate_exprs(expressions: &[Expr], semantic_info: &SemanticInfo) -> Result<
         validate_expr(expression, semantic_info)?;
     }
     Ok(())
+}
+
+fn integer_literal_magnitude(expr: &Expr) -> Option<u128> {
+    match expr {
+        Expr::Int { value, .. } => parse_decimal_magnitude(value),
+        Expr::Grouped { expr, .. } => integer_literal_magnitude(expr),
+        _ => None,
+    }
 }
 
 fn unsupported_integer_shape(span: Span, feature: impl Into<String>) -> BackendError {
@@ -993,6 +1012,9 @@ fn emit_expr(expr: &Expr, scopes: &PhpNameScopes) -> String {
         Expr::Grouped { expr, .. } => format!("({})", emit_expr(expr, scopes)),
         Expr::Unary { op, expr, .. } => match op {
             UnaryOp::Not => format!("!({})", emit_expr(expr, scopes)),
+            UnaryOp::Negate if integer_literal_magnitude(expr) == Some((i64::MAX as u128) + 1) => {
+                "(-9223372036854775807 - 1)".to_string()
+            }
             UnaryOp::Negate => format!("-({})", emit_expr(expr, scopes)),
             UnaryOp::BitwiseNot => {
                 unreachable!("unsupported integer unary operator passed PHP capability validation")

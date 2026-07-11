@@ -120,6 +120,24 @@ function values(): float64
 }
 
 #[test]
+fn inferred_narrow_literals_survive_let_and_for_defaulting() {
+    doriac::lower_source_to_mir(
+        "test.doria",
+        r#"
+function main(): int
+{
+    int8 $x = 1;
+    let $y = $x + 1;
+    for (let writable $z = $x + 1; $z < 3; $z += 1) {
+    }
+    return Int::from($y);
+}
+"#,
+    )
+    .expect("inferred int8 literals must remain int8 through MIR lowering");
+}
+
+#[test]
 fn contextual_literals_flow_through_destinations_and_integer_expressions() {
     check(
         r#"
@@ -186,6 +204,27 @@ if ($left == $right) {
     assert!(comparison
         .iter()
         .any(|diagnostic| diagnostic.code == "E0420"));
+}
+
+#[test]
+fn rejects_float_remainder_and_remainder_assignment() {
+    for source in [
+        r#"
+let $result = 5.0 % 2.0;
+"#,
+        r#"
+writable float $value = 5.0;
+$value %= 2.0;
+"#,
+    ] {
+        let diagnostics = reject(source);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "E0441"),
+            "float remainder was not rejected: {diagnostics:#?}"
+        );
+    }
 }
 
 #[test]
