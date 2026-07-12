@@ -40,7 +40,9 @@ Source of truth for sequencing remains `docs/doria-end-to-end-plan.md`. The dura
 | Integer range `foreach` | Covered | Covered | Covered | Covered | Inclusive/exclusive ranges and terminal overflow guards are covered. |
 | Top-level integer helpers | Covered | Covered | Covered | Covered | Parameters and returns preserve every declared width and signedness. |
 | Void helper calls | Covered | Covered | Covered | Covered | Shared stdout preserves source call order. |
-| Readonly string locals and concat | Covered | Covered | Covered | Covered | Compile-time-known bytes only; no runtime string ABI. |
+| Runtime string locals, rebinding, parameters, returns and calls | Covered | Covered | Covered | Covered | Immutable UTF-8 Copy values use the private refcounted runtime ABI. |
+| Runtime concat and primitive display | Covered | Covered | Covered | Covered | Decimal integers, shortest-round-trip floats, lowercase bools, and current interpolation agree exactly. |
+| String equality and ordering | Covered | Covered | Covered | Covered | Equality is exact-byte and ordering is unsigned byte-lexicographic. |
 | String echo in int-returning functions | Covered | Covered | Covered | Covered | Statement validity is independent of function return type. |
 | Short-circuit conditions with helper calls | Covered | Covered | Covered | Covered | `and`/`or` short-circuit; `xor` evaluates both in order. |
 | Process exit boundary | Covered | Covered | Covered | Covered | Only `main(): int` is restricted to `0..125`. |
@@ -79,6 +81,6 @@ Source of truth for sequencing remains `docs/doria-end-to-end-plan.md`. The dura
 
 ## Retirement Gate
 
-Status: Passed through Stage 15.
+Status: Passed through Stage 16 after this branch's full validation gates pass.
 
-All accepted Stage <=14 scalar lowering passes through typed MIR and shared MIR validation. The interpreter, Cranelift fast profile, and LLVM release profile consume that same MIR; every finite native example is required in the executable manifest; and the Stage 7-10 native smoke module remains retired and deleted. Stage 15 is complete after the default and LLVM-enabled validation gates passed; Stage 16 runtime strings and canonical display conversion is next.
+All accepted Stage <=16 scalar and string lowering passes through typed MIR and shared MIR validation. The interpreter, Cranelift fast profile, and LLVM release profile consume that same MIR; every finite native example is required in the executable manifest; and the Stage 7-10 native smoke module remains retired and deleted. Stage 17 `std::io` and formatted I/O is next.

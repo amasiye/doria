@@ -1001,7 +1001,8 @@ string $name = null ?? "Andrew";
     )
     .expect("semantic check should succeed");
 
-    assert_diagnostic_code(r#"let $message = "Count: " . 42;"#, "E0425");
+    doriac::check_source("test.doria", r#"let $message = "Count: " . 42;"#)
+        .expect("display concatenation should succeed");
 
     for source in [
         r#"string $value = 1 + 2;"#,
@@ -2105,9 +2106,7 @@ function render(): void
     int $age = 37;
     float $ratio = 1.5;
     bool $active = true;
-    let $nothing = null;
-
-    echo "{$name}{$age}{$ratio}{$active}{$nothing}";
+    echo "{$name}{$age}{$ratio}{$active}";
 }
 "#,
     )
@@ -2175,6 +2174,7 @@ class Person
 fn rejects_invalid_string_interpolation_semantics() {
     for (source, code) in [
         (r#"echo "Hello, {$name}";"#, "E0101"),
+        (r#"let $nothing = null; echo "{$nothing}";"#, "E0415"),
         (
             r#"
 class Person {}
@@ -3789,7 +3789,7 @@ class Office
     function index(List<Person> $people): Dictionary<string, Person>
     {
         foreach ($people as Person $person) {
-            echo $person;
+            let $copy = $person;
         }
 
         return [];

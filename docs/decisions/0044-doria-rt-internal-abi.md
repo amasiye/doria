@@ -2,6 +2,8 @@
 
 Status: Accepted
 
+Forward note: decision 0045 extends this private ABI in Stage 16 with runtime string allocation, retention, release, concatenation, comparison, canonical primitive display conversion, explicit data/length access, and string output.
+
 ## Decision
 
 `doria-rt` is the Rust bootstrap runtime static library for native Doria programs. It is compiler-internal and unstable before 1.0; compiler and runtime are versioned in lockstep.

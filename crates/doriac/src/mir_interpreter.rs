@@ -37,9 +37,9 @@ impl fmt::Display for InterpreterError {
 
 impl std::error::Error for InterpreterError {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum FunctionOutcome {
-    Value(mir::ScalarValue),
+    Value(LocalValue),
     Void,
 }
 
@@ -49,20 +49,28 @@ enum LocalValue {
     String(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum EvaluationValue {
     Scalar(mir::ScalarValue),
+    String(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReturnExpectation {
-    Value(mir::ScalarType),
+    Value(mir::Type),
     Void,
 }
 
 #[derive(Debug, Clone)]
 enum EvaluationTask {
+    Rvalue(mir::Rvalue),
     Value(mir::ValueExpression),
+    String(mir::StringExpression),
+    StringConcat(usize),
+    StringDisplay,
+    StringCompare(mir::CompareOp),
+    Echo,
+    PanicString,
     Integer(mir::IntegerExpression),
     IntegerUnary(mir::IntegerUnaryOp),
     IntegerBinary(mir::IntegerBinaryOp),
@@ -84,7 +92,7 @@ enum EvaluationTask {
         expectation: ReturnExpectation,
     },
     Assign(mir::LocalId),
-    ReturnValue(mir::ScalarType),
+    ReturnValue(mir::Type),
     Branch {
         then_block: mir::BlockId,
         else_block: mir::BlockId,
@@ -207,14 +215,9 @@ impl Interpreter<'_> {
                 let definition = local_in(function, target)?;
                 match (definition.ty, value) {
                     (mir::Type::String, mir::Rvalue::String(expression)) => {
-                        let value =
-                            eval_string_expression(&expression, &self.current_frame()?.locals)?;
-                        assign_local(
-                            &function.locals,
-                            &mut self.current_frame_mut()?.locals,
-                            target,
-                            LocalValue::String(value),
-                        )?;
+                        let frame = self.current_frame_mut()?;
+                        frame.tasks.push(EvaluationTask::Assign(target));
+                        frame.tasks.push(EvaluationTask::String(expression));
                     }
                     (mir::Type::String, _) => {
                         return Err(InterpreterError::new(format!(
@@ -244,8 +247,9 @@ impl Interpreter<'_> {
                 self.stdout.extend_from_slice(value.as_bytes());
             }
             mir::Statement::EchoString(expression) => {
-                let value = eval_string_expression(&expression, &self.current_frame()?.locals)?;
-                self.stdout.extend_from_slice(value.as_bytes());
+                let frame = self.current_frame_mut()?;
+                frame.tasks.push(EvaluationTask::Echo);
+                frame.tasks.push(EvaluationTask::String(expression));
             }
             mir::Statement::CallVoid { function, args } => {
                 self.queue_call(function, args, ReturnExpectation::Void)?;
@@ -276,7 +280,7 @@ impl Interpreter<'_> {
                 }
                 let frame = self.current_frame_mut()?;
                 frame.tasks.push(EvaluationTask::ReturnValue(expected));
-                frame.tasks.push(EvaluationTask::Value(operand));
+                frame.tasks.push(EvaluationTask::Rvalue(operand));
                 Ok(StepOutcome::Continue)
             }
             mir::Terminator::ReturnVoid => {
@@ -289,8 +293,10 @@ impl Interpreter<'_> {
                 self.complete_frame(FunctionOutcome::Void)
             }
             mir::Terminator::Panic(message) => {
-                let message = eval_string_expression(&message, &self.current_frame()?.locals)?;
-                Ok(StepOutcome::Panic(message))
+                let frame = self.current_frame_mut()?;
+                frame.tasks.push(EvaluationTask::PanicString);
+                frame.tasks.push(EvaluationTask::String(message));
+                Ok(StepOutcome::Continue)
             }
             mir::Terminator::Unreachable => Err(InterpreterError::new(format!(
                 "MIR reached an unreachable block in function {}",
@@ -318,6 +324,16 @@ impl Interpreter<'_> {
 
     fn execute_task(&mut self, task: EvaluationTask) -> Result<StepOutcome, InterpreterError> {
         match task {
+            EvaluationTask::Rvalue(expression) => match expression {
+                mir::Rvalue::Value(value) => self
+                    .current_frame_mut()?
+                    .tasks
+                    .push(EvaluationTask::Value(value)),
+                mir::Rvalue::String(value) => self
+                    .current_frame_mut()?
+                    .tasks
+                    .push(EvaluationTask::String(value)),
+            },
             EvaluationTask::Value(expression) => match expression {
                 mir::ValueExpression::Integer(value) => {
                     self.current_frame_mut()?
@@ -335,6 +351,40 @@ impl Interpreter<'_> {
                         .push(EvaluationTask::Bool(value));
                 }
             },
+            EvaluationTask::String(expression) => self.expand_string_expression(expression)?,
+            EvaluationTask::StringConcat(count) => {
+                let mut parts = Vec::with_capacity(count);
+                for _ in 0..count {
+                    parts.push(self.pop_string()?);
+                }
+                parts.reverse();
+                self.push_string(parts.concat())?;
+            }
+            EvaluationTask::StringDisplay => {
+                let value = self.pop_scalar()?;
+                self.push_string(display_scalar(value))?;
+            }
+            EvaluationTask::StringCompare(op) => {
+                let right = self.pop_string()?;
+                let left = self.pop_string()?;
+                let ordering = left.as_bytes().cmp(right.as_bytes());
+                let result = match op {
+                    mir::CompareOp::Equal => ordering.is_eq(),
+                    mir::CompareOp::NotEqual => !ordering.is_eq(),
+                    mir::CompareOp::Less => ordering.is_lt(),
+                    mir::CompareOp::LessEqual => !ordering.is_gt(),
+                    mir::CompareOp::Greater => ordering.is_gt(),
+                    mir::CompareOp::GreaterEqual => !ordering.is_lt(),
+                };
+                self.push_scalar(mir::ScalarValue::Bool(result))?;
+            }
+            EvaluationTask::Echo => {
+                let value = self.pop_string()?;
+                self.stdout.extend_from_slice(value.as_bytes());
+            }
+            EvaluationTask::PanicString => {
+                return Ok(StepOutcome::Panic(self.pop_string()?));
+            }
             EvaluationTask::Integer(expression) => self.expand_integer_expression(expression)?,
             EvaluationTask::IntegerUnary(op) => {
                 let operand = self.pop_integer()?;
@@ -448,21 +498,21 @@ impl Interpreter<'_> {
                 self.push_frame(function, &args, Some(expectation))?;
             }
             EvaluationTask::Assign(target) => {
-                let value = self.pop_scalar()?;
+                let value = self.pop_local_value()?;
                 let function = function_in(self.program, self.current_frame()?.function)?;
                 assign_local(
                     &function.locals,
                     &mut self.current_frame_mut()?.locals,
                     target,
-                    LocalValue::Scalar(value),
+                    value,
                 )?;
             }
             EvaluationTask::ReturnValue(expected) => {
-                let value = self.pop_scalar()?;
-                if value.ty() != expected {
+                let value = self.pop_local_value()?;
+                if local_value_type(&value) != expected {
                     return Err(InterpreterError::new(format!(
                         "MIR return evaluation produced {}, expected {expected}",
-                        value.ty()
+                        local_value_type(&value)
                     )));
                 }
                 return self.complete_frame(FunctionOutcome::Value(value));
@@ -553,7 +603,7 @@ impl Interpreter<'_> {
                 self.queue_call(
                     function,
                     args,
-                    ReturnExpectation::Value(mir::ScalarType::Integer(ty)),
+                    ReturnExpectation::Value(mir::Type::Scalar(mir::ScalarType::Integer(ty))),
                 )?;
             }
         }
@@ -602,7 +652,7 @@ impl Interpreter<'_> {
                 self.queue_call(
                     function,
                     args,
-                    ReturnExpectation::Value(mir::ScalarType::Float(ty)),
+                    ReturnExpectation::Value(mir::Type::Scalar(mir::ScalarType::Float(ty))),
                 )?;
             }
         }
@@ -635,6 +685,12 @@ impl Interpreter<'_> {
                 frame.tasks.push(EvaluationTask::Compare(op));
                 frame.tasks.push(EvaluationTask::Value(*right));
                 frame.tasks.push(EvaluationTask::Value(*left));
+            }
+            mir::BoolExpression::StringCompare { op, left, right } => {
+                let frame = self.current_frame_mut()?;
+                frame.tasks.push(EvaluationTask::StringCompare(op));
+                frame.tasks.push(EvaluationTask::String(*right));
+                frame.tasks.push(EvaluationTask::String(*left));
             }
             mir::BoolExpression::Not(condition) => {
                 let frame = self.current_frame_mut()?;
@@ -673,8 +729,45 @@ impl Interpreter<'_> {
                 self.queue_call(
                     function,
                     args,
-                    ReturnExpectation::Value(mir::ScalarType::Bool),
+                    ReturnExpectation::Value(mir::Type::Scalar(mir::ScalarType::Bool)),
                 )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn expand_string_expression(
+        &mut self,
+        expression: mir::StringExpression,
+    ) -> Result<(), InterpreterError> {
+        match expression {
+            mir::StringExpression::Literal(value) => self.push_string(value)?,
+            mir::StringExpression::Local(id) => {
+                match read_local(&self.current_frame()?.locals, id)? {
+                    LocalValue::String(value) => self.push_string(value.clone())?,
+                    LocalValue::Scalar(_) => {
+                        return Err(InterpreterError::new(format!(
+                            "MIR scalar local local{} was used as a string value",
+                            id.0
+                        )))
+                    }
+                }
+            }
+            mir::StringExpression::Concat(parts) => {
+                let count = parts.len();
+                let frame = self.current_frame_mut()?;
+                frame.tasks.push(EvaluationTask::StringConcat(count));
+                for part in parts.into_iter().rev() {
+                    frame.tasks.push(EvaluationTask::String(part));
+                }
+            }
+            mir::StringExpression::Display(value) => {
+                let frame = self.current_frame_mut()?;
+                frame.tasks.push(EvaluationTask::StringDisplay);
+                frame.tasks.push(EvaluationTask::Value(value));
+            }
+            mir::StringExpression::Call { function, args } => {
+                self.queue_call(function, args, ReturnExpectation::Value(mir::Type::String))?;
             }
         }
         Ok(())
@@ -694,7 +787,7 @@ impl Interpreter<'_> {
     fn queue_call(
         &mut self,
         function: mir::FunctionId,
-        args: Vec<mir::ValueExpression>,
+        args: Vec<mir::Rvalue>,
         expectation: ReturnExpectation,
     ) -> Result<(), InterpreterError> {
         let frame = self.current_frame_mut()?;
@@ -704,7 +797,7 @@ impl Interpreter<'_> {
             expectation,
         });
         for argument in args.into_iter().rev() {
-            frame.tasks.push(EvaluationTask::Value(argument));
+            frame.tasks.push(EvaluationTask::Rvalue(argument));
         }
         Ok(())
     }
@@ -712,7 +805,7 @@ impl Interpreter<'_> {
     fn push_frame(
         &mut self,
         function_id: mir::FunctionId,
-        args: &[mir::ScalarValue],
+        args: &[LocalValue],
         caller_expectation: Option<ReturnExpectation>,
     ) -> Result<(), InterpreterError> {
         if let Some(limit) = self.limits.max_call_frames {
@@ -741,28 +834,18 @@ impl Interpreter<'_> {
                 )));
             }
         }
-        for (parameter, value) in function.params.iter().zip(args.iter().copied()) {
+        for (parameter, value) in function.params.iter().zip(args.iter().cloned()) {
             let definition = local_in(function, *parameter)?;
-            let mir::Type::Scalar(expected) = definition.ty else {
+            if local_value_type(&value) != definition.ty {
                 return Err(InterpreterError::new(format!(
-                    "MIR function {} parameter local{} is not a scalar",
-                    function.name, parameter.0
-                )));
-            };
-            if value.ty() != expected {
-                return Err(InterpreterError::new(format!(
-                    "MIR function {} parameter local{} expects {expected}, got {}",
+                    "MIR function {} parameter local{} expects {}, got {}",
                     function.name,
                     parameter.0,
-                    value.ty()
+                    definition.ty,
+                    local_value_type(&value)
                 )));
             }
-            assign_local(
-                &function.locals,
-                &mut locals,
-                *parameter,
-                LocalValue::Scalar(value),
-            )?;
+            assign_local(&function.locals, &mut locals, *parameter, value)?;
         }
         block_in(function, function.entry_block)?;
         self.frames.push(CallFrame {
@@ -791,15 +874,16 @@ impl Interpreter<'_> {
         };
         match (expectation, outcome) {
             (ReturnExpectation::Value(expected), FunctionOutcome::Value(value)) => {
-                if value.ty() != expected {
+                if local_value_type(&value) != expected {
                     return Err(InterpreterError::new(format!(
                         "MIR scalar call expected {expected}, returned {}",
-                        value.ty()
+                        local_value_type(&value)
                     )));
                 }
-                self.current_frame_mut()?
-                    .values
-                    .push(EvaluationValue::Scalar(value));
+                self.current_frame_mut()?.values.push(match value {
+                    LocalValue::Scalar(value) => EvaluationValue::Scalar(value),
+                    LocalValue::String(value) => EvaluationValue::String(value),
+                });
             }
             (ReturnExpectation::Void, FunctionOutcome::Void) => {}
             (ReturnExpectation::Value(_), FunctionOutcome::Void) => {
@@ -829,10 +913,7 @@ impl Interpreter<'_> {
         Ok(())
     }
 
-    fn take_call_arguments(
-        &mut self,
-        count: usize,
-    ) -> Result<Vec<mir::ScalarValue>, InterpreterError> {
+    fn take_call_arguments(&mut self, count: usize) -> Result<Vec<LocalValue>, InterpreterError> {
         let frame = self.current_frame_mut()?;
         if frame.values.len() < count {
             return Err(InterpreterError::new(
@@ -844,7 +925,8 @@ impl Interpreter<'_> {
             .values
             .drain(start..)
             .map(|value| match value {
-                EvaluationValue::Scalar(value) => Ok(value),
+                EvaluationValue::Scalar(value) => Ok(LocalValue::Scalar(value)),
+                EvaluationValue::String(value) => Ok(LocalValue::String(value)),
             })
             .collect()
     }
@@ -859,9 +941,39 @@ impl Interpreter<'_> {
     fn pop_scalar(&mut self) -> Result<mir::ScalarValue, InterpreterError> {
         match self.current_frame_mut()?.values.pop() {
             Some(EvaluationValue::Scalar(value)) => Ok(value),
+            Some(EvaluationValue::String(_)) => Err(InterpreterError::new(
+                "MIR scalar evaluation produced a string",
+            )),
             None => Err(InterpreterError::new(
                 "MIR scalar evaluation produced no value",
             )),
+        }
+    }
+
+    fn push_string(&mut self, value: String) -> Result<(), InterpreterError> {
+        self.current_frame_mut()?
+            .values
+            .push(EvaluationValue::String(value));
+        Ok(())
+    }
+
+    fn pop_string(&mut self) -> Result<String, InterpreterError> {
+        match self.current_frame_mut()?.values.pop() {
+            Some(EvaluationValue::String(value)) => Ok(value),
+            Some(EvaluationValue::Scalar(_)) => Err(InterpreterError::new(
+                "MIR string evaluation produced a scalar",
+            )),
+            None => Err(InterpreterError::new(
+                "MIR string evaluation produced no value",
+            )),
+        }
+    }
+
+    fn pop_local_value(&mut self) -> Result<LocalValue, InterpreterError> {
+        match self.current_frame_mut()?.values.pop() {
+            Some(EvaluationValue::Scalar(value)) => Ok(LocalValue::Scalar(value)),
+            Some(EvaluationValue::String(value)) => Ok(LocalValue::String(value)),
+            None => Err(InterpreterError::new("MIR evaluation produced no value")),
         }
     }
 
@@ -911,8 +1023,10 @@ impl Interpreter<'_> {
     ) -> Result<InterpreterOutput, InterpreterError> {
         match (entry.return_type, outcome) {
             (
-                mir::ReturnType::Value(mir::ScalarType::Integer(IntegerType::Int64)),
-                FunctionOutcome::Value(mir::ScalarValue::Integer(value)),
+                mir::ReturnType::Value(mir::Type::Scalar(mir::ScalarType::Integer(
+                    IntegerType::Int64,
+                ))),
+                FunctionOutcome::Value(LocalValue::Scalar(mir::ScalarValue::Integer(value))),
             ) if value.ty == IntegerType::Int64 => {
                 let value = value.signed_value();
                 if (0..=125).contains(&value) {
@@ -942,7 +1056,7 @@ impl Interpreter<'_> {
             (mir::ReturnType::Value(ty), FunctionOutcome::Value(value)) => {
                 Err(InterpreterError::new(format!(
                     "MIR entry must return int, but signature/value were {ty}/{}",
-                    value.ty()
+                    local_value_type(&value)
                 )))
             }
         }
@@ -1090,26 +1204,61 @@ fn eval_operand(
     }
 }
 
-fn eval_string_expression(
-    expression: &mir::StringExpression,
-    locals: &[Option<LocalValue>],
-) -> Result<String, InterpreterError> {
-    match expression {
-        mir::StringExpression::Literal(value) => Ok(value.clone()),
-        mir::StringExpression::Local(id) => match read_local(locals, *id)? {
-            LocalValue::String(value) => Ok(value.clone()),
-            LocalValue::Scalar(_) => Err(InterpreterError::new(format!(
-                "MIR scalar local local{} was used as a string value",
-                id.0
-            ))),
-        },
-        mir::StringExpression::Concat(parts) => {
-            let mut value = String::new();
-            for part in parts {
-                value.push_str(&eval_string_expression(part, locals)?);
-            }
-            Ok(value)
+fn local_value_type(value: &LocalValue) -> mir::Type {
+    match value {
+        LocalValue::Scalar(value) => mir::Type::Scalar(value.ty()),
+        LocalValue::String(_) => mir::Type::String,
+    }
+}
+
+fn display_scalar(value: mir::ScalarValue) -> String {
+    match value {
+        mir::ScalarValue::Integer(value) if value.ty.is_signed() => {
+            value.signed_value().to_string()
         }
+        mir::ScalarValue::Integer(value) => value.unsigned_value().to_string(),
+        mir::ScalarValue::Bool(value) => value.to_string(),
+        mir::ScalarValue::Float(value) => match value.ty {
+            crate::numeric::FloatType::Float32 => display_float32(value.as_f32()),
+            crate::numeric::FloatType::Float64 => display_float64(value.as_f64()),
+        },
+    }
+}
+
+fn display_float32(value: f32) -> String {
+    if value.is_nan() {
+        "NaN".to_string()
+    } else if value.is_infinite() {
+        if value.is_sign_negative() {
+            "-Infinity".to_string()
+        } else {
+            "Infinity".to_string()
+        }
+    } else if value == 0.0 {
+        if value.is_sign_negative() {
+            "-0".to_string()
+        } else {
+            "0".to_string()
+        }
+    } else {
+        ryu::Buffer::new().format_finite(value).to_string()
+    }
+}
+
+fn display_float64(value: f64) -> String {
+    if value.is_nan() {
+        "NaN".to_string()
+    } else if value.is_infinite() {
+        if value.is_sign_negative() {
+            "-Infinity"
+        } else {
+            "Infinity"
+        }
+        .to_string()
+    } else if value == 0.0 {
+        if value.is_sign_negative() { "-0" } else { "0" }.to_string()
+    } else {
+        ryu::Buffer::new().format_finite(value).to_string()
     }
 }
 

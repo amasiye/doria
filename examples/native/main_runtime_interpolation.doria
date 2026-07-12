@@ -1,0 +1,6 @@
+function main(): void
+{
+    let $flag = false;
+
+    echo "flag={$flag}";
+}

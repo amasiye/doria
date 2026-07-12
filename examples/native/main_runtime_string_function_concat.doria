@@ -1,0 +1,14 @@
+function greeting(): string
+{
+    return "Hello";
+}
+
+function subject(): string
+{
+    return "Doria";
+}
+
+function main(): void
+{
+    echo greeting() . " " . subject() . "!";
+}

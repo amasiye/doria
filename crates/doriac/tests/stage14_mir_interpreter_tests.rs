@@ -32,7 +32,7 @@ function main(): int
     let choose = &program.functions[0];
     assert_eq!(
         choose.return_type,
-        ReturnType::Value(ScalarType::Float(FloatType::Float64))
+        ReturnType::Value(Type::Scalar(ScalarType::Float(FloatType::Float64)))
     );
     assert_eq!(
         choose

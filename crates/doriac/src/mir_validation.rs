@@ -20,7 +20,9 @@ pub fn validate_program(program: &mir::Program) -> Result<(), BackendError> {
     if !matches!(
         entry.return_type,
         mir::ReturnType::Void
-            | mir::ReturnType::Value(mir::ScalarType::Integer(IntegerType::Int64))
+            | mir::ReturnType::Value(mir::Type::Scalar(mir::ScalarType::Integer(
+                IntegerType::Int64
+            )))
     ) {
         return Err(malformed_mir(
             "entry function must return void or int/int64",
@@ -50,12 +52,7 @@ fn validate_function(program: &mir::Program, function: &mir::Function) -> Result
     }
     for parameter in &function.params {
         let local = local_in(function, *parameter)?;
-        if !matches!(local.ty, mir::Type::Scalar(_)) {
-            return Err(malformed_mir(format!(
-                "function {} parameter local{} is not a scalar",
-                function.name, parameter.0
-            )));
-        }
+        let _ = local;
     }
     block_in(function, function.entry_block)?;
     for (index, block) in function.blocks.iter().enumerate() {
@@ -83,7 +80,7 @@ fn validate_statement(
             let local = local_in(function, *target)?;
             match (local.ty, value) {
                 (mir::Type::String, mir::Rvalue::String(expression)) => {
-                    validate_string_expression(function, expression)
+                    validate_string_expression(program, function, expression)
                 }
                 (mir::Type::String, _) => Err(malformed_mir(format!(
                     "string local local{} receives an integer rvalue",
@@ -107,7 +104,9 @@ fn validate_statement(
             }
         }
         mir::Statement::EchoStringLiteral(_) => Ok(()),
-        mir::Statement::EchoString(expression) => validate_string_expression(function, expression),
+        mir::Statement::EchoString(expression) => {
+            validate_string_expression(program, function, expression)
+        }
         mir::Statement::CallVoid {
             function: callee,
             args,
@@ -145,7 +144,7 @@ fn validate_terminator(
                     return_type
                 )));
             }
-            validate_value_expression(program, function, expression)
+            validate_rvalue(program, function, expression)
         }
         mir::Terminator::ReturnVoid => {
             if function.return_type != mir::ReturnType::Void {
@@ -156,7 +155,7 @@ fn validate_terminator(
             }
             Ok(())
         }
-        mir::Terminator::Panic(message) => validate_string_expression(function, message),
+        mir::Terminator::Panic(message) => validate_string_expression(program, function, message),
         mir::Terminator::Unreachable => Ok(()),
         mir::Terminator::Jump(target) => block_in(function, *target).map(|_| ()),
         mir::Terminator::Branch {
@@ -219,7 +218,9 @@ fn validate_integer_expression(
             args,
         } => {
             let callee = function_in(program, *callee)?;
-            if callee.return_type != mir::ReturnType::Value(mir::ScalarType::Integer(*ty)) {
+            if callee.return_type
+                != mir::ReturnType::Value(mir::Type::Scalar(mir::ScalarType::Integer(*ty)))
+            {
                 return Err(malformed_mir(format!(
                     "{ty} call targets function {} returning {}",
                     callee.name, callee.return_type
@@ -241,6 +242,17 @@ fn validate_value_expression(
         }
         mir::ValueExpression::Float(value) => validate_float_expression(program, function, value),
         mir::ValueExpression::Bool(value) => validate_condition(program, function, value),
+    }
+}
+
+fn validate_rvalue(
+    program: &mir::Program,
+    function: &mir::Function,
+    expression: &mir::Rvalue,
+) -> Result<(), BackendError> {
+    match expression {
+        mir::Rvalue::Value(value) => validate_value_expression(program, function, value),
+        mir::Rvalue::String(value) => validate_string_expression(program, function, value),
     }
 }
 
@@ -296,7 +308,9 @@ fn validate_float_expression(
             args,
         } => {
             let callee = function_in(program, *callee)?;
-            if callee.return_type != mir::ReturnType::Value(mir::ScalarType::Float(*ty)) {
+            if callee.return_type
+                != mir::ReturnType::Value(mir::Type::Scalar(mir::ScalarType::Float(*ty)))
+            {
                 return Err(malformed_mir(
                     "float call targets a function with another return type",
                 ));
@@ -310,7 +324,7 @@ fn validate_call_args(
     program: &mir::Program,
     caller: &mir::Function,
     callee: &mir::Function,
-    args: &[mir::ValueExpression],
+    args: &[mir::Rvalue],
 ) -> Result<(), BackendError> {
     if args.len() != callee.params.len() {
         return Err(malformed_mir(format!(
@@ -321,7 +335,7 @@ fn validate_call_args(
         )));
     }
     for (index, (argument, parameter)) in args.iter().zip(&callee.params).enumerate() {
-        let parameter_type = scalar_local_type(callee, *parameter)?;
+        let parameter_type = local_in(callee, *parameter)?.ty;
         if argument.ty() != parameter_type {
             return Err(malformed_mir(format!(
                 "call to {} passes {} argument {} to {} parameter",
@@ -331,7 +345,7 @@ fn validate_call_args(
                 parameter_type
             )));
         }
-        validate_value_expression(program, caller, argument)?;
+        validate_rvalue(program, caller, argument)?;
     }
     Ok(())
 }
@@ -367,6 +381,10 @@ fn validate_condition(
             validate_value_expression(program, function, left)?;
             validate_value_expression(program, function, right)
         }
+        mir::BoolExpression::StringCompare { left, right, .. } => {
+            validate_string_expression(program, function, left)?;
+            validate_string_expression(program, function, right)
+        }
         mir::BoolExpression::Not(condition) => validate_condition(program, function, condition),
         mir::BoolExpression::Binary { left, right, .. } => {
             validate_condition(program, function, left)?;
@@ -377,7 +395,9 @@ fn validate_condition(
             args,
         } => {
             let callee = function_in(program, *callee)?;
-            if callee.return_type != mir::ReturnType::Value(mir::ScalarType::Bool) {
+            if callee.return_type
+                != mir::ReturnType::Value(mir::Type::Scalar(mir::ScalarType::Bool))
+            {
                 return Err(malformed_mir("bool call targets a non-bool function"));
             }
             validate_call_args(program, function, callee, args)
@@ -412,6 +432,7 @@ fn validate_integer_operand(
 }
 
 fn validate_string_expression(
+    program: &mir::Program,
     function: &mir::Function,
     expression: &mir::StringExpression,
 ) -> Result<(), BackendError> {
@@ -429,9 +450,22 @@ fn validate_string_expression(
         }
         mir::StringExpression::Concat(parts) => {
             for part in parts {
-                validate_string_expression(function, part)?;
+                validate_string_expression(program, function, part)?;
             }
             Ok(())
+        }
+        mir::StringExpression::Display(value) => {
+            validate_value_expression(program, function, value)
+        }
+        mir::StringExpression::Call {
+            function: callee,
+            args,
+        } => {
+            let callee = function_in(program, *callee)?;
+            if callee.return_type != mir::ReturnType::Value(mir::Type::String) {
+                return Err(malformed_mir("string call targets a non-string function"));
+            }
+            validate_call_args(program, function, callee, args)
         }
     }
 }
@@ -453,20 +487,6 @@ fn local_in(function: &mir::Function, id: mir::LocalId) -> Result<&mir::Local, B
         .get(id.0)
         .filter(|local| local.id == id)
         .ok_or_else(|| malformed_mir(format!("LocalId local{} does not exist", id.0)))
-}
-
-fn scalar_local_type(
-    function: &mir::Function,
-    id: mir::LocalId,
-) -> Result<mir::ScalarType, BackendError> {
-    let local = local_in(function, id)?;
-    let mir::Type::Scalar(ty) = local.ty else {
-        return Err(malformed_mir(format!(
-            "LocalId local{} is not a scalar local",
-            id.0
-        )));
-    };
-    Ok(ty)
 }
 
 fn block_in(function: &mir::Function, id: mir::BlockId) -> Result<&mir::BasicBlock, BackendError> {

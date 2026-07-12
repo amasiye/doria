@@ -1,0 +1,15 @@
+function repeat(string $piece, int $count): string
+{
+    let writable $result = "";
+
+    for (let writable $index = 0; $index < $count; $index++) {
+        $result = $result . $piece;
+    }
+
+    return $result;
+}
+
+function main(): void
+{
+    echo repeat("Doria", 2);
+}

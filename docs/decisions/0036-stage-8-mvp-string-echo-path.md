@@ -2,6 +2,8 @@
 
 Status: Accepted
 
+Forward note: decision 0045 supersedes the compile-time-only native subset and amends the earlier string-only concatenation rule. Stage 16 permits display-convertible primitive operands when at least one binary `.` operand is statically `string`.
+
 ## Decision
 
 Stage 8 completes the MVP string and echo path that began with Stage 8a. Stage 8a remains the historical literal-backed subset; this decision adds `.` string concatenation for supported string expressions while preserving the Stage 9 native iteration work as a separate slice.

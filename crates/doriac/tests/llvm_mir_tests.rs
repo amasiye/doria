@@ -2,7 +2,7 @@
 
 use doriac::mir::{
     BasicBlock, BlockId, FloatBinaryOp, FloatExpression, Function, FunctionId, Program, ReturnType,
-    ScalarType, Terminator, ValueExpression,
+    Rvalue, ScalarType, Terminator, Type, ValueExpression,
 };
 use doriac::numeric::{FloatType, FloatValue};
 
@@ -67,19 +67,19 @@ fn rejects_malformed_mixed_width_float_mir_before_llvm_emission() {
                 id: FunctionId(1),
                 name: "mixedWidth".to_string(),
                 params: Vec::new(),
-                return_type: ReturnType::Value(ScalarType::Float(FloatType::Float64)),
+                return_type: ReturnType::Value(Type::Scalar(ScalarType::Float(FloatType::Float64))),
                 locals: Vec::new(),
                 blocks: vec![BasicBlock {
                     id: BlockId(0),
                     statements: Vec::new(),
-                    terminator: Terminator::Return(ValueExpression::Float(
+                    terminator: Terminator::Return(Rvalue::Value(ValueExpression::Float(
                         FloatExpression::Binary {
                             ty: FloatType::Float64,
                             op: FloatBinaryOp::Add,
                             left: Box::new(FloatExpression::constant(FloatValue::from_f32(1.0))),
                             right: Box::new(FloatExpression::constant(FloatValue::from_f64(2.0))),
                         },
-                    )),
+                    ))),
                 }],
                 entry_block: BlockId(0),
             },

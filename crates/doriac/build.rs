@@ -21,6 +21,23 @@ fn main() {
     };
     let output =
         PathBuf::from(env::var_os("OUT_DIR").expect("Cargo output directory")).join(filename);
+    let dependency_dir = output
+        .parent()
+        .and_then(|path| path.parent())
+        .and_then(|path| path.parent())
+        .and_then(|path| path.parent())
+        .expect("Cargo build directory")
+        .join("deps");
+    let ryu = std::fs::read_dir(&dependency_dir)
+        .expect("Cargo dependency directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("libryu-") && name.ends_with(".rlib"))
+        })
+        .expect("compiled ryu dependency");
     let rustc = env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
     let mut command = Command::new(rustc);
     command
@@ -30,6 +47,10 @@ fn main() {
         .arg("--crate-type=staticlib")
         .arg("--target")
         .arg(&target)
+        .arg("-L")
+        .arg(format!("dependency={}", dependency_dir.display()))
+        .arg("--extern")
+        .arg(format!("ryu={}", ryu.display()))
         .arg("-C")
         .arg(format!(
             "opt-level={}",

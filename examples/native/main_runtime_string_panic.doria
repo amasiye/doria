@@ -1,0 +1,9 @@
+function fail(string $subject): void
+{
+    panic("runtime " . $subject . " " . 16);
+}
+
+function main(): void
+{
+    fail("string");
+}

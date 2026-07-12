@@ -177,7 +177,7 @@ fn panic_is_not_user_declarable() {
 }
 
 #[test]
-fn panic_requires_one_compile_time_known_string_argument() {
+fn panic_requires_one_string_argument_and_accepts_stage16_runtime_strings() {
     assert_valid(
         r#"function main(): void
 {
@@ -214,22 +214,16 @@ fn panic_requires_one_compile_time_known_string_argument() {
         .iter()
         .any(|diagnostic| diagnostic.code == "E0435"));
 
-    let runtime_string = doriac::check_source(
-        "test.doria",
+    assert_valid(
         r#"function main(): void
 {
     let writable $message = "boom";
     panic($message);
 }
 "#,
-    )
-    .expect_err("panic with a writable runtime message should fail");
-    assert!(runtime_string
-        .iter()
-        .any(|diagnostic| diagnostic.code == "E0435"));
+    );
 
-    let parameter = doriac::check_source(
-        "test.doria",
+    assert_valid(
         r#"function fail(string $message): void
 {
     panic($message);
@@ -240,14 +234,9 @@ function main(): void
     fail("boom");
 }
 "#,
-    )
-    .expect_err("panic with a runtime parameter should fail");
-    assert!(parameter
-        .iter()
-        .any(|diagnostic| diagnostic.code == "E0435"));
+    );
 
-    let runtime_local = doriac::check_source(
-        "test.doria",
+    assert_valid(
         r#"function runtimeMessage(): string
 {
     return "boom";
@@ -259,11 +248,7 @@ function main(): void
     panic($message);
 }
 "#,
-    )
-    .expect_err("panic with a runtime-derived readonly local should fail");
-    assert!(runtime_local
-        .iter()
-        .any(|diagnostic| diagnostic.code == "E0435"));
+    );
 }
 
 #[test]

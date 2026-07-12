@@ -17,7 +17,7 @@ echo $count;
     assert!(php.starts_with("<?php"));
     assert!(php.contains("$count = 0;"));
     assert!(php.contains("$count = 1;"));
-    assert!(php.contains("echo $count;"));
+    assert!(php.contains("echo __doria_display($count);"));
 }
 
 #[test]
@@ -33,10 +33,10 @@ echo true xor false;
     )
     .expect("compilation should succeed");
 
-    assert!(php.contains("echo ((true) && (false));"));
-    assert!(php.contains("echo ((false) || (true));"));
-    assert!(php.contains("echo !(false);"));
-    assert!(php.contains("echo ((true) !== (false));"));
+    assert!(php.contains("echo __doria_display(((true) && (false)));"));
+    assert!(php.contains("echo __doria_display(((false) || (true)));"));
+    assert!(php.contains("echo __doria_display(!(false));"));
+    assert!(php.contains("echo __doria_display(((true) !== (false)));"));
 }
 
 #[test]
@@ -50,8 +50,8 @@ echo false or null ?? true;
     )
     .expect("compilation should succeed");
 
-    assert!(php.contains("echo ((true) && (null ?? true));"));
-    assert!(php.contains("echo ((false) || (null ?? true));"));
+    assert!(php.contains("echo __doria_display(((true) && (null ?? true)));"));
+    assert!(php.contains("echo __doria_display(((false) || (null ?? true)));"));
     assert!(!php.contains("true && null ?? true"));
     assert!(!php.contains("false || null ?? true"));
 }
@@ -67,8 +67,8 @@ echo false xor true != false;
     )
     .expect("compilation should succeed");
 
-    assert!(php.contains("echo ((true === true) !== (false));"));
-    assert!(php.contains("echo ((false) !== (true !== false));"));
+    assert!(php.contains("echo __doria_display(((true === true) !== (false)));"));
+    assert!(php.contains("echo __doria_display(((false) !== (true !== false)));"));
     assert!(!php.contains("true === true !== false"));
     assert!(!php.contains("false !== true !== false"));
 }
@@ -84,10 +84,47 @@ echo "01" != "1";
     )
     .expect("compilation should succeed");
 
-    assert!(php.contains("echo \"01\" === \"1\";"));
-    assert!(php.contains("echo \"01\" !== \"1\";"));
+    assert!(php.contains("echo __doria_display(\"01\" === \"1\");"));
+    assert!(php.contains("echo __doria_display(\"01\" !== \"1\");"));
     assert!(!php.contains("echo \"01\" == \"1\";"));
     assert!(!php.contains("echo \"01\" != \"1\";"));
+}
+
+#[test]
+fn php_backend_preserves_byte_lexicographic_string_ordering() {
+    let php = doriac::compile_source_to_php(
+        "test.doria",
+        r#"
+function main(): int
+{
+    if ("10" < "2") {
+        return 42;
+    }
+    return 0;
+}
+"#,
+    )
+    .expect("PHP should preserve Doria string ordering");
+
+    assert!(php.contains("__doria_less(\"10\", \"2\")"));
+    assert!(php.contains("strcmp($left, $right)"));
+
+    let Ok(version) = Command::new("php").arg("--version").output() else {
+        return;
+    };
+    if !version.status.success() {
+        return;
+    }
+    let script = format!(
+        "{}\nexit(main());",
+        php.strip_prefix("<?php").expect("generated PHP header")
+    );
+    let run = Command::new("php")
+        .arg("-r")
+        .arg(script)
+        .output()
+        .expect("PHP should execute generated output");
+    assert_eq!(run.status.code(), Some(42));
 }
 
 #[test]
@@ -109,7 +146,7 @@ function identity(int64 $value): int64
     .expect("the exact signed integer subset should remain supported by PHP");
 
     assert!(php.contains("function isLess(int $left, int $right): bool"));
-    assert!(php.contains("return $left < $right;"));
+    assert!(php.contains("return __doria_less($left, $right);"));
     assert!(php.contains("function identity(int $value): int"));
 }
 
@@ -269,7 +306,6 @@ function total(): float64
     $value += 1.0;
     return $value;
 }
-
 "#,
     )
     .expect("PHP should preserve default float arithmetic");
@@ -278,6 +314,22 @@ function total(): float64
     assert!(php.contains("$value = 1.5 + 2.5;"));
     assert!(php.contains("$value += 1.0;"));
     assert!(!php.contains("float64"));
+}
+
+#[test]
+fn php_backend_rejects_noncanonical_float_display() {
+    for source in [
+        "function main(): void { echo 10000000000.0 * 10000000000.0; }",
+        "function main(): void { echo \"value=\" . 1.5; }",
+        "function show(float $value): void { echo \"value={$value}\"; } function main(): void {}",
+    ] {
+        let diagnostics = doriac::compile_source_to_php("test.doria", source)
+            .expect_err("PHP must reject float display it cannot preserve canonically");
+        assert_eq!(diagnostics[0].code, "B1301");
+        assert!(diagnostics[0]
+            .message
+            .contains("canonical Stage 16 float display formatting"));
+    }
 }
 
 #[test]
@@ -373,7 +425,7 @@ echo not (1 < 2);
     )
     .expect("compilation should succeed");
 
-    assert!(php.contains("echo !((1 < 2));"));
+    assert!(php.contains("echo __doria_display(!((__doria_less(1, 2))));"));
     assert!(!php.contains("echo !1 < 2;"));
 }
 
@@ -392,7 +444,7 @@ function main(): void
     .expect("compilation should succeed");
 
     assert!(php.contains("$message = \"Hello Doria!\";"));
-    assert!(php.contains("echo $message;"));
+    assert!(php.contains("echo __doria_display($message);"));
 }
 
 #[test]
@@ -410,7 +462,7 @@ function main(): void
     .expect("compilation should succeed");
 
     assert!(php.contains("$name = \"Doria\";"));
-    assert!(php.contains("echo \"Hello \" . $name . \"!\";"));
+    assert!(php.contains("__doria_display($name)"));
 }
 
 #[test]
@@ -428,8 +480,9 @@ function main(): void
     )
     .expect("compilation should succeed");
 
-    assert!(php.contains("$message = \"Hello \" . $name . \"!\";"));
-    assert!(php.contains("echo $message;"));
+    assert!(php.contains("$message = __doria_display("));
+    assert!(php.contains("__doria_display($name)"));
+    assert!(php.contains("echo __doria_display($message);"));
 }
 
 #[test]
@@ -501,7 +554,7 @@ function main(): void
     .expect("compilation should succeed");
 
     assert!(php.contains("function greet(string $name): void"));
-    assert!(php.contains("echo \"Hello \" . $name . \"!\";"));
+    assert!(php.contains("__doria_display($name)"));
     assert!(php.contains("greet(\"Doria\");"));
 }
 
@@ -524,7 +577,7 @@ function main(): void
     .expect("compilation should succeed");
 
     assert!(php.contains("function hello(): void"));
-    assert!(php.contains("echo \"Hello Doria!\";"));
+    assert!(php.contains("echo __doria_display(\"Hello Doria!\");"));
     assert!(php.contains("function main(): void"));
     assert!(php.contains("hello();"));
 }
@@ -630,10 +683,16 @@ while ($count < 10) {
     )
     .expect("compilation should succeed");
 
-    assert!(php.contains("if ($count < 10)\n{\n    echo \"small\";\n}"));
-    assert!(php.contains("else if ($count < 20)\n{\n    echo \"medium\";\n}"));
-    assert!(php.contains("else\n{\n    echo \"large\";\n}"));
-    assert!(php.contains("while ($count < 10)\n{\n    echo $count;\n    $count = 10;\n}"));
+    assert!(
+        php.contains("if (__doria_less($count, 10))\n{\n    echo __doria_display(\"small\");\n}")
+    );
+    assert!(php.contains(
+        "else if (__doria_less($count, 20))\n{\n    echo __doria_display(\"medium\");\n}"
+    ));
+    assert!(php.contains("else\n{\n    echo __doria_display(\"large\");\n}"));
+    assert!(php.contains(
+        "while (__doria_less($count, 10))\n{\n    echo __doria_display($count);\n    $count = 10;\n}"
+    ));
 }
 
 #[test]
@@ -757,7 +816,7 @@ main();
     .expect("compilation should succeed");
 
     assert!(php.contains("function main(): void"));
-    assert!(php.contains("echo \"Hello Doria!\";"));
+    assert!(php.contains("echo __doria_display(\"Hello Doria!\");"));
     assert!(php.contains("return;"));
     assert!(php.contains("main();"));
     assert!(!php.contains("exit(main())"));
@@ -789,9 +848,9 @@ function greet(string $name): string
     .expect("compilation should succeed");
 
     assert!(php.contains("$name = \"outer\";"));
-    assert!(php.contains("$name__doria1 = $name . \" inner\";"));
-    assert!(php.contains("echo \"block \" . $name__doria1;"));
-    assert!(php.contains("echo $name;"));
+    assert!(php.contains("$name__doria1 = __doria_display($name) . __doria_display(\" inner\");"));
+    assert!(php.contains("__doria_display($name__doria1)"));
+    assert!(php.contains("echo __doria_display($name);"));
     assert!(php.contains("function greet(string $name): string"));
     assert!(php.contains("$name__doria1 = \"inner\";"));
     assert!(php.contains("return $name__doria1;"));
@@ -1077,7 +1136,7 @@ echo "Hello, {$name}!";
     )
     .expect("compilation should succeed");
 
-    assert!(php.contains("echo \"Hello, \" . $name . \"!\";"));
+    assert!(php.contains("\"Hello, \" . __doria_display($name) . \"!\""));
     assert!(!php.contains("{$name}"));
 
     let php = doriac::compile_source_to_php(
@@ -1098,7 +1157,7 @@ class Person
     )
     .expect("compilation should succeed");
 
-    assert!(php.contains("echo \"Hello, \" . $this->name;"));
+    assert!(php.contains("\"Hello, \" . __doria_display($this->name)"));
     assert!(!php.contains("{$this->name}"));
 }
 
@@ -1116,9 +1175,9 @@ echo "Total: {$amount} ($currency)";
     )
     .expect("compilation should succeed");
 
-    assert!(php.contains("echo \"Hello, \\$name\";"));
-    assert!(php.contains("echo \"Literal \\$name\";"));
-    assert!(php.contains("echo \"Total: \" . $amount . \" (\\$currency)\";"));
+    assert!(php.contains("echo __doria_display(\"Hello, \\$name\");"));
+    assert!(php.contains("echo __doria_display(\"Literal \\$name\");"));
+    assert!(php.contains("\"Total: \" . __doria_display($amount) . \" (\\$currency)\""));
 }
 
 #[test]
@@ -1130,7 +1189,7 @@ fn compiles_person_example_with_explicit_interpolation() {
         .expect("person example should compile");
 
     assert!(php.contains(
-        "return \"Hello, my name is \" . $this->name . \" and I am \" . $this->age . \" years old!\";"
+        "return \"Hello, my name is \" . __doria_display($this->name) . \" and I am \" . __doria_display($this->age) . \" years old!\";"
     ));
     assert!(!php.contains("{$this->name}"));
     assert!(!php.contains("{$this->age}"));

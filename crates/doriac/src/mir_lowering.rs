@@ -10,7 +10,7 @@ use crate::{hir, mir};
 struct FunctionSignature {
     id: mir::FunctionId,
     return_type: mir::ReturnType,
-    parameter_types: Vec<mir::ScalarType>,
+    parameter_types: Vec<mir::Type>,
 }
 
 pub fn lower_program(program: &hir::Program) -> DiagnosticResult<mir::Program> {
@@ -87,9 +87,10 @@ fn collect_function_signature(
     id: mir::FunctionId,
 ) -> DiagnosticResult<FunctionSignature> {
     let return_type = match function.return_type.as_ref() {
-        Some(ty) if scalar_type_ref(ty).is_some() => {
-            mir::ReturnType::Value(scalar_type_ref(ty).expect("checked scalar type"))
-        }
+        Some(ty) if scalar_type_ref(ty).is_some() => mir::ReturnType::Value(mir::Type::Scalar(
+            scalar_type_ref(ty).expect("checked scalar type"),
+        )),
+        Some(ty) if is_plain_type(ty, "string") => mir::ReturnType::Value(mir::Type::String),
         Some(ty) if is_plain_type(ty, "void") => mir::ReturnType::Void,
         Some(ty) => {
             return Err(vec![unsupported(
@@ -121,8 +122,9 @@ fn collect_function_signature(
     if function.name == "main"
         && !matches!(
             return_type,
-            mir::ReturnType::Value(mir::ScalarType::Integer(IntegerType::Int64))
-                | mir::ReturnType::Void
+            mir::ReturnType::Value(mir::Type::Scalar(mir::ScalarType::Integer(
+                IntegerType::Int64,
+            ))) | mir::ReturnType::Void
         )
     {
         return Err(vec![unsupported(
@@ -142,7 +144,11 @@ fn collect_function_signature(
                 ),
             )]);
         }
-        let Some(scalar) = scalar_type_ref(&param.ty) else {
+        let parameter_type = if let Some(scalar) = scalar_type_ref(&param.ty) {
+            mir::Type::Scalar(scalar)
+        } else if is_plain_type(&param.ty, "string") {
+            mir::Type::String
+        } else {
             return Err(vec![unsupported(
                 param.span,
                 format!(
@@ -151,7 +157,7 @@ fn collect_function_signature(
                 ),
             )]);
         };
-        parameter_types.push(scalar);
+        parameter_types.push(parameter_type);
     }
 
     Ok(FunctionSignature {
@@ -197,9 +203,7 @@ fn lower_function(
         .params
         .iter()
         .zip(signature.parameter_types.iter().copied())
-        .map(|(param, ty)| {
-            context.declare_user_local(&param.name, param.writable, mir::Type::Scalar(ty))
-        })
+        .map(|(param, ty)| context.declare_user_local(&param.name, param.writable, ty))
         .collect::<Vec<_>>();
 
     lower_function_body(
@@ -1009,6 +1013,11 @@ fn is_string_local_initializer(expr: &hir::Expr, context: &LoweringContext) -> b
         hir::Expr::Variable { name, span } => context
             .lookup_local(name, *span)
             .is_ok_and(|local| context.local_type(local) == mir::Type::String),
+        hir::Expr::FunctionCall { name, span, .. } => {
+            context.lookup_function(name, *span).is_ok_and(|signature| {
+                signature.return_type == mir::ReturnType::Value(mir::Type::String)
+            })
+        }
         _ => false,
     }
 }
@@ -1017,15 +1026,8 @@ fn lower_string_var_decl(
     decl: &hir::VarDecl,
     context: &mut LoweringContext,
 ) -> DiagnosticResult<()> {
-    if decl.writable {
-        return Err(vec![unsupported(
-            decl.span,
-            "writable string locals are not lowered to MIR in Stage 11",
-        )]);
-    }
-
     let value = lower_string_expression(&decl.initializer, context)?;
-    let local = context.declare_user_local(&decl.name, false, mir::Type::String);
+    let local = context.declare_user_local(&decl.name, decl.writable, mir::Type::String);
     context.push_statement(mir::Statement::AssignLocal {
         target: local,
         value: mir::Rvalue::String(value),
@@ -1039,10 +1041,17 @@ fn lower_assignment(
 ) -> DiagnosticResult<()> {
     let target = lower_assignment_target(&assignment.target, context)?;
     if context.local_type(target) == mir::Type::String {
-        return Err(vec![unsupported(
-            assignment.span,
-            "string assignment is not lowered to MIR in Stage 11",
-        )]);
+        if assignment.op != hir::AssignOp::Assign {
+            return Err(vec![unsupported(
+                assignment.span,
+                "string compound assignment is invalid",
+            )]);
+        }
+        context.push_statement(mir::Statement::AssignLocal {
+            target,
+            value: mir::Rvalue::String(lower_string_expression(&assignment.value, context)?),
+        });
+        return Ok(());
     }
 
     let scalar_type = context.local_scalar_type(target)?;
@@ -1133,7 +1142,7 @@ fn lower_assignment_target(
 fn lower_echo(expr: &hir::Expr, context: &LoweringContext) -> DiagnosticResult<mir::Statement> {
     match expr {
         hir::Expr::String { value, .. } => Ok(mir::Statement::EchoStringLiteral(value.clone())),
-        _ => lower_string_expression(expr, context).map(mir::Statement::EchoString),
+        _ => lower_display_string_expression(expr, context).map(mir::Statement::EchoString),
     }
 }
 
@@ -1177,14 +1186,45 @@ fn lower_string_expression(
             append_string_concat_parts(expr, context, &mut parts)?;
             Ok(mir::StringExpression::Concat(parts))
         }
-        hir::Expr::InterpolatedString { .. } => Err(vec![unsupported(
-            expr.span(),
-            "string interpolation expansion is not lowered to MIR in Stage 11",
-        )]),
+        hir::Expr::InterpolatedString { parts, .. } => {
+            let mut lowered = Vec::new();
+            for part in parts {
+                match part {
+                    hir::InterpolatedStringPart::Text(text) => {
+                        lowered.push(mir::StringExpression::Literal(text.clone()));
+                    }
+                    hir::InterpolatedStringPart::Expr(expr) => {
+                        lowered.push(lower_display_string_expression(expr, context)?);
+                    }
+                }
+            }
+            Ok(mir::StringExpression::Concat(lowered))
+        }
+        hir::Expr::FunctionCall { name, args, span } => {
+            let signature = context.lookup_function(name, *span)?;
+            if signature.return_type != mir::ReturnType::Value(mir::Type::String) {
+                return Err(vec![unsupported(*span, format!("function `{name}` does not return string"))]);
+            }
+            Ok(mir::StringExpression::Call {
+                function: signature.id,
+                args: lower_call_args(name, args, signature, *span, context)?,
+            })
+        }
         _ => Err(vec![unsupported(
             expr.span(),
             "echo supports only string literals, readonly string locals, and string concatenation in Stage 11",
         )]),
+    }
+}
+
+fn lower_display_string_expression(
+    expr: &hir::Expr,
+    context: &LoweringContext,
+) -> DiagnosticResult<mir::StringExpression> {
+    if is_string_local_initializer(expr, context) {
+        lower_string_expression(expr, context)
+    } else {
+        lower_value_expression(expr, context).map(mir::StringExpression::Display)
     }
 }
 
@@ -1210,19 +1250,19 @@ fn append_string_concat_parts(
         }
         hir::Expr::Variable { name, span } => {
             let local = context.lookup_local(name, *span)?;
-            if context.local_type(local) != mir::Type::String {
-                return Err(vec![unsupported(
-                    *span,
-                    "string concatenation operands must be string expressions",
-                )]);
+            if context.local_type(local) == mir::Type::String {
+                parts.push(mir::StringExpression::Local(local));
+            } else {
+                parts.push(mir::StringExpression::Display(lower_value_expression(
+                    expr, context,
+                )?));
             }
-            parts.push(mir::StringExpression::Local(local));
             Ok(())
         }
-        _ => Err(vec![unsupported(
-            expr.span(),
-            "string concatenation operands must be string expressions",
-        )]),
+        _ => {
+            parts.push(lower_display_string_expression(expr, context)?);
+            Ok(())
+        }
     }
 }
 
@@ -1251,9 +1291,10 @@ fn lower_integer_call(
     args: &[hir::Expr],
     span: Span,
     context: &LoweringContext,
-) -> DiagnosticResult<(mir::FunctionId, IntegerType, Vec<mir::ValueExpression>)> {
+) -> DiagnosticResult<(mir::FunctionId, IntegerType, Vec<mir::Rvalue>)> {
     let signature = context.lookup_function(name, span)?;
-    let mir::ReturnType::Value(mir::ScalarType::Integer(return_type)) = signature.return_type
+    let mir::ReturnType::Value(mir::Type::Scalar(mir::ScalarType::Integer(return_type))) =
+        signature.return_type
     else {
         return Err(vec![unsupported(
             span,
@@ -1274,7 +1315,7 @@ fn lower_call_args(
     signature: FunctionSignature,
     span: Span,
     context: &LoweringContext,
-) -> DiagnosticResult<Vec<mir::ValueExpression>> {
+) -> DiagnosticResult<Vec<mir::Rvalue>> {
     if args.len() != signature.parameter_types.len() {
         return Err(vec![unsupported(
             span,
@@ -1289,7 +1330,7 @@ fn lower_call_args(
     args.iter()
         .zip(signature.parameter_types)
         .map(|(arg, expected)| {
-            let lowered = lower_value_expression(arg, context)?;
+            let lowered = lower_rvalue(arg, context)?;
             if lowered.ty() != expected {
                 return Err(vec![Diagnostic::new(
                     "I1301",
@@ -1314,7 +1355,7 @@ fn lower_return(
     match (return_type, expr) {
         (mir::ReturnType::Void, None) => Ok(mir::Terminator::ReturnVoid),
         (mir::ReturnType::Value(expected), Some(expr)) => {
-            let value = lower_value_expression(expr, context)?;
+            let value = lower_rvalue(expr, context)?;
             if value.ty() != expected {
                 return Err(vec![Diagnostic::new(
                     "I1301",
@@ -1374,11 +1415,23 @@ fn lower_condition(
             | hir::BinaryOp::Less
             | hir::BinaryOp::LessEqual
             | hir::BinaryOp::Greater
-            | hir::BinaryOp::GreaterEqual => Ok(mir::BoolExpression::Compare {
-                op: lower_compare_op(op),
-                left: Box::new(lower_value_expression(left, context)?),
-                right: Box::new(lower_value_expression(right, context)?),
-            }),
+            | hir::BinaryOp::GreaterEqual => {
+                if is_string_local_initializer(left, context)
+                    || is_string_local_initializer(right, context)
+                {
+                    Ok(mir::BoolExpression::StringCompare {
+                        op: lower_compare_op(op),
+                        left: Box::new(lower_string_expression(left, context)?),
+                        right: Box::new(lower_string_expression(right, context)?),
+                    })
+                } else {
+                    Ok(mir::BoolExpression::Compare {
+                        op: lower_compare_op(op),
+                        left: Box::new(lower_value_expression(left, context)?),
+                        right: Box::new(lower_value_expression(right, context)?),
+                    })
+                }
+            }
             hir::BinaryOp::And | hir::BinaryOp::Or | hir::BinaryOp::Xor => {
                 Ok(mir::BoolExpression::Binary {
                     op: lower_condition_binary_op(op),
@@ -1393,7 +1446,9 @@ fn lower_condition(
         },
         hir::Expr::FunctionCall { name, args, span } => {
             let signature = context.lookup_function(name, *span)?;
-            if signature.return_type != mir::ReturnType::Value(mir::ScalarType::Bool) {
+            if signature.return_type
+                != mir::ReturnType::Value(mir::Type::Scalar(mir::ScalarType::Bool))
+            {
                 return Err(vec![unsupported(
                     *span,
                     format!("function `{name}` does not return bool"),
@@ -1461,6 +1516,14 @@ fn lower_value_expression(
     lower_condition(expr, context).map(mir::ValueExpression::Bool)
 }
 
+fn lower_rvalue(expr: &hir::Expr, context: &LoweringContext) -> DiagnosticResult<mir::Rvalue> {
+    if is_string_local_initializer(expr, context) {
+        lower_string_expression(expr, context).map(mir::Rvalue::String)
+    } else {
+        lower_value_expression(expr, context).map(mir::Rvalue::Value)
+    }
+}
+
 fn lower_float_expression(
     expr: &hir::Expr,
     context: &LoweringContext,
@@ -1513,7 +1576,9 @@ fn lower_float_expression(
         }),
         hir::Expr::FunctionCall { name, args, span } => {
             let signature = context.lookup_function(name, *span)?;
-            if signature.return_type != mir::ReturnType::Value(mir::ScalarType::Float(ty)) {
+            if signature.return_type
+                != mir::ReturnType::Value(mir::Type::Scalar(mir::ScalarType::Float(ty)))
+            {
                 return Err(vec![Diagnostic::new(
                     "I1401",
                     format!("function `{name}` does not return `{ty}`"),

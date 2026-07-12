@@ -286,13 +286,21 @@ class DoriaLexer : LexerBase() {
                 tokenEnd = tokenStart + 2
                 tokenType = DoriaTokenTypes.OPERATOR
             }
-            isIdentifierStart(buffer[tokenStart]) -> scanIdentifierLike()
+            isIdentifierStart(buffer[tokenStart]) -> scanInterpolationProperty()
             buffer[tokenStart].isWhitespace() -> scanWhitespace()
             else -> {
                 tokenEnd = tokenStart + 1
                 tokenType = DoriaTokenTypes.OPERATOR
             }
         }
+    }
+
+    private fun scanInterpolationProperty() {
+        tokenEnd = tokenStart + 1
+        while (tokenEnd < endOffset && isIdentifierPart(buffer[tokenEnd])) {
+            tokenEnd++
+        }
+        tokenType = DoriaTokenTypes.PROPERTY
     }
 
     private fun scanAttributeStart() {

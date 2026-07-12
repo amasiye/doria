@@ -36,7 +36,7 @@ pub struct Function {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReturnType {
-    Value(ScalarType),
+    Value(Type),
     Void,
 }
 
@@ -79,6 +79,12 @@ pub enum Type {
     String,
 }
 
+impl From<ScalarType> for Type {
+    fn from(value: ScalarType) -> Self {
+        Self::Scalar(value)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BasicBlock {
     pub id: BlockId,
@@ -96,6 +102,15 @@ pub enum Operand {
 pub enum Rvalue {
     Value(ValueExpression),
     String(StringExpression),
+}
+
+impl Rvalue {
+    pub const fn ty(&self) -> Type {
+        match self {
+            Self::Value(value) => Type::Scalar(value.ty()),
+            Self::String(_) => Type::String,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,7 +177,7 @@ pub enum IntegerExpression {
     Call {
         ty: IntegerType,
         function: FunctionId,
-        args: Vec<ValueExpression>,
+        args: Vec<Rvalue>,
     },
 }
 
@@ -220,7 +235,7 @@ pub enum FloatExpression {
     Call {
         ty: FloatType,
         function: FunctionId,
-        args: Vec<ValueExpression>,
+        args: Vec<Rvalue>,
     },
 }
 
@@ -248,6 +263,11 @@ pub enum StringExpression {
     Literal(String),
     Local(LocalId),
     Concat(Vec<StringExpression>),
+    Display(ValueExpression),
+    Call {
+        function: FunctionId,
+        args: Vec<Rvalue>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,6 +280,11 @@ pub enum BoolExpression {
         left: Box<ValueExpression>,
         right: Box<ValueExpression>,
     },
+    StringCompare {
+        op: CompareOp,
+        left: Box<StringExpression>,
+        right: Box<StringExpression>,
+    },
     Not(Box<BoolExpression>),
     Binary {
         op: BoolBinaryOp,
@@ -268,7 +293,7 @@ pub enum BoolExpression {
     },
     Call {
         function: FunctionId,
-        args: Vec<ValueExpression>,
+        args: Vec<Rvalue>,
     },
 }
 
@@ -299,13 +324,13 @@ pub enum Statement {
     EchoString(StringExpression),
     CallVoid {
         function: FunctionId,
-        args: Vec<ValueExpression>,
+        args: Vec<Rvalue>,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Terminator {
-    Return(ValueExpression),
+    Return(Rvalue),
     ReturnVoid,
     Panic(StringExpression),
     Unreachable,
@@ -570,6 +595,8 @@ impl fmt::Display for StringExpression {
                 }
                 write!(formatter, ")")
             }
+            StringExpression::Display(value) => write!(formatter, "display({value})"),
+            StringExpression::Call { function, args } => write_call(formatter, *function, args),
         }
     }
 }
@@ -583,6 +610,7 @@ impl fmt::Display for BoolExpression {
                 Operand::Scalar(_) => formatter.write_str("<malformed scalar>: bool"),
             },
             Self::Compare { op, left, right } => write!(formatter, "{left} {op} {right}"),
+            Self::StringCompare { op, left, right } => write!(formatter, "{left} {op} {right}"),
             Self::Not(condition) => write!(formatter, "!({condition})"),
             Self::Binary { op, left, right } => {
                 write!(formatter, "({left}) {op} ({right})")
