@@ -511,6 +511,25 @@ function check_vscode_grammar(): void
         require_check(str_contains($grammarText, $scope), "VS Code grammar is missing '{$scope}'");
     }
 
+    $callPatterns = $grammar['repository']['calls']['patterns'] ?? [];
+    $functionCallMatches = [];
+    foreach ($callPatterns as $pattern) {
+        if (($pattern['name'] ?? null) === 'entity.name.function.call.doria') {
+            $functionCallMatches[] = (string) ($pattern['match'] ?? '');
+        }
+    }
+    require_check($functionCallMatches !== [], 'VS Code grammar must define contextual function-call highlighting');
+    foreach (['read_file', 'calculateReport', 'saveReport', 'formatReport'] as $call) {
+        require_check(
+            any_match($functionCallMatches, static fn (string $match): bool => regex_matches($match, $call . ' (')),
+            "VS Code grammar must highlight arbitrary call name '{$call}' before an opening parenthesis"
+        );
+    }
+    require_check(
+        !any_match($functionCallMatches, static fn (string $match): bool => regex_matches($match, 'calculateReport;')),
+        'VS Code grammar must not classify a bare identifier as a function call'
+    );
+
     $attributePatterns = $grammar['repository']['attributes']['patterns'] ?? [];
     require_check($attributePatterns !== [], 'VS Code grammar must define attribute highlighting');
     $attributeBegin = (string) ($attributePatterns[0]['begin'] ?? '');
@@ -668,6 +687,14 @@ function check_intellij_lexer(): void
             str_contains($lexerText, 'DoriaTokenTypes.ATTRIBUTE_ARGUMENT'),
         'IntelliJ lexer must emit dedicated attribute tokens'
     );
+    require_check(
+        str_contains($lexerText, "nextNonWhitespace(tokenEnd) == '('") &&
+            str_contains($lexerText, 'callableTokenType()') &&
+            str_contains($lexerText, '"->" -> DoriaTokenTypes.METHOD_CALL') &&
+            str_contains($lexerText, '"::" -> DoriaTokenTypes.STATIC_METHOD_CALL') &&
+            str_contains($lexerText, 'else -> DoriaTokenTypes.FUNCTION_CALL'),
+        'IntelliJ lexer must classify calls from parenthesis and accessor context rather than a name list'
+    );
 
     $pluginXml = read_text($intellijPluginXml);
     require_check(
@@ -687,6 +714,9 @@ function check_intellij_lexer(): void
         'DORIA_ATTRIBUTE_ARGUMENT',
         'DORIA_LOGICAL_OPERATOR',
         'DORIA_PROPERTY',
+        'DORIA_FUNCTION_CALL',
+        'DORIA_METHOD_CALL',
+        'DORIA_STATIC_METHOD_CALL',
     ] as $tokenType) {
         require_check(str_contains($intellijHighlightingText, $tokenType), "IntelliJ highlighting is missing {$tokenType}");
     }
@@ -847,6 +877,10 @@ function check_fixture(): void
         'echo "Profile: {$this->profile->displayName}";',
         'echo "Count: {$count}";',
         "echo 'Literal {\$name}';",
+        'read_file("input.txt")',
+        'calculateReport($text)',
+        '$repository->saveReport($customResult)',
+        'ReportFormatter::formatReport($customResult)',
         '?User',
         '\n\t\r\s',
         'use App\Repositories\UserRepository;',

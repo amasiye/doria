@@ -303,3 +303,6 @@ printf("code=%05d", 42);
 let $text = read_file("input.txt");
 write_file("copy.txt", $text);
 write_stderr("done");
+let $customResult = calculateReport($text);
+$repository->saveReport($customResult);
+ReportFormatter::formatReport($customResult);
