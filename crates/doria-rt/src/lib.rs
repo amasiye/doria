@@ -983,6 +983,49 @@ pub unsafe extern "C" fn memmove(
     destination
 }
 
+/// Compares `count` bytes lexicographically as unsigned values.
+///
+/// # Safety
+///
+/// `left` and `right` must both be valid for reads of `count` bytes.
+#[cfg(windows)]
+#[no_mangle]
+pub unsafe extern "C" fn memcmp(left: *const c_void, right: *const c_void, count: usize) -> i32 {
+    let left = left.cast::<u8>();
+    let right = right.cast::<u8>();
+    for index in 0..count {
+        let left_byte = ptr::read_volatile(left.add(index));
+        let right_byte = ptr::read_volatile(right.add(index));
+        if left_byte != right_byte {
+            return i32::from(left_byte) - i32::from(right_byte);
+        }
+    }
+    0
+}
+
+/// Lets Windows continue searching when precompiled `core` unwind metadata is inspected.
+///
+/// Doria's runtime is abort-only and never initiates SEH/C++ unwinding. The Rust-distributed
+/// `core` archive can nevertheless reference the MSVC language-specific handler, while Doria
+/// deliberately links without the CRT. Returning `ExceptionContinueSearch` preserves the
+/// abort-only boundary if an unrelated structured exception reaches this metadata.
+///
+/// # Safety
+///
+/// This function may only be entered by the Windows exception dispatcher with its four native
+/// dispatcher pointers. Doria code must never call it directly.
+#[cfg(all(windows, target_env = "msvc"))]
+#[no_mangle]
+pub unsafe extern "C" fn __CxxFrameHandler3(
+    _exception_record: *mut c_void,
+    _establisher_frame: *mut c_void,
+    _context_record: *mut c_void,
+    _dispatcher_context: *mut c_void,
+) -> i32 {
+    const EXCEPTION_CONTINUE_SEARCH: i32 = 1;
+    EXCEPTION_CONTINUE_SEARCH
+}
+
 /// Fills `count` bytes at `destination` with the low byte of `value`.
 ///
 /// # Safety
@@ -1114,6 +1157,21 @@ mod tests {
 
             memmove(moved.as_mut_ptr().cast(), moved.as_ptr().add(1).cast(), 4);
             assert_eq!(moved, [1, 2, 3, 4, 4]);
+
+            assert_eq!(memcmp(b"abc".as_ptr().cast(), b"abc".as_ptr().cast(), 3), 0);
+            assert!(memcmp(b"abc".as_ptr().cast(), b"abd".as_ptr().cast(), 3) < 0);
+            assert!(memcmp(b"abe".as_ptr().cast(), b"abd".as_ptr().cast(), 3) > 0);
+
+            #[cfg(target_env = "msvc")]
+            assert_eq!(
+                __CxxFrameHandler3(
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                ),
+                1
+            );
         }
     }
 }
