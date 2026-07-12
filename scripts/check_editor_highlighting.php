@@ -686,6 +686,7 @@ function check_intellij_lexer(): void
         'DORIA_ATTRIBUTE_NAME',
         'DORIA_ATTRIBUTE_ARGUMENT',
         'DORIA_LOGICAL_OPERATOR',
+        'DORIA_PROPERTY',
     ] as $tokenType) {
         require_check(str_contains($intellijHighlightingText, $tokenType), "IntelliJ highlighting is missing {$tokenType}");
     }
@@ -843,6 +844,9 @@ function check_fixture(): void
         'bool $symbolNegated = !$input;',
         'bool $symbolBoth = $ready && $symbolNegated;',
         'bool $symbolEither = $symbolBoth || $different;',
+        'echo "Profile: {$this->profile->displayName}";',
+        'echo "Count: {$count}";',
+        "echo 'Literal {\$name}';",
         '?User',
         '\n\t\r\s',
         'use App\Repositories\UserRepository;',

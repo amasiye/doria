@@ -256,14 +256,6 @@
                   "include": "#variables"
                 }
               ]
-            },
-            {
-              "name": "variable.language.this.doria",
-              "match": "\\$this\\b"
-            },
-            {
-              "name": "variable.other.doria",
-              "match": "\\$[A-Za-z_][A-Za-z0-9_]*"
             }
           ]
         },

@@ -85,6 +85,9 @@ function main(): void
     echo "Hello " . $name . "!";
     echo "Hello {$name}";
     echo "Hello {$this->name}";
+    echo "Profile: {$this->profile->displayName}";
+    echo "Count: {$count}";
+    echo 'Literal {$name}';
     echo "\n\t\r\s";
 
     if ($count == 0 and not false) {

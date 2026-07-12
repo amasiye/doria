@@ -31,6 +31,7 @@ object DoriaTokenTypes {
     val STATIC_METHOD_CALL = DoriaTokenType("DORIA_STATIC_METHOD_CALL")
     val IDENTIFIER = DoriaTokenType("DORIA_IDENTIFIER")
     val VARIABLE = DoriaTokenType("DORIA_VARIABLE")
+    val PROPERTY = DoriaTokenType("DORIA_PROPERTY")
     val THIS = DoriaTokenType("DORIA_THIS")
     val BOOLEAN_LITERAL = DoriaTokenType("DORIA_BOOLEAN_LITERAL")
     val NULL_LITERAL = DoriaTokenType("DORIA_NULL_LITERAL")

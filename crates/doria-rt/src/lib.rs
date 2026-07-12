@@ -7,6 +7,7 @@ use core::mem;
 use core::ptr;
 
 const PANIC_STATUS: i32 = 101;
+#[cfg(unix)]
 const EINTR: i32 = 4;
 #[cfg(unix)]
 const SIGPIPE: i32 = 13;
@@ -613,6 +614,82 @@ const STD_ERROR_HANDLE: u32 = -12_i32 as u32;
 #[cfg(windows)]
 const INVALID_HANDLE_VALUE: *mut c_void = -1_isize as *mut c_void;
 
+// Doria's Windows executables deliberately do not link the C runtime. Rust and ryu still lower
+// byte copies/fills and floating-point use to these MSVC support symbols, so the runtime owns the
+// small subset they require.
+#[cfg(windows)]
+#[no_mangle]
+pub static _fltused: i32 = 0;
+
+/// Copies `count` bytes from `source` to the non-overlapping `destination`.
+///
+/// # Safety
+///
+/// `source` and `destination` must be valid for `count` bytes and must not overlap.
+#[cfg(windows)]
+#[no_mangle]
+pub unsafe extern "C" fn memcpy(
+    destination: *mut c_void,
+    source: *const c_void,
+    count: usize,
+) -> *mut c_void {
+    let destination_bytes = destination.cast::<u8>();
+    let source_bytes = source.cast::<u8>();
+    for index in 0..count {
+        let byte = ptr::read_volatile(source_bytes.add(index));
+        ptr::write_volatile(destination_bytes.add(index), byte);
+    }
+    destination
+}
+
+/// Copies `count` bytes from `source` to `destination`, including when they overlap.
+///
+/// # Safety
+///
+/// `source` and `destination` must be valid for `count` bytes.
+#[cfg(windows)]
+#[no_mangle]
+pub unsafe extern "C" fn memmove(
+    destination: *mut c_void,
+    source: *const c_void,
+    count: usize,
+) -> *mut c_void {
+    let destination_bytes = destination.cast::<u8>();
+    let source_bytes = source.cast::<u8>();
+    let destination_address = destination_bytes as usize;
+    let source_address = source_bytes as usize;
+
+    if destination_address <= source_address
+        || destination_address.wrapping_sub(source_address) >= count
+    {
+        for index in 0..count {
+            let byte = ptr::read_volatile(source_bytes.add(index));
+            ptr::write_volatile(destination_bytes.add(index), byte);
+        }
+    } else {
+        for index in (0..count).rev() {
+            let byte = ptr::read_volatile(source_bytes.add(index));
+            ptr::write_volatile(destination_bytes.add(index), byte);
+        }
+    }
+    destination
+}
+
+/// Fills `count` bytes at `destination` with the low byte of `value`.
+///
+/// # Safety
+///
+/// `destination` must be valid for writes of `count` bytes.
+#[cfg(windows)]
+#[no_mangle]
+pub unsafe extern "C" fn memset(destination: *mut c_void, value: i32, count: usize) -> *mut c_void {
+    let destination_bytes = destination.cast::<u8>();
+    for index in 0..count {
+        ptr::write_volatile(destination_bytes.add(index), value as u8);
+    }
+    destination
+}
+
 #[cfg(windows)]
 extern "system" {
     fn GetStdHandle(standard_handle: u32) -> *mut c_void;
@@ -712,6 +789,31 @@ mod tests {
                 assert_eq!(bytes(string), expected);
                 dr_v1_string_release(string);
             }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn no_crt_memory_support_symbols_preserve_bytes_and_overlap() {
+        unsafe {
+            let source = [1_u8, 2, 3, 4];
+            let mut copied = [0_u8; 4];
+            memcpy(
+                copied.as_mut_ptr().cast(),
+                source.as_ptr().cast(),
+                source.len(),
+            );
+            assert_eq!(copied, source);
+
+            memset(copied.as_mut_ptr().cast(), 0xab, copied.len());
+            assert_eq!(copied, [0xab; 4]);
+
+            let mut moved = [1_u8, 2, 3, 4, 5];
+            memmove(moved.as_mut_ptr().add(1).cast(), moved.as_ptr().cast(), 4);
+            assert_eq!(moved, [1, 1, 2, 3, 4]);
+
+            memmove(moved.as_mut_ptr().cast(), moved.as_ptr().add(1).cast(), 4);
+            assert_eq!(moved, [1, 2, 3, 4, 4]);
         }
     }
 }
