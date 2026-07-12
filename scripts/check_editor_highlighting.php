@@ -688,12 +688,17 @@ function check_intellij_lexer(): void
         'IntelliJ lexer must emit dedicated attribute tokens'
     );
     require_check(
-        str_contains($lexerText, "nextNonWhitespace(tokenEnd) == '('") &&
+        str_contains($lexerText, "private fun isCallName(): Boolean = nextNonWhitespace(tokenEnd) == '('") &&
+            str_contains($lexerText, 'isCallName() -> callableTokenType()') &&
             str_contains($lexerText, 'callableTokenType()') &&
             str_contains($lexerText, '"->" -> DoriaTokenTypes.METHOD_CALL') &&
             str_contains($lexerText, '"::" -> DoriaTokenTypes.STATIC_METHOD_CALL') &&
             str_contains($lexerText, 'else -> DoriaTokenTypes.FUNCTION_CALL'),
         'IntelliJ lexer must classify calls from parenthesis and accessor context rather than a name list'
+    );
+    require_check(
+        strpos($lexerText, 'isCallName() -> callableTokenType()') < strpos($lexerText, 'text.first().isUpperCase() -> DoriaTokenTypes.TYPE_NAME'),
+        'IntelliJ lexer must prioritize call syntax over identifier capitalization'
     );
 
     $pluginXml = read_text($intellijPluginXml);

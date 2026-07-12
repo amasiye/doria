@@ -446,8 +446,8 @@ class DoriaLexer : LexerBase() {
 
             else -> when {
                 isFunctionDeclarationName() -> DoriaTokenTypes.FUNCTION_DECLARATION
+                isCallName() -> callableTokenType()
                 text.first().isUpperCase() -> DoriaTokenTypes.TYPE_NAME
-                nextNonWhitespace(tokenEnd) == '(' -> callableTokenType()
                 else -> DoriaTokenTypes.IDENTIFIER
             }
         }
@@ -555,6 +555,8 @@ class DoriaLexer : LexerBase() {
 
     private fun isFunctionDeclarationName(): Boolean =
         nextNonWhitespace(tokenEnd) == '(' && previousIdentifier() == "function"
+
+    private fun isCallName(): Boolean = nextNonWhitespace(tokenEnd) == '('
 
     private fun callableTokenType(): IElementType = when (previousAccessor()) {
         "->" -> DoriaTokenTypes.METHOD_CALL
