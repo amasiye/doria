@@ -1,0 +1,13 @@
+function main(): int
+{
+    if (
+        "abc" == "abc"
+        and "abc" != "abd"
+        and "abc" < "abd"
+        and "abd" > "abc"
+    ) {
+        return 42;
+    }
+
+    return 0;
+}

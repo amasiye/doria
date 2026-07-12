@@ -38,7 +38,7 @@ fn int_expression_value(expression: IntegerExpression) -> ValueExpression {
 }
 
 fn int_return(expression: IntegerExpression) -> Terminator {
-    Terminator::Return(int_expression_value(expression))
+    Terminator::Return(Rvalue::Value(int_expression_value(expression)))
 }
 
 fn bool_condition(value: bool) -> Condition {
@@ -68,11 +68,6 @@ fn lower_object(source: &str) -> Vec<u8> {
     let program = lower(source);
     doriac::codegen_cranelift::lower_mir_to_object(&program)
         .expect("MIR should lower to a Cranelift object")
-}
-
-fn unsupported(source: &str) -> Vec<doriac::diagnostics::Diagnostic> {
-    doriac::lower_source_to_mir("test.doria", source)
-        .expect_err("source should be outside Stage 11 MIR coverage")
 }
 
 fn unsupported_after_parsing(source: &str) -> Vec<doriac::diagnostics::Diagnostic> {
@@ -119,7 +114,7 @@ fn conditional_program(condition: Condition, then_status: i64, else_status: i64)
             id: FunctionId(0),
             name: "main".to_string(),
             params: Vec::new(),
-            return_type: ReturnType::Value(ScalarType::Integer(DEFAULT_INT)),
+            return_type: ReturnType::Value(Type::Scalar(ScalarType::Integer(DEFAULT_INT))),
             locals: vec![Local {
                 id: LocalId(0),
                 name: "unassigned".to_string(),
@@ -176,7 +171,7 @@ fn lowers_main_int_return_42() {
     assert_eq!(function.name, "main");
     assert_eq!(
         function.return_type,
-        ReturnType::Value(ScalarType::Integer(DEFAULT_INT))
+        ReturnType::Value(Type::Scalar(ScalarType::Integer(DEFAULT_INT)))
     );
     assert!(function.locals.is_empty());
     assert_eq!(function.blocks[0].terminator, int_return(int_constant(42)));
@@ -201,12 +196,14 @@ fn lowers_return_add_42_to_mir_arithmetic() {
     assert!(function.blocks[0].statements.is_empty());
     assert_eq!(
         function.blocks[0].terminator,
-        Terminator::Return(ValueExpression::Integer(IntegerExpression::Binary {
-            ty: DEFAULT_INT,
-            op: IntegerBinaryOp::Add,
-            left: Box::new(int_constant(40)),
-            right: Box::new(int_constant(2)),
-        }))
+        Terminator::Return(Rvalue::Value(ValueExpression::Integer(
+            IntegerExpression::Binary {
+                ty: DEFAULT_INT,
+                op: IntegerBinaryOp::Add,
+                left: Box::new(int_constant(40)),
+                right: Box::new(int_constant(2)),
+            }
+        )))
     );
     assert_eq!(
         program.to_string(),
@@ -777,7 +774,7 @@ fn interpreter_reports_arithmetic_overflow_as_runtime_panic() {
             id: FunctionId(0),
             name: "main".to_string(),
             params: Vec::new(),
-            return_type: ReturnType::Value(ScalarType::Integer(DEFAULT_INT)),
+            return_type: ReturnType::Value(Type::Scalar(ScalarType::Integer(DEFAULT_INT))),
             locals: vec![Local {
                 id: LocalId(0),
                 name: "_tmp0".to_string(),
@@ -918,10 +915,12 @@ fn lowers_and_interprets_integer_division() {
 
     assert!(matches!(
         program.functions[0].blocks[0].terminator,
-        Terminator::Return(ValueExpression::Integer(IntegerExpression::Binary {
-            op: IntegerBinaryOp::Divide,
-            ..
-        }))
+        Terminator::Return(Rvalue::Value(ValueExpression::Integer(
+            IntegerExpression::Binary {
+                op: IntegerBinaryOp::Divide,
+                ..
+            }
+        )))
     ));
     assert_eq!(
         doriac::mir_interpreter::interpret(&program)
@@ -2548,14 +2547,16 @@ fn stage_11f_lowers_int_calls_in_returns_and_arithmetic() {
     let main = &add_program.functions[1];
     assert_eq!(
         main.blocks[0].terminator,
-        Terminator::Return(ValueExpression::Integer(IntegerExpression::Call {
-            ty: DEFAULT_INT,
-            function: FunctionId(0),
-            args: vec![
-                int_expression_value(int_constant(20)),
-                int_expression_value(int_constant(22)),
-            ],
-        }))
+        Terminator::Return(Rvalue::Value(ValueExpression::Integer(
+            IntegerExpression::Call {
+                ty: DEFAULT_INT,
+                function: FunctionId(0),
+                args: vec![
+                    Rvalue::Value(int_expression_value(int_constant(20))),
+                    Rvalue::Value(int_expression_value(int_constant(22))),
+                ],
+            }
+        )))
     );
 
     let chain_program = lower(include_str!(
@@ -2564,10 +2565,12 @@ fn stage_11f_lowers_int_calls_in_returns_and_arithmetic() {
     let answer = &chain_program.functions[1];
     assert!(matches!(
         answer.blocks[0].terminator,
-        Terminator::Return(ValueExpression::Integer(IntegerExpression::Binary {
-            op: IntegerBinaryOp::Add,
-            ..
-        }))
+        Terminator::Return(Rvalue::Value(ValueExpression::Integer(
+            IntegerExpression::Binary {
+                op: IntegerBinaryOp::Add,
+                ..
+            }
+        )))
     ));
 }
 
@@ -2661,36 +2664,20 @@ function main(): int
 }
 
 #[test]
-fn stage_11f_rejects_unsupported_helper_signatures() {
-    for (source, detail) in [
-        (
-            r#"function greet(string $name): void
+fn stage_16_accepts_string_helper_signatures() {
+    let output = interpret(
+        r#"function title(string $name): string
 {
-    echo "Hello";
+    return "Hello " . $name;
 }
 
 function main(): void
 {
+    echo title("Doria");
 }
 "#,
-            "supports scalar parameters",
-        ),
-        (
-            r#"function title(): string
-{
-    return "Doria";
-}
-
-function main(): void
-{
-}
-"#,
-            "supports scalar and void returns",
-        ),
-    ] {
-        let diagnostics = unsupported(source);
-        assert_stage_11g_unsupported(&diagnostics, detail);
-    }
+    );
+    assert_eq!(output.stdout, b"Hello Doria");
 }
 
 #[test]
@@ -2894,7 +2881,7 @@ fn explicitly_limited_interpreter_can_bound_call_frames() {
             id: FunctionId(0),
             name: "main".to_string(),
             params: Vec::new(),
-            return_type: ReturnType::Value(ScalarType::Integer(DEFAULT_INT)),
+            return_type: ReturnType::Value(Type::Scalar(ScalarType::Integer(DEFAULT_INT))),
             locals: vec![Local {
                 id: LocalId(0),
                 name: "_tmp0".to_string(),
@@ -3045,7 +3032,7 @@ fn stage_11g_supports_readonly_string_local_concat_initializers() {
 }
 
 #[test]
-fn stage_11g_rejects_writable_string_locals() {
+fn stage_16_accepts_writable_string_locals() {
     for source in [
         r#"function main(): void
 {
@@ -3058,28 +3045,28 @@ fn stage_11g_rejects_writable_string_locals() {
 }
 "#,
     ] {
-        let diagnostics = unsupported(source);
-        assert_stage_11g_unsupported(&diagnostics, "writable string locals");
+        let program = lower(source);
+        assert!(program.functions[0].locals[0].writable);
     }
 }
 
 #[test]
-fn stage_11g_rejects_string_assignment_in_mir_lowering() {
-    let diagnostics = unsupported_after_parsing(
+fn stage_16_lowers_string_assignment() {
+    let output = interpret(
         r#"function main(): void
 {
-    let $name = "Doria";
+    let writable $name = "Doria";
     $name = "Other";
+    echo $name;
 }
 "#,
     );
-
-    assert_stage_11g_unsupported(&diagnostics, "string assignment");
+    assert_eq!(output.stdout, b"Other");
 }
 
 #[test]
-fn stage_11g_rejects_string_and_int_concat_without_display_conversion() {
-    let diagnostics = unsupported_after_parsing(
+fn stage_16_displays_integer_in_string_concat() {
+    let output = interpret(
         r#"function main(): void
 {
     echo "count: " . 42;
@@ -3087,39 +3074,24 @@ fn stage_11g_rejects_string_and_int_concat_without_display_conversion() {
 "#,
     );
 
-    assert_stage_11g_unsupported(
-        &diagnostics,
-        "string concatenation operands must be string expressions",
-    );
+    assert_eq!(output.stdout, b"count: 42");
 }
 
 #[test]
-fn stage_11g_rejects_string_parameters_and_returns() {
-    let parameter = unsupported(
-        r#"function greet(string $name): void
+fn stage_16_accepts_string_parameters_and_returns() {
+    let output = interpret(
+        r#"function greet(string $name): string
 {
-    echo "Hello";
+    return "Hello " . $name;
 }
 
 function main(): void
 {
+    echo greet("Doria");
 }
 "#,
     );
-    assert_stage_11g_unsupported(&parameter, "supports scalar parameters");
-
-    let return_type = unsupported(
-        r#"function title(): string
-{
-    return "Doria";
-}
-
-function main(): void
-{
-}
-"#,
-    );
-    assert_stage_11g_unsupported(&return_type, "supports scalar and void returns");
+    assert_eq!(output.stdout, b"Hello Doria");
 }
 
 #[test]
@@ -3202,7 +3174,8 @@ fn stage_11h_supports_string_echo_inside_int_returning_functions() {
     ] {
         let program = lower(source);
         assert!(program.functions.iter().any(|function| {
-            function.return_type == ReturnType::Value(ScalarType::Integer(DEFAULT_INT))
+            function.return_type
+                == ReturnType::Value(Type::Scalar(ScalarType::Integer(DEFAULT_INT)))
                 && function.blocks.iter().any(|block| {
                     block.statements.iter().any(|statement| {
                         matches!(

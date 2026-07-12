@@ -13,7 +13,9 @@ const PHP_INTEGER_UNSUPPORTED_CODE: &str = "B1301";
 pub fn generate(program: &Program) -> Result<String, BackendError> {
     validate_program(program)?;
 
-    let mut output = String::from("<?php\n\n");
+    let mut output = String::from(
+        "<?php\n\nfunction __doria_display(string|int|float|bool $value): string\n{\n    if (is_bool($value)) { return $value ? 'true' : 'false'; }\n    if (is_float($value)) {\n        if (is_nan($value)) { return 'NaN'; }\n        if ($value === INF) { return 'Infinity'; }\n        if ($value === -INF) { return '-Infinity'; }\n        if ($value == 0.0) { return fdiv(1.0, $value) < 0.0 ? '-0' : '0'; }\n        return json_encode($value, JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR);\n    }\n    return (string) $value;\n}\n\n",
+    );
     let mut scopes = PhpNameScopes::new();
     for item in &program.items {
         emit_item(item, &mut output, 0, &mut scopes);
@@ -640,7 +642,7 @@ fn emit_statement(
             writeln(
                 output,
                 indent,
-                &format!("echo {};", emit_expr(expr, scopes)),
+                &format!("echo __doria_display({});", emit_expr(expr, scopes)),
             );
         }
         Stmt::Return { expr, .. } => {
@@ -1070,6 +1072,11 @@ fn emit_expr(expr: &Expr, scopes: &PhpNameScopes) -> String {
                 emit_expr(left, scopes),
                 emit_expr(right, scopes)
             ),
+            BinaryOp::Concat => format!(
+                "__doria_display({}) . __doria_display({})",
+                emit_expr(left, scopes),
+                emit_expr(right, scopes)
+            ),
             _ => format!(
                 "{} {} {}",
                 emit_expr(left, scopes),
@@ -1098,7 +1105,7 @@ fn emit_interpolated_string(parts: &[InterpolatedStringPart], scopes: &PhpNameSc
             }
             InterpolatedStringPart::Expr(expr) => {
                 has_expr = true;
-                emitted.push(emit_expr(expr, scopes));
+                emitted.push(format!("__doria_display({})", emit_expr(expr, scopes)));
             }
         }
     }

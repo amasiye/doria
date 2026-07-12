@@ -37,7 +37,7 @@ function main(): int
 
     assert_eq!(
         program.functions[0].return_type,
-        ReturnType::Value(ScalarType::Integer(IntegerType::UInt64))
+        ReturnType::Value(Type::Scalar(ScalarType::Integer(IntegerType::UInt64)))
     );
     assert_eq!(
         program.functions[0].locals[0].ty,

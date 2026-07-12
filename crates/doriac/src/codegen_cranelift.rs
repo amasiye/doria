@@ -14,7 +14,11 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use crate::backend::BackendError;
 use crate::mir;
 use crate::mir_validation;
-use crate::native_abi::function_symbol;
+use crate::native_abi::{
+    function_symbol, STRING_COMPARE, STRING_CONCAT, STRING_DATA, STRING_FROM_BOOL, STRING_FROM_F32,
+    STRING_FROM_F64, STRING_FROM_I64, STRING_FROM_U64, STRING_FROM_UTF8, STRING_LENGTH,
+    STRING_RELEASE, STRING_RETAIN, STRING_WRITE_STDOUT,
+};
 use crate::numeric::{FloatType, FloatValue, IntegerPanic, IntegerType, IntegerValue};
 
 const RUNTIME_RETURNED_TRAP: u8 = 1;
@@ -77,12 +81,15 @@ fn function_signature(
         .params
         .push(AbiParam::new(module.target_config().pointer_type()));
     for parameter in &function.params {
-        signature
-            .params
-            .push(scalar_abi_param(scalar_local_type(function, *parameter)?));
+        signature.params.push(type_abi_param(
+            local_in(function, *parameter)?.ty,
+            module.target_config().pointer_type(),
+        ));
     }
     if let mir::ReturnType::Value(ty) = function.return_type {
-        signature.returns.push(scalar_abi_param(ty));
+        signature
+            .returns
+            .push(type_abi_param(ty, module.target_config().pointer_type()));
     }
     Ok(signature)
 }
@@ -124,6 +131,13 @@ fn scalar_abi_param(ty: mir::ScalarType) -> AbiParam {
     }
 }
 
+fn type_abi_param(ty: mir::Type, pointer_type: ClifType) -> AbiParam {
+    match ty {
+        mir::Type::Scalar(ty) => scalar_abi_param(ty),
+        mir::Type::String => AbiParam::new(pointer_type),
+    }
+}
+
 fn scalar_storage_bytes(ty: mir::ScalarType) -> u32 {
     match ty {
         mir::ScalarType::Integer(ty) => ty.storage_bytes(),
@@ -142,7 +156,6 @@ fn define_function(
         .get(function.id.0)
         .ok_or_else(|| malformed_mir(format!("function{} was not declared", function.id.0)))?;
     let signature = function_signature(module, function)?;
-    let string_values = resolve_string_locals(function)?;
     let mut context = module.make_context();
     context.func.signature = signature;
     let mut builder_context = FunctionBuilderContext::new();
@@ -169,7 +182,11 @@ fn define_function(
                         bytes.trailing_zeros() as u8,
                     )))
                 }
-                mir::Type::String => None,
+                mir::Type::String => Some(builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    u32::from(module.target_config().pointer_bytes()),
+                    module.target_config().pointer_bytes().trailing_zeros() as u8,
+                ))),
             })
             .collect::<Vec<_>>();
         let pointer_type = module.target_config().pointer_type();
@@ -181,7 +198,7 @@ fn define_function(
         ));
 
         builder.switch_to_block(entry);
-        initialize_scalar_locals(&mut builder, function, &local_slots)?;
+        initialize_locals(&mut builder, function, &local_slots, pointer_type)?;
         bind_parameters(&mut builder, function, &local_slots, entry)?;
         let parent_frame = builder.block_params(entry)[0];
         let function_name = define_named_data(
@@ -207,10 +224,10 @@ fn define_function(
             program,
             function_ids,
             &local_slots,
-            &string_values,
             function.id,
             current_frame,
         );
+        retain_string_parameters(&mut builder, function, &mut resources)?;
         lower_block(
             &mut builder,
             &function.blocks[function.entry_block.0],
@@ -236,24 +253,25 @@ fn define_function(
     Ok(())
 }
 
-fn initialize_scalar_locals(
+fn initialize_locals(
     builder: &mut FunctionBuilder,
     function: &mir::Function,
     slots: &[Option<StackSlot>],
+    pointer_type: ClifType,
 ) -> Result<(), BackendError> {
     for local in &function.locals {
-        let mir::Type::Scalar(ty) = local.ty else {
-            continue;
-        };
-        let zero = match ty {
-            mir::ScalarType::Integer(ty) => builder.ins().iconst(clif_integer_type(ty), 0),
-            mir::ScalarType::Float(FloatType::Float32) => {
+        let zero = match local.ty {
+            mir::Type::Scalar(mir::ScalarType::Integer(ty)) => {
+                builder.ins().iconst(clif_integer_type(ty), 0)
+            }
+            mir::Type::Scalar(mir::ScalarType::Float(FloatType::Float32)) => {
                 builder.ins().f32const(Ieee32::with_bits(0))
             }
-            mir::ScalarType::Float(FloatType::Float64) => {
+            mir::Type::Scalar(mir::ScalarType::Float(FloatType::Float64)) => {
                 builder.ins().f64const(Ieee64::with_bits(0))
             }
-            mir::ScalarType::Bool => builder.ins().iconst(types::I8, 0),
+            mir::Type::Scalar(mir::ScalarType::Bool) => builder.ins().iconst(types::I8, 0),
+            mir::Type::String => builder.ins().iconst(pointer_type, 0),
         };
         builder
             .ins()
@@ -272,6 +290,44 @@ fn bind_parameters(
     for (parameter, value) in function.params.iter().zip(params.into_iter().skip(1)) {
         let slot = local_slot(slots, *parameter)?;
         builder.ins().stack_store(value, slot, 0);
+    }
+    Ok(())
+}
+
+fn retain_string_parameters(
+    builder: &mut FunctionBuilder,
+    function: &mir::Function,
+    resources: &mut LoweringResources<'_, '_>,
+) -> Result<(), BackendError> {
+    let pointer = resources.module.target_config().pointer_type();
+    for parameter in &function.params {
+        if local_in(function, *parameter)?.ty == mir::Type::String {
+            let slot = local_slot(resources.local_slots, *parameter)?;
+            let value = builder.ins().stack_load(pointer, slot, 0);
+            let retained = retain_string(builder, value, resources)?;
+            builder.ins().stack_store(retained, slot, 0);
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_string_locals(
+    builder: &mut FunctionBuilder,
+    resources: &mut LoweringResources<'_, '_>,
+) -> Result<(), BackendError> {
+    let pointer = resources.module.target_config().pointer_type();
+    let function = function_in(resources.program, resources.function_id)?;
+    let string_locals = function
+        .locals
+        .iter()
+        .filter(|local| local.ty == mir::Type::String)
+        .map(|local| local.id)
+        .collect::<Vec<_>>();
+    for local in string_locals {
+        let value = builder
+            .ins()
+            .stack_load(pointer, local_slot(resources.local_slots, local)?, 0);
+        release_string(builder, value, resources)?;
     }
     Ok(())
 }
@@ -307,9 +363,9 @@ fn define_process_main(
         runtime_signature.params.push(AbiParam::new(pointer_type));
         runtime_signature.returns.push(AbiParam::new(types::I32));
         let runtime_symbol = match entry.return_type {
-            mir::ReturnType::Value(mir::ScalarType::Integer(IntegerType::Int64)) => {
-                "dr_v1_main_int"
-            }
+            mir::ReturnType::Value(mir::Type::Scalar(mir::ScalarType::Integer(
+                IntegerType::Int64,
+            ))) => "dr_v1_main_int",
             mir::ReturnType::Void => "dr_v1_main_void",
             mir::ReturnType::Value(other) => {
                 return Err(malformed_mir(format!(
@@ -339,9 +395,9 @@ struct LoweringResources<'module, 'program> {
     program: &'program mir::Program,
     function_ids: &'program [FuncId],
     local_slots: &'program [Option<StackSlot>],
-    string_values: &'program HashMap<mir::LocalId, Vec<u8>>,
     write_stdout_func_id: Option<FuncId>,
     panic_func_id: Option<FuncId>,
+    runtime_functions: HashMap<&'static str, FuncId>,
     next_data_id: usize,
     function_id: mir::FunctionId,
     current_frame: Value,
@@ -353,7 +409,6 @@ impl<'module, 'program> LoweringResources<'module, 'program> {
         program: &'program mir::Program,
         function_ids: &'program [FuncId],
         local_slots: &'program [Option<StackSlot>],
-        string_values: &'program HashMap<mir::LocalId, Vec<u8>>,
         function_id: mir::FunctionId,
         current_frame: Value,
     ) -> Self {
@@ -362,9 +417,9 @@ impl<'module, 'program> LoweringResources<'module, 'program> {
             program,
             function_ids,
             local_slots,
-            string_values,
             write_stdout_func_id: None,
             panic_func_id: None,
+            runtime_functions: HashMap::new(),
             next_data_id: 0,
             function_id,
             current_frame,
@@ -404,6 +459,30 @@ impl<'module, 'program> LoweringResources<'module, 'program> {
         self.panic_func_id = Some(id);
         Ok(id)
     }
+
+    fn declare_runtime(
+        &mut self,
+        name: &'static str,
+        params: &[ClifType],
+        result: Option<ClifType>,
+    ) -> Result<FuncId, BackendError> {
+        if let Some(id) = self.runtime_functions.get(name) {
+            return Ok(*id);
+        }
+        let mut signature = self.module.make_signature();
+        signature
+            .params
+            .extend(params.iter().copied().map(AbiParam::new));
+        if let Some(result) = result {
+            signature.returns.push(AbiParam::new(result));
+        }
+        let id = self
+            .module
+            .declare_function(name, Linkage::Import, &signature)
+            .map_err(|error| backend_failure(error.to_string()))?;
+        self.runtime_functions.insert(name, id);
+        Ok(id)
+    }
 }
 
 fn lower_block(
@@ -439,12 +518,18 @@ fn lower_statement(
                     builder.ins().stack_store(value, slot, 0);
                 }
                 mir::Type::String => {
-                    if !matches!(value, mir::Rvalue::String(_)) {
+                    let mir::Rvalue::String(expression) = value else {
                         return Err(malformed_mir(format!(
                             "string local local{} has a non-string assignment",
                             target.0
                         )));
-                    }
+                    };
+                    let new_value = lower_string_expression(builder, expression, resources)?;
+                    let slot = local_slot(resources.local_slots, *target)?;
+                    let pointer_type = resources.module.target_config().pointer_type();
+                    let old_value = builder.ins().stack_load(pointer_type, slot, 0);
+                    release_string(builder, old_value, resources)?;
+                    builder.ins().stack_store(new_value, slot, 0);
                 }
             }
         }
@@ -452,14 +537,23 @@ fn lower_statement(
             lower_echo_bytes(builder, value.as_bytes(), resources)?;
         }
         mir::Statement::EchoString(value) => {
-            let bytes = resolve_string_expression(value, resources.string_values)?;
-            lower_echo_bytes(builder, &bytes, resources)?;
+            let string = lower_string_expression(builder, value, resources)?;
+            let pointer_type = resources.module.target_config().pointer_type();
+            let write_id = resources.declare_runtime(
+                STRING_WRITE_STDOUT,
+                &[pointer_type, pointer_type],
+                None,
+            )?;
+            let write = resources
+                .module
+                .declare_func_in_func(write_id, builder.func);
+            builder
+                .ins()
+                .call(write, &[resources.current_frame, string]);
+            release_string(builder, string, resources)?;
         }
         mir::Statement::CallVoid { function, args } => {
-            let mut values = vec![resources.current_frame];
-            values.extend(lower_call_args(builder, args, resources)?);
-            let callee = declared_function(builder, resources, *function)?;
-            builder.ins().call(callee, &values);
+            let _ = lower_function_call(builder, *function, args, resources)?;
         }
     }
     Ok(())
@@ -473,15 +567,37 @@ fn lower_terminator(
 ) -> Result<(), BackendError> {
     match terminator {
         mir::Terminator::Return(expression) => {
-            let value = lower_value_expression(builder, expression, resources)?;
+            let value = lower_rvalue(builder, expression, resources)?;
+            cleanup_string_locals(builder, resources)?;
             builder.ins().return_(&[value]);
         }
         mir::Terminator::ReturnVoid => {
+            cleanup_string_locals(builder, resources)?;
             builder.ins().return_(&[]);
         }
         mir::Terminator::Panic(message) => {
-            let bytes = resolve_string_expression(message, resources.string_values)?;
-            lower_runtime_panic(builder, &bytes, resources)?;
+            let string = lower_string_expression(builder, message, resources)?;
+            let pointer_type = resources.module.target_config().pointer_type();
+            let data_id =
+                resources.declare_runtime(STRING_DATA, &[pointer_type], Some(pointer_type))?;
+            let len_id =
+                resources.declare_runtime(STRING_LENGTH, &[pointer_type], Some(pointer_type))?;
+            let data_ref = resources.module.declare_func_in_func(data_id, builder.func);
+            let len_ref = resources.module.declare_func_in_func(len_id, builder.func);
+            let data_call = builder.ins().call(data_ref, &[string]);
+            let len_call = builder.ins().call(len_ref, &[string]);
+            let data = builder.inst_results(data_call)[0];
+            let len = builder.inst_results(len_call)[0];
+            let panic_id = resources.declare_panic()?;
+            let panic = resources
+                .module
+                .declare_func_in_func(panic_id, builder.func);
+            builder
+                .ins()
+                .call(panic, &[resources.current_frame, data, len]);
+            builder
+                .ins()
+                .trap(TrapCode::unwrap_user(RUNTIME_RETURNED_TRAP));
         }
         mir::Terminator::Unreachable => {
             builder
@@ -515,6 +631,159 @@ fn lower_value_expression(
         mir::ValueExpression::Integer(value) => lower_integer_expression(builder, value, resources),
         mir::ValueExpression::Float(value) => lower_float_expression(builder, value, resources),
         mir::ValueExpression::Bool(value) => lower_condition_value(builder, value, resources),
+    }
+}
+
+fn lower_rvalue(
+    builder: &mut FunctionBuilder,
+    expression: &mir::Rvalue,
+    resources: &mut LoweringResources<'_, '_>,
+) -> Result<Value, BackendError> {
+    match expression {
+        mir::Rvalue::Value(value) => lower_value_expression(builder, value, resources),
+        mir::Rvalue::String(value) => lower_string_expression(builder, value, resources),
+    }
+}
+
+fn runtime_call(
+    builder: &mut FunctionBuilder,
+    name: &'static str,
+    params: &[ClifType],
+    result: Option<ClifType>,
+    values: &[Value],
+    resources: &mut LoweringResources<'_, '_>,
+) -> Result<Option<Value>, BackendError> {
+    let id = resources.declare_runtime(name, params, result)?;
+    let reference = resources.module.declare_func_in_func(id, builder.func);
+    let call = builder.ins().call(reference, values);
+    Ok(builder.inst_results(call).first().copied())
+}
+
+fn retain_string(
+    builder: &mut FunctionBuilder,
+    value: Value,
+    resources: &mut LoweringResources<'_, '_>,
+) -> Result<Value, BackendError> {
+    let pointer = resources.module.target_config().pointer_type();
+    runtime_call(
+        builder,
+        STRING_RETAIN,
+        &[pointer],
+        Some(pointer),
+        &[value],
+        resources,
+    )?
+    .ok_or_else(|| backend_failure("string retain produced no result"))
+}
+
+fn release_string(
+    builder: &mut FunctionBuilder,
+    value: Value,
+    resources: &mut LoweringResources<'_, '_>,
+) -> Result<(), BackendError> {
+    let pointer = resources.module.target_config().pointer_type();
+    runtime_call(
+        builder,
+        STRING_RELEASE,
+        &[pointer],
+        None,
+        &[value],
+        resources,
+    )?;
+    Ok(())
+}
+
+fn lower_string_expression(
+    builder: &mut FunctionBuilder,
+    expression: &mir::StringExpression,
+    resources: &mut LoweringResources<'_, '_>,
+) -> Result<Value, BackendError> {
+    let pointer = resources.module.target_config().pointer_type();
+    match expression {
+        mir::StringExpression::Literal(value) => {
+            let data = define_data(builder, value.as_bytes(), resources)?;
+            let length = builder.ins().iconst(pointer, value.len() as i64);
+            runtime_call(
+                builder,
+                STRING_FROM_UTF8,
+                &[pointer, pointer],
+                Some(pointer),
+                &[data, length],
+                resources,
+            )?
+            .ok_or_else(|| backend_failure("string allocation produced no result"))
+        }
+        mir::StringExpression::Local(local) => {
+            let value =
+                builder
+                    .ins()
+                    .stack_load(pointer, local_slot(resources.local_slots, *local)?, 0);
+            retain_string(builder, value, resources)
+        }
+        mir::StringExpression::Concat(parts) => {
+            let mut parts = parts.iter();
+            let Some(first) = parts.next() else {
+                return lower_string_expression(
+                    builder,
+                    &mir::StringExpression::Literal(String::new()),
+                    resources,
+                );
+            };
+            let mut value = lower_string_expression(builder, first, resources)?;
+            for part in parts {
+                let right = lower_string_expression(builder, part, resources)?;
+                let concatenated = runtime_call(
+                    builder,
+                    STRING_CONCAT,
+                    &[pointer, pointer],
+                    Some(pointer),
+                    &[value, right],
+                    resources,
+                )?
+                .ok_or_else(|| backend_failure("string concat produced no result"))?;
+                release_string(builder, value, resources)?;
+                release_string(builder, right, resources)?;
+                value = concatenated;
+            }
+            Ok(value)
+        }
+        mir::StringExpression::Display(value) => {
+            let scalar = lower_value_expression(builder, value, resources)?;
+            let (name, parameter_type, argument) = match value.ty() {
+                mir::ScalarType::Integer(ty) if ty.is_signed() => {
+                    let argument = if ty.bit_width() < 64 {
+                        builder.ins().sextend(types::I64, scalar)
+                    } else {
+                        scalar
+                    };
+                    (STRING_FROM_I64, types::I64, argument)
+                }
+                mir::ScalarType::Integer(ty) => {
+                    let argument = if ty.bit_width() < 64 {
+                        builder.ins().uextend(types::I64, scalar)
+                    } else {
+                        scalar
+                    };
+                    (STRING_FROM_U64, types::I64, argument)
+                }
+                mir::ScalarType::Float(FloatType::Float32) => (STRING_FROM_F32, types::F32, scalar),
+                mir::ScalarType::Float(FloatType::Float64) => (STRING_FROM_F64, types::F64, scalar),
+                mir::ScalarType::Bool => (STRING_FROM_BOOL, types::I8, scalar),
+            };
+            runtime_call(
+                builder,
+                name,
+                &[parameter_type],
+                Some(pointer),
+                &[argument],
+                resources,
+            )?
+            .ok_or_else(|| backend_failure("display conversion produced no result"))
+        }
+        mir::StringExpression::Call { function, args } => {
+            lower_function_call(builder, *function, args, resources)?
+                .ok_or_else(|| malformed_mir("string call produced no result"))
+        }
     }
 }
 
@@ -1010,14 +1279,10 @@ fn lower_integer_call(
     builder: &mut FunctionBuilder,
     ty: IntegerType,
     function: mir::FunctionId,
-    args: &[mir::ValueExpression],
+    args: &[mir::Rvalue],
     resources: &mut LoweringResources<'_, '_>,
 ) -> Result<Value, BackendError> {
-    let mut values = vec![resources.current_frame];
-    values.extend(lower_call_args(builder, args, resources)?);
-    let callee = declared_function(builder, resources, function)?;
-    let call = builder.ins().call(callee, &values);
-    builder.inst_results(call).first().copied().ok_or_else(|| {
+    lower_function_call(builder, function, args, resources)?.ok_or_else(|| {
         malformed_mir(format!(
             "{ty} call to function{} produced no result",
             function.0,
@@ -1025,30 +1290,56 @@ fn lower_integer_call(
     })
 }
 
+struct LoweredCallArgs {
+    values: Vec<Value>,
+    owned_strings: Vec<Value>,
+}
+
 fn lower_call_args(
     builder: &mut FunctionBuilder,
-    args: &[mir::ValueExpression],
+    args: &[mir::Rvalue],
     resources: &mut LoweringResources<'_, '_>,
-) -> Result<Vec<Value>, BackendError> {
-    args.iter()
-        .map(|argument| lower_value_expression(builder, argument, resources))
-        .collect()
+) -> Result<LoweredCallArgs, BackendError> {
+    let mut values = Vec::with_capacity(args.len());
+    let mut owned_strings = Vec::new();
+    for argument in args {
+        let value = lower_rvalue(builder, argument, resources)?;
+        if argument.ty() == mir::Type::String {
+            owned_strings.push(value);
+        }
+        values.push(value);
+    }
+    Ok(LoweredCallArgs {
+        values,
+        owned_strings,
+    })
+}
+
+fn lower_function_call(
+    builder: &mut FunctionBuilder,
+    function: mir::FunctionId,
+    args: &[mir::Rvalue],
+    resources: &mut LoweringResources<'_, '_>,
+) -> Result<Option<Value>, BackendError> {
+    let lowered = lower_call_args(builder, args, resources)?;
+    let mut values = vec![resources.current_frame];
+    values.extend(lowered.values);
+    let callee = declared_function(builder, resources, function)?;
+    let call = builder.ins().call(callee, &values);
+    let result = builder.inst_results(call).first().copied();
+    for string in lowered.owned_strings {
+        release_string(builder, string, resources)?;
+    }
+    Ok(result)
 }
 
 fn lower_scalar_call(
     builder: &mut FunctionBuilder,
     function: mir::FunctionId,
-    args: &[mir::ValueExpression],
+    args: &[mir::Rvalue],
     resources: &mut LoweringResources<'_, '_>,
 ) -> Result<Value, BackendError> {
-    let mut values = vec![resources.current_frame];
-    values.extend(lower_call_args(builder, args, resources)?);
-    let callee = declared_function(builder, resources, function)?;
-    let call = builder.ins().call(callee, &values);
-    builder
-        .inst_results(call)
-        .first()
-        .copied()
+    lower_function_call(builder, function, args, resources)?
         .ok_or_else(|| malformed_mir(format!("call to function{} produced no result", function.0)))
 }
 
@@ -1095,6 +1386,33 @@ fn lower_condition_to_branch(
                     _ => return Err(malformed_mir("ordered bool comparison is invalid")),
                 },
             };
+            builder.ins().brif(value, then_block, &[], else_block, &[]);
+        }
+        mir::BoolExpression::StringCompare { op, left, right } => {
+            let pointer = resources.module.target_config().pointer_type();
+            let left = lower_string_expression(builder, left, resources)?;
+            let right = lower_string_expression(builder, right, resources)?;
+            let compared = runtime_call(
+                builder,
+                STRING_COMPARE,
+                &[pointer, pointer],
+                Some(types::I32),
+                &[left, right],
+                resources,
+            )?
+            .ok_or_else(|| backend_failure("string comparison produced no result"))?;
+            release_string(builder, left, resources)?;
+            release_string(builder, right, resources)?;
+            let zero = builder.ins().iconst(types::I32, 0);
+            let code = match op {
+                mir::CompareOp::Equal => IntCC::Equal,
+                mir::CompareOp::NotEqual => IntCC::NotEqual,
+                mir::CompareOp::Less => IntCC::SignedLessThan,
+                mir::CompareOp::LessEqual => IntCC::SignedLessThanOrEqual,
+                mir::CompareOp::Greater => IntCC::SignedGreaterThan,
+                mir::CompareOp::GreaterEqual => IntCC::SignedGreaterThanOrEqual,
+            };
+            let value = builder.ins().icmp(code, compared, zero);
             builder.ins().brif(value, then_block, &[], else_block, &[]);
         }
         mir::BoolExpression::Not(condition) => {
@@ -1217,6 +1535,7 @@ fn lower_bool_operand(
     }
 }
 
+#[allow(dead_code)]
 fn resolve_string_locals(
     function: &mir::Function,
 ) -> Result<HashMap<mir::LocalId, Vec<u8>>, BackendError> {
@@ -1302,9 +1621,13 @@ fn resolve_string_expression_from_definitions(
             }
             Ok(value)
         }
+        mir::StringExpression::Display(_) | mir::StringExpression::Call { .. } => {
+            Err(malformed_mir("runtime string expression is not a constant"))
+        }
     }
 }
 
+#[allow(dead_code)]
 fn resolve_string_expression(
     expression: &mir::StringExpression,
     values: &HashMap<mir::LocalId, Vec<u8>>,
@@ -1323,6 +1646,9 @@ fn resolve_string_expression(
                 value.extend(resolve_string_expression(part, values)?);
             }
             Ok(value)
+        }
+        mir::StringExpression::Display(_) | mir::StringExpression::Call { .. } => {
+            Err(malformed_mir("runtime string expression is not a constant"))
         }
     }
 }
@@ -1430,20 +1756,6 @@ fn local_in(function: &mir::Function, id: mir::LocalId) -> Result<&mir::Local, B
         .get(id.0)
         .filter(|local| local.id == id)
         .ok_or_else(|| malformed_mir(format!("LocalId local{} does not exist", id.0)))
-}
-
-fn scalar_local_type(
-    function: &mir::Function,
-    id: mir::LocalId,
-) -> Result<mir::ScalarType, BackendError> {
-    let local = local_in(function, id)?;
-    let mir::Type::Scalar(ty) = local.ty else {
-        return Err(malformed_mir(format!(
-            "LocalId local{} is not a scalar local",
-            id.0
-        )));
-    };
-    Ok(ty)
 }
 
 fn local_definition(

@@ -1376,6 +1376,17 @@ impl<'program> Checker<'program> {
             Stmt::Echo { expr, .. } => {
                 self.check_expr(expr, scopes, method_context);
                 self.check_mixed_value_operation(expr, "echo", scopes, method_context);
+                let ty = self.infer_expr_type(expr, scopes, method_context);
+                if !self.is_display_convertible_type(ty) {
+                    self.diagnostics.push(Diagnostic::new(
+                        "E0445",
+                        format!(
+                            "value of type `{}` cannot be displayed by echo",
+                            self.types.display(ty)
+                        ),
+                        expr.span(),
+                    ));
+                }
             }
             Stmt::Expr { expr, .. } => match expr {
                 Expr::FunctionCall { name, args, span } if name == "panic" => {
@@ -2768,27 +2779,43 @@ impl<'program> Checker<'program> {
     ) {
         let left_ty = self.infer_expr_type(left, scopes, method_context);
         let right_ty = self.infer_expr_type(right, scopes, method_context);
-        if self.is_string_or_recovery_type(left_ty) && self.is_string_or_recovery_type(right_ty) {
+        let has_string = matches!(
+            self.types.kind(left_ty),
+            TypeKind::String | TypeKind::Unknown
+        ) || matches!(
+            self.types.kind(right_ty),
+            TypeKind::String | TypeKind::Unknown
+        );
+        if has_string
+            && self.is_display_convertible_type(left_ty)
+            && self.is_display_convertible_type(right_ty)
+        {
             return;
         }
 
-        self.diagnostics.push(Diagnostic::new(
-            "E0425",
-            format!(
-                "string concatenation operator `.` requires `string` operands, got `{}` and `{}`",
-                self.types.display(left_ty),
-                self.types.display(right_ty)
-            ),
-            span,
-        ));
+        self.diagnostics.push(
+            Diagnostic::new(
+                "E0425",
+                "concatenation requires at least one string operand",
+                span,
+            )
+            .with_help("use + for numeric addition or add a string/interpolation context"),
+        );
     }
 
     fn is_bool_or_recovery_type(&self, ty: TypeId) -> bool {
         matches!(self.types.kind(ty), TypeKind::Bool | TypeKind::Unknown)
     }
 
-    fn is_string_or_recovery_type(&self, ty: TypeId) -> bool {
-        matches!(self.types.kind(ty), TypeKind::String | TypeKind::Unknown)
+    fn is_display_convertible_type(&self, ty: TypeId) -> bool {
+        matches!(
+            self.types.kind(ty),
+            TypeKind::String
+                | TypeKind::Integer(_)
+                | TypeKind::Float(_)
+                | TypeKind::Bool
+                | TypeKind::Unknown
+        )
     }
 
     fn is_equality_compatible(&self, left: TypeId, right: TypeId) -> bool {
@@ -3052,7 +3079,6 @@ impl<'program> Checker<'program> {
                 | TypeKind::Integer(_)
                 | TypeKind::Float(_)
                 | TypeKind::Bool
-                | TypeKind::Null
                 | TypeKind::Unknown
         )
     }
@@ -3332,40 +3358,6 @@ impl<'program> Checker<'program> {
                 ),
                 message.span(),
             ));
-            return;
-        }
-
-        if !self.is_compile_time_panic_message(message, scopes) {
-            self.diagnostics.push(
-                Diagnostic::new(
-                    "E0435",
-                    "panic message must be a compile-time-known string expression in Stage 12",
-                    message.span(),
-                )
-                .with_help(
-                    "use a string literal, readonly string local, or concatenation of those values",
-                ),
-            );
-        }
-    }
-
-    fn is_compile_time_panic_message(&self, expr: &Expr, scopes: &ScopeStack) -> bool {
-        match expr {
-            Expr::String { .. } => true,
-            Expr::Variable { name, .. } => scopes
-                .lookup(name)
-                .is_some_and(|binding| binding.string_constant.is_some()),
-            Expr::Grouped { expr, .. } => self.is_compile_time_panic_message(expr, scopes),
-            Expr::Binary {
-                left,
-                op: BinaryOp::Concat,
-                right,
-                ..
-            } => {
-                self.is_compile_time_panic_message(left, scopes)
-                    && self.is_compile_time_panic_message(right, scopes)
-            }
-            _ => false,
         }
     }
 
@@ -4554,10 +4546,22 @@ impl<'program> Checker<'program> {
 
         let left_kind = self.types.kind(left).clone();
         let right_kind = self.types.kind(right).clone();
-        match (left_kind, right_kind) {
-            (TypeKind::String, TypeKind::String) => self.types.intern(TypeKind::String),
+        match (&left_kind, &right_kind) {
+            (TypeKind::String, right) if Self::is_display_kind(right) => {
+                self.types.intern(TypeKind::String)
+            }
+            (left, TypeKind::String) if Self::is_display_kind(left) => {
+                self.types.intern(TypeKind::String)
+            }
             _ => self.types.intern(TypeKind::Heterogeneous),
         }
+    }
+
+    fn is_display_kind(kind: &TypeKind) -> bool {
+        matches!(
+            kind,
+            TypeKind::String | TypeKind::Integer(_) | TypeKind::Float(_) | TypeKind::Bool
+        )
     }
 
     fn infer_logical_binary_type(&mut self, left: TypeId, right: TypeId) -> TypeId {

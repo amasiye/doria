@@ -10,7 +10,7 @@ use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetData, TargetMachine,
 };
-use inkwell::types::{BasicType, BasicTypeEnum, IntType};
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, IntType};
 use inkwell::values::{
     BasicMetadataValueEnum, BasicValueEnum, FloatValue as LlvmFloatValue, FunctionValue, IntValue,
     PointerValue, UnnamedAddress,
@@ -20,7 +20,11 @@ use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 use crate::backend::BackendError;
 use crate::mir;
 use crate::mir_validation;
-use crate::native_abi::function_symbol;
+use crate::native_abi::{
+    function_symbol, STRING_COMPARE, STRING_CONCAT, STRING_DATA, STRING_FROM_BOOL, STRING_FROM_F32,
+    STRING_FROM_F64, STRING_FROM_I64, STRING_FROM_U64, STRING_FROM_UTF8, STRING_LENGTH,
+    STRING_RELEASE, STRING_RETAIN, STRING_WRITE_STDOUT,
+};
 use crate::numeric::{FloatType, FloatValue, IntegerPanic, IntegerType, IntegerValue};
 
 pub fn lower_mir_to_object(program: &mir::Program) -> Result<Vec<u8>, BackendError> {
@@ -106,17 +110,11 @@ fn function_type<'ctx>(
     let mut parameters = vec![context.ptr_type(AddressSpace::default()).into()];
     for parameter in &function.params {
         let local = local_in(function, *parameter)?;
-        let mir::Type::Scalar(ty) = local.ty else {
-            return Err(malformed_mir(format!(
-                "function {} parameter local{} is not scalar",
-                function.name, parameter.0
-            )));
-        };
-        parameters.push(scalar_type(context, ty).into());
+        parameters.push(llvm_type(context, local.ty).into());
     }
     Ok(match function.return_type {
         mir::ReturnType::Void => context.void_type().fn_type(&parameters, false),
-        mir::ReturnType::Value(ty) => scalar_type(context, ty).fn_type(&parameters, false),
+        mir::ReturnType::Value(ty) => llvm_type(context, ty).fn_type(&parameters, false),
     })
 }
 
@@ -125,7 +123,9 @@ fn apply_function_abi_attributes(
     llvm_function: FunctionValue<'_>,
     function: &mir::Function,
 ) -> Result<(), BackendError> {
-    if let mir::ReturnType::Value(mir::ScalarType::Integer(ty)) = function.return_type {
+    if let mir::ReturnType::Value(mir::Type::Scalar(mir::ScalarType::Integer(ty))) =
+        function.return_type
+    {
         apply_integer_extension_attribute(context, llvm_function, AttributeLoc::Return, ty);
     }
     for (index, parameter) in function.params.iter().enumerate() {
@@ -186,7 +186,17 @@ fn define_function<'ctx>(
                 build(builder.build_store(slot, scalar_zero(context, ty)))?;
                 local_slots.push(Some(slot));
             }
-            mir::Type::String => local_slots.push(None),
+            mir::Type::String => {
+                let slot = build(builder.build_alloca(
+                    context.ptr_type(AddressSpace::default()),
+                    &format!("local{}", local.id.0),
+                ))?;
+                build(
+                    builder
+                        .build_store(slot, context.ptr_type(AddressSpace::default()).const_null()),
+                )?;
+                local_slots.push(Some(slot));
+            }
         }
     }
     for (index, parameter) in function.params.iter().enumerate() {
@@ -222,9 +232,6 @@ fn define_function<'ctx>(
         length_slot,
         usize_type.const_int(function.name.len() as u64, false),
     ))?;
-    build(builder.build_unconditional_branch(block_for(&blocks, function.entry_block)?))?;
-
-    let string_values = resolve_string_locals(function)?;
     let mut lowerer = FunctionLowerer {
         context,
         module,
@@ -235,10 +242,15 @@ fn define_function<'ctx>(
         functions,
         local_slots,
         blocks,
-        string_values,
         current_frame: frame,
         next_data_id: 0,
     };
+    lowerer.retain_string_parameters()?;
+    build(
+        lowerer
+            .builder
+            .build_unconditional_branch(block_for(&lowerer.blocks, function.entry_block)?),
+    )?;
     for block in &function.blocks {
         lowerer
             .builder
@@ -268,7 +280,9 @@ fn define_process_main<'ctx>(
     builder.position_at_end(block);
     let pointer_type = context.ptr_type(AddressSpace::default());
     let runtime_name = match entry.return_type {
-        mir::ReturnType::Value(mir::ScalarType::Integer(IntegerType::Int64)) => "dr_v1_main_int",
+        mir::ReturnType::Value(mir::Type::Scalar(mir::ScalarType::Integer(IntegerType::Int64))) => {
+            "dr_v1_main_int"
+        }
         mir::ReturnType::Void => "dr_v1_main_void",
         mir::ReturnType::Value(other) => {
             return Err(malformed_mir(format!(
@@ -303,7 +317,6 @@ struct FunctionLowerer<'ctx, 'program> {
     functions: &'program [FunctionValue<'ctx>],
     local_slots: Vec<Option<PointerValue<'ctx>>>,
     blocks: Vec<BasicBlock<'ctx>>,
-    string_values: HashMap<mir::LocalId, Vec<u8>>,
     current_frame: PointerValue<'ctx>,
     next_data_id: usize,
 }
@@ -335,19 +348,36 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                         )?;
                     }
                     mir::Type::String => {
-                        if !matches!(value, mir::Rvalue::String(_)) {
+                        let mir::Rvalue::String(expression) = value else {
                             return Err(malformed_mir(format!(
                                 "string local local{} has a non-string assignment",
                                 target.0
                             )));
-                        }
+                        };
+                        let value = self.lower_string_expression(expression)?;
+                        let slot = local_slot(&self.local_slots, *target)?;
+                        let old = build(self.builder.build_load(
+                            self.context.ptr_type(AddressSpace::default()),
+                            slot,
+                            "string.old",
+                        ))?
+                        .into_pointer_value();
+                        self.release_string(old)?;
+                        build(self.builder.build_store(slot, value))?;
                     }
                 }
             }
             mir::Statement::EchoStringLiteral(value) => self.lower_echo(value.as_bytes())?,
             mir::Statement::EchoString(value) => {
-                let bytes = resolve_string_expression(value, &self.string_values)?;
-                self.lower_echo(&bytes)?;
+                let value = self.lower_string_expression(value)?;
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let _ = self.call_runtime(
+                    STRING_WRITE_STDOUT,
+                    &[pointer.into(), pointer.into()],
+                    None,
+                    &[self.current_frame.into(), value.into()],
+                )?;
+                self.release_string(value)?;
             }
             mir::Statement::CallVoid { function, args } => {
                 let _ = self.lower_call(*function, args, false)?;
@@ -359,15 +389,42 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
     fn lower_terminator(&mut self, terminator: &mir::Terminator) -> Result<(), BackendError> {
         match terminator {
             mir::Terminator::Return(expression) => {
-                let value = self.lower_value_expression(expression)?;
+                let value = self.lower_rvalue(expression)?;
+                self.cleanup_string_locals()?;
                 build(self.builder.build_return(Some(&value)))?;
             }
             mir::Terminator::ReturnVoid => {
+                self.cleanup_string_locals()?;
                 build(self.builder.build_return(None))?;
             }
             mir::Terminator::Panic(message) => {
-                let bytes = resolve_string_expression(message, &self.string_values)?;
-                self.lower_runtime_panic(&bytes)?;
+                let string = self.lower_string_expression(message)?;
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let data = self
+                    .call_runtime(
+                        STRING_DATA,
+                        &[pointer.into()],
+                        Some(pointer.into()),
+                        &[string.into()],
+                    )?
+                    .ok_or_else(|| backend_failure("string data produced no result"))?;
+                let usize_type = self.context.ptr_sized_int_type(self.target_data, None);
+                let length = self
+                    .call_runtime(
+                        STRING_LENGTH,
+                        &[pointer.into()],
+                        Some(usize_type.into()),
+                        &[string.into()],
+                    )?
+                    .ok_or_else(|| backend_failure("string length produced no result"))?;
+                let panic = self.runtime_function(
+                    "dr_v1_panic",
+                    &[pointer.into(), pointer.into(), usize_type.into()],
+                    None,
+                );
+                let values = [self.current_frame.into(), data.into(), length.into()];
+                let _ = build(self.builder.build_call(panic, &values, "panic"))?;
+                build(self.builder.build_unreachable())?;
             }
             mir::Terminator::Unreachable => {
                 build(self.builder.build_unreachable())?;
@@ -401,6 +458,225 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
             }
             mir::ValueExpression::Float(value) => Ok(self.lower_float_expression(value)?.into()),
             mir::ValueExpression::Bool(value) => Ok(self.lower_condition_value(value)?.into()),
+        }
+    }
+
+    fn lower_rvalue(
+        &mut self,
+        expression: &mir::Rvalue,
+    ) -> Result<BasicValueEnum<'ctx>, BackendError> {
+        match expression {
+            mir::Rvalue::Value(value) => self.lower_value_expression(value),
+            mir::Rvalue::String(value) => Ok(self.lower_string_expression(value)?.into()),
+        }
+    }
+
+    fn runtime_function(
+        &self,
+        name: &str,
+        params: &[BasicMetadataTypeEnum<'ctx>],
+        result: Option<BasicTypeEnum<'ctx>>,
+    ) -> FunctionValue<'ctx> {
+        self.module.get_function(name).unwrap_or_else(|| {
+            let ty = match result {
+                Some(result) => result.fn_type(params, false),
+                None => self.context.void_type().fn_type(params, false),
+            };
+            self.module.add_function(name, ty, Some(Linkage::External))
+        })
+    }
+
+    fn call_runtime(
+        &self,
+        name: &str,
+        params: &[BasicMetadataTypeEnum<'ctx>],
+        result: Option<BasicTypeEnum<'ctx>>,
+        values: &[BasicMetadataValueEnum<'ctx>],
+    ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
+        let function = self.runtime_function(name, params, result);
+        let call = build(self.builder.build_call(function, values, name))?;
+        Ok(call.try_as_basic_value().basic())
+    }
+
+    fn release_string(&self, value: PointerValue<'ctx>) -> Result<(), BackendError> {
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        let _ = self.call_runtime(STRING_RELEASE, &[pointer.into()], None, &[value.into()])?;
+        Ok(())
+    }
+
+    fn retain_string(&self, value: PointerValue<'ctx>) -> Result<PointerValue<'ctx>, BackendError> {
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        Ok(self
+            .call_runtime(
+                STRING_RETAIN,
+                &[pointer.into()],
+                Some(pointer.into()),
+                &[value.into()],
+            )?
+            .ok_or_else(|| backend_failure("string retain produced no result"))?
+            .into_pointer_value())
+    }
+
+    fn cleanup_string_locals(&self) -> Result<(), BackendError> {
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        for local in &self.function.locals {
+            if local.ty == mir::Type::String {
+                let value = build(self.builder.build_load(
+                    pointer,
+                    local_slot(&self.local_slots, local.id)?,
+                    "string.cleanup",
+                ))?
+                .into_pointer_value();
+                self.release_string(value)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn retain_string_parameters(&self) -> Result<(), BackendError> {
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        for parameter in &self.function.params {
+            if local_in(self.function, *parameter)?.ty == mir::Type::String {
+                let slot = local_slot(&self.local_slots, *parameter)?;
+                let value = build(self.builder.build_load(pointer, slot, "string.parameter"))?
+                    .into_pointer_value();
+                let retained = self.retain_string(value)?;
+                build(self.builder.build_store(slot, retained))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn lower_string_expression(
+        &mut self,
+        expression: &mir::StringExpression,
+    ) -> Result<PointerValue<'ctx>, BackendError> {
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        let usize_type = self.context.ptr_sized_int_type(self.target_data, None);
+        match expression {
+            mir::StringExpression::Literal(value) => {
+                let data = define_bytes(
+                    self.context,
+                    self.module,
+                    value.as_bytes(),
+                    &format!(
+                        "__doria_string_{}_{}",
+                        self.function.id.0, self.next_data_id
+                    ),
+                );
+                self.next_data_id += 1;
+                Ok(self
+                    .call_runtime(
+                        STRING_FROM_UTF8,
+                        &[pointer.into(), usize_type.into()],
+                        Some(pointer.into()),
+                        &[
+                            data.into(),
+                            usize_type.const_int(value.len() as u64, false).into(),
+                        ],
+                    )?
+                    .ok_or_else(|| backend_failure("string allocation produced no result"))?
+                    .into_pointer_value())
+            }
+            mir::StringExpression::Local(local) => {
+                let value = build(self.builder.build_load(
+                    pointer,
+                    local_slot(&self.local_slots, *local)?,
+                    "string.local",
+                ))?
+                .into_pointer_value();
+                self.retain_string(value)
+            }
+            mir::StringExpression::Concat(parts) => {
+                let mut parts = parts.iter();
+                let Some(first) = parts.next() else {
+                    return self
+                        .lower_string_expression(&mir::StringExpression::Literal(String::new()));
+                };
+                let mut value = self.lower_string_expression(first)?;
+                for part in parts {
+                    let right = self.lower_string_expression(part)?;
+                    let concatenated = self
+                        .call_runtime(
+                            STRING_CONCAT,
+                            &[pointer.into(), pointer.into()],
+                            Some(pointer.into()),
+                            &[value.into(), right.into()],
+                        )?
+                        .ok_or_else(|| backend_failure("string concat produced no result"))?
+                        .into_pointer_value();
+                    self.release_string(value)?;
+                    self.release_string(right)?;
+                    value = concatenated;
+                }
+                Ok(value)
+            }
+            mir::StringExpression::Display(value) => {
+                let scalar = self.lower_value_expression(value)?;
+                let (name, parameter, argument): (
+                    &str,
+                    BasicMetadataTypeEnum<'ctx>,
+                    BasicMetadataValueEnum<'ctx>,
+                ) = match value.ty() {
+                    mir::ScalarType::Integer(ty) if ty.is_signed() => {
+                        let integer = scalar.into_int_value();
+                        let value = if ty.bit_width() < 64 {
+                            build(self.builder.build_int_s_extend(
+                                integer,
+                                self.context.i64_type(),
+                                "display.sext",
+                            ))?
+                        } else {
+                            integer
+                        };
+                        (
+                            STRING_FROM_I64,
+                            self.context.i64_type().into(),
+                            value.into(),
+                        )
+                    }
+                    mir::ScalarType::Integer(ty) => {
+                        let integer = scalar.into_int_value();
+                        let value = if ty.bit_width() < 64 {
+                            build(self.builder.build_int_z_extend(
+                                integer,
+                                self.context.i64_type(),
+                                "display.zext",
+                            ))?
+                        } else {
+                            integer
+                        };
+                        (
+                            STRING_FROM_U64,
+                            self.context.i64_type().into(),
+                            value.into(),
+                        )
+                    }
+                    mir::ScalarType::Float(FloatType::Float32) => (
+                        STRING_FROM_F32,
+                        self.context.f32_type().into(),
+                        scalar.into(),
+                    ),
+                    mir::ScalarType::Float(FloatType::Float64) => (
+                        STRING_FROM_F64,
+                        self.context.f64_type().into(),
+                        scalar.into(),
+                    ),
+                    mir::ScalarType::Bool => (
+                        STRING_FROM_BOOL,
+                        self.context.i8_type().into(),
+                        scalar.into(),
+                    ),
+                };
+                Ok(self
+                    .call_runtime(name, &[parameter], Some(pointer.into()), &[argument])?
+                    .ok_or_else(|| backend_failure("display conversion produced no result"))?
+                    .into_pointer_value())
+            }
+            mir::StringExpression::Call { function, args } => Ok(self
+                .lower_call(*function, args, true)?
+                .ok_or_else(|| malformed_mir("string call produced no result"))?
+                .into_pointer_value()),
         }
     }
 
@@ -1001,7 +1277,7 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
     fn lower_call(
         &mut self,
         function: mir::FunctionId,
-        args: &[mir::ValueExpression],
+        args: &[mir::Rvalue],
         expects_result: bool,
     ) -> Result<Option<BasicValueEnum<'ctx>>, BackendError> {
         let callee = *self
@@ -1010,18 +1286,27 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
             .ok_or_else(|| malformed_mir(format!("function{} does not exist", function.0)))?;
         let mut values = Vec::<BasicMetadataValueEnum<'ctx>>::with_capacity(args.len() + 1);
         values.push(self.current_frame.into());
+        let mut owned_strings = Vec::new();
         for argument in args {
-            values.push(self.lower_value_expression(argument)?.into());
+            let value = self.lower_rvalue(argument)?;
+            if argument.ty() == mir::Type::String {
+                owned_strings.push(value.into_pointer_value());
+            }
+            values.push(value.into());
         }
         let call = build(self.builder.build_call(callee, &values, "call"))?;
         apply_call_abi_attributes(self.context, call, function_in(self.program, function)?)?;
-        if expects_result {
-            Ok(Some(call.try_as_basic_value().basic().ok_or_else(
-                || malformed_mir(format!("call to function{} produced no result", function.0)),
-            )?))
+        let result = if expects_result {
+            Some(call.try_as_basic_value().basic().ok_or_else(|| {
+                malformed_mir(format!("call to function{} produced no result", function.0))
+            })?)
         } else {
-            Ok(None)
+            None
+        };
+        for string in owned_strings {
+            self.release_string(string)?;
         }
+        Ok(result)
     }
 }
 
@@ -1030,7 +1315,9 @@ fn apply_call_abi_attributes(
     call: inkwell::values::CallSiteValue<'_>,
     function: &mir::Function,
 ) -> Result<(), BackendError> {
-    if let mir::ReturnType::Value(mir::ScalarType::Integer(ty)) = function.return_type {
+    if let mir::ReturnType::Value(mir::Type::Scalar(mir::ScalarType::Integer(ty))) =
+        function.return_type
+    {
         apply_call_integer_extension_attribute(context, call, AttributeLoc::Return, ty);
     }
     for (index, parameter) in function.params.iter().enumerate() {
@@ -1115,6 +1402,40 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                         _ => return Err(malformed_mir("ordered bool comparison is invalid")),
                     },
                 };
+                build(
+                    self.builder
+                        .build_conditional_branch(condition, then_block, else_block),
+                )?;
+            }
+            mir::BoolExpression::StringCompare { op, left, right } => {
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let left = self.lower_string_expression(left)?;
+                let right = self.lower_string_expression(right)?;
+                let compared = self
+                    .call_runtime(
+                        STRING_COMPARE,
+                        &[pointer.into(), pointer.into()],
+                        Some(self.context.i32_type().into()),
+                        &[left.into(), right.into()],
+                    )?
+                    .ok_or_else(|| backend_failure("string comparison produced no result"))?
+                    .into_int_value();
+                self.release_string(left)?;
+                self.release_string(right)?;
+                let predicate = match op {
+                    mir::CompareOp::Equal => IntPredicate::EQ,
+                    mir::CompareOp::NotEqual => IntPredicate::NE,
+                    mir::CompareOp::Less => IntPredicate::SLT,
+                    mir::CompareOp::LessEqual => IntPredicate::SLE,
+                    mir::CompareOp::Greater => IntPredicate::SGT,
+                    mir::CompareOp::GreaterEqual => IntPredicate::SGE,
+                };
+                let condition = build(self.builder.build_int_compare(
+                    predicate,
+                    compared,
+                    self.context.i32_type().const_zero(),
+                    "string.compare",
+                ))?;
                 build(
                     self.builder
                         .build_conditional_branch(condition, then_block, else_block),
@@ -1353,6 +1674,13 @@ fn scalar_type(context: &Context, ty: mir::ScalarType) -> BasicTypeEnum<'_> {
     }
 }
 
+fn llvm_type(context: &Context, ty: mir::Type) -> BasicTypeEnum<'_> {
+    match ty {
+        mir::Type::Scalar(ty) => scalar_type(context, ty),
+        mir::Type::String => context.ptr_type(AddressSpace::default()).into(),
+    }
+}
+
 fn scalar_zero(context: &Context, ty: mir::ScalarType) -> BasicValueEnum<'_> {
     scalar_type(context, ty).const_zero()
 }
@@ -1462,6 +1790,7 @@ fn backend_failure(message: impl Into<String>) -> BackendError {
     BackendError::new(format!("backend emission failure: {}", message.into()))
 }
 
+#[allow(dead_code)]
 fn resolve_string_locals(
     function: &mir::Function,
 ) -> Result<HashMap<mir::LocalId, Vec<u8>>, BackendError> {
@@ -1547,9 +1876,13 @@ fn resolve_string_expression_from_definitions(
             }
             Ok(value)
         }
+        mir::StringExpression::Display(_) | mir::StringExpression::Call { .. } => {
+            Err(malformed_mir("runtime string expression is not a constant"))
+        }
     }
 }
 
+#[allow(dead_code)]
 fn resolve_string_expression(
     expression: &mir::StringExpression,
     values: &HashMap<mir::LocalId, Vec<u8>>,
@@ -1568,6 +1901,9 @@ fn resolve_string_expression(
                 value.extend(resolve_string_expression(part, values)?);
             }
             Ok(value)
+        }
+        mir::StringExpression::Display(_) | mir::StringExpression::Call { .. } => {
+            Err(malformed_mir("runtime string expression is not a constant"))
         }
     }
 }

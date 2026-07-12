@@ -16,44 +16,8 @@ fn native_compilation_does_not_execute_an_infinite_program() {
 }
 
 #[test]
-fn native_and_debug_share_remaining_mir_coverage_diagnostics() {
+fn native_and_debug_share_remaining_post_stage16_mir_coverage_diagnostics() {
     for (name, source, expected) in [
-        (
-            "string parameter",
-            r#"function greet(string $name): void
-{
-    echo $name;
-}
-
-function main(): void
-{
-}
-"#,
-            "Stage 14 MIR supports scalar parameters",
-        ),
-        (
-            "string return",
-            r#"function greeting(): string
-{
-    return "Hello";
-}
-
-function main(): void
-{
-}
-"#,
-            "Stage 14 MIR supports scalar and void returns",
-        ),
-        (
-            "writable string local",
-            r#"function main(): void
-{
-    let writable $message = "Hello";
-    echo $message;
-}
-"#,
-            "writable string locals",
-        ),
         (
             "collection foreach",
             r#"function main(): void

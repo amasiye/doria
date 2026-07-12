@@ -9,3 +9,6 @@ repository.workspace = true
 name = "doria_rt"
 path = "src/lib.rs"
 crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+ryu.workspace = true

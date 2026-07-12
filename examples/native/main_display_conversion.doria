@@ -1,0 +1,7 @@
+function main(): void
+{
+    let $count = 183;
+    let $enabled = false;
+
+    echo "I am " . $count . "; enabled=" . $enabled;
+}

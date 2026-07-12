@@ -1,6 +1,7 @@
 use doriac::mir::{
     BasicBlock, BlockId, FloatBinaryOp, FloatExpression, Function, FunctionId, IntegerExpression,
-    LocalId, Operand, Program, ReturnType, ScalarType, Statement, Terminator, ValueExpression,
+    LocalId, Operand, Program, ReturnType, Rvalue, ScalarType, Statement, Terminator, Type,
+    ValueExpression,
 };
 use doriac::numeric::{FloatType, FloatValue, IntegerType};
 
@@ -268,12 +269,13 @@ fn rejects_malformed_function_id() {
 #[test]
 fn rejects_malformed_local_id() {
     let mut program = void_program();
-    program.functions[0].return_type =
-        ReturnType::Value(doriac::mir::ScalarType::Integer(IntegerType::Int64));
+    program.functions[0].return_type = ReturnType::Value(Type::Scalar(
+        doriac::mir::ScalarType::Integer(IntegerType::Int64),
+    ));
     program.functions[0].blocks[0].terminator =
-        Terminator::Return(doriac::mir::ValueExpression::Integer(
+        Terminator::Return(Rvalue::Value(doriac::mir::ValueExpression::Integer(
             IntegerExpression::use_operand(IntegerType::Int64, Operand::Local(LocalId(99))),
-        ));
+        )));
 
     let error = doriac::codegen_cranelift::lower_mir_to_object(&program)
         .expect_err("malformed LocalId should fail before object emission");
@@ -284,8 +286,9 @@ fn rejects_malformed_local_id() {
 #[test]
 fn rejects_non_int64_process_main_return_type() {
     let mut program = void_program();
-    program.functions[0].return_type =
-        ReturnType::Value(doriac::mir::ScalarType::Integer(IntegerType::UInt8));
+    program.functions[0].return_type = ReturnType::Value(Type::Scalar(
+        doriac::mir::ScalarType::Integer(IntegerType::UInt8),
+    ));
 
     let error = doriac::codegen_cranelift::lower_mir_to_object(&program)
         .expect_err("narrow process entry return should fail before object emission");
@@ -302,17 +305,19 @@ fn rejects_mixed_width_float_binary_operands() {
         id: FunctionId(1),
         name: "mixedWidth".to_string(),
         params: Vec::new(),
-        return_type: ReturnType::Value(ScalarType::Float(FloatType::Float64)),
+        return_type: ReturnType::Value(Type::Scalar(ScalarType::Float(FloatType::Float64))),
         locals: Vec::new(),
         blocks: vec![BasicBlock {
             id: BlockId(0),
             statements: Vec::new(),
-            terminator: Terminator::Return(ValueExpression::Float(FloatExpression::Binary {
-                ty: FloatType::Float64,
-                op: FloatBinaryOp::Add,
-                left: Box::new(FloatExpression::constant(FloatValue::from_f32(1.0))),
-                right: Box::new(FloatExpression::constant(FloatValue::from_f64(2.0))),
-            })),
+            terminator: Terminator::Return(Rvalue::Value(ValueExpression::Float(
+                FloatExpression::Binary {
+                    ty: FloatType::Float64,
+                    op: FloatBinaryOp::Add,
+                    left: Box::new(FloatExpression::constant(FloatValue::from_f32(1.0))),
+                    right: Box::new(FloatExpression::constant(FloatValue::from_f64(2.0))),
+                },
+            ))),
         }],
         entry_block: BlockId(0),
     });
