@@ -91,6 +91,43 @@ echo "01" != "1";
 }
 
 #[test]
+fn php_backend_preserves_byte_lexicographic_string_ordering() {
+    let php = doriac::compile_source_to_php(
+        "test.doria",
+        r#"
+function main(): int
+{
+    if ("10" < "2") {
+        return 42;
+    }
+    return 0;
+}
+"#,
+    )
+    .expect("PHP should preserve Doria string ordering");
+
+    assert!(php.contains("__doria_less(\"10\", \"2\")"));
+    assert!(php.contains("strcmp($left, $right)"));
+
+    let Ok(version) = Command::new("php").arg("--version").output() else {
+        return;
+    };
+    if !version.status.success() {
+        return;
+    }
+    let script = format!(
+        "{}\nexit(main());",
+        php.strip_prefix("<?php").expect("generated PHP header")
+    );
+    let run = Command::new("php")
+        .arg("-r")
+        .arg(script)
+        .output()
+        .expect("PHP should execute generated output");
+    assert_eq!(run.status.code(), Some(42));
+}
+
+#[test]
 fn php_backend_keeps_exact_int64_alias_and_signed_comparison_subset() {
     let php = doriac::compile_source_to_php(
         "test.doria",
@@ -109,7 +146,7 @@ function identity(int64 $value): int64
     .expect("the exact signed integer subset should remain supported by PHP");
 
     assert!(php.contains("function isLess(int $left, int $right): bool"));
-    assert!(php.contains("return $left < $right;"));
+    assert!(php.contains("return __doria_less($left, $right);"));
     assert!(php.contains("function identity(int $value): int"));
 }
 
@@ -269,7 +306,6 @@ function total(): float64
     $value += 1.0;
     return $value;
 }
-
 "#,
     )
     .expect("PHP should preserve default float arithmetic");
@@ -278,6 +314,22 @@ function total(): float64
     assert!(php.contains("$value = 1.5 + 2.5;"));
     assert!(php.contains("$value += 1.0;"));
     assert!(!php.contains("float64"));
+}
+
+#[test]
+fn php_backend_rejects_noncanonical_float_display() {
+    for source in [
+        "function main(): void { echo 10000000000.0 * 10000000000.0; }",
+        "function main(): void { echo \"value=\" . 1.5; }",
+        "function show(float $value): void { echo \"value={$value}\"; } function main(): void {}",
+    ] {
+        let diagnostics = doriac::compile_source_to_php("test.doria", source)
+            .expect_err("PHP must reject float display it cannot preserve canonically");
+        assert_eq!(diagnostics[0].code, "B1301");
+        assert!(diagnostics[0]
+            .message
+            .contains("canonical Stage 16 float display formatting"));
+    }
 }
 
 #[test]
@@ -373,7 +425,7 @@ echo not (1 < 2);
     )
     .expect("compilation should succeed");
 
-    assert!(php.contains("echo __doria_display(!((1 < 2)));"));
+    assert!(php.contains("echo __doria_display(!((__doria_less(1, 2))));"));
     assert!(!php.contains("echo !1 < 2;"));
 }
 
@@ -631,11 +683,15 @@ while ($count < 10) {
     )
     .expect("compilation should succeed");
 
-    assert!(php.contains("if ($count < 10)\n{\n    echo __doria_display(\"small\");\n}"));
-    assert!(php.contains("else if ($count < 20)\n{\n    echo __doria_display(\"medium\");\n}"));
+    assert!(
+        php.contains("if (__doria_less($count, 10))\n{\n    echo __doria_display(\"small\");\n}")
+    );
+    assert!(php.contains(
+        "else if (__doria_less($count, 20))\n{\n    echo __doria_display(\"medium\");\n}"
+    ));
     assert!(php.contains("else\n{\n    echo __doria_display(\"large\");\n}"));
     assert!(php.contains(
-        "while ($count < 10)\n{\n    echo __doria_display($count);\n    $count = 10;\n}"
+        "while (__doria_less($count, 10))\n{\n    echo __doria_display($count);\n    $count = 10;\n}"
     ));
 }
 

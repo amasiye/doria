@@ -14,7 +14,7 @@ pub fn generate(program: &Program) -> Result<String, BackendError> {
     validate_program(program)?;
 
     let mut output = String::from(
-        "<?php\n\nfunction __doria_display(string|int|float|bool $value): string\n{\n    if (is_bool($value)) { return $value ? 'true' : 'false'; }\n    if (is_float($value)) {\n        if (is_nan($value)) { return 'NaN'; }\n        if ($value === INF) { return 'Infinity'; }\n        if ($value === -INF) { return '-Infinity'; }\n        if ($value == 0.0) { return fdiv(1.0, $value) < 0.0 ? '-0' : '0'; }\n        return json_encode($value, JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR);\n    }\n    return (string) $value;\n}\n\n",
+        "<?php\n\nfunction __doria_display(string|int|bool $value): string\n{\n    if (is_bool($value)) { return $value ? 'true' : 'false'; }\n    return (string) $value;\n}\n\nfunction __doria_less(string|int|float|bool $left, string|int|float|bool $right): bool\n{\n    if (is_string($left) && is_string($right)) { return strcmp($left, $right) < 0; }\n    return $left < $right;\n}\n\nfunction __doria_less_equal(string|int|float|bool $left, string|int|float|bool $right): bool\n{\n    if (is_string($left) && is_string($right)) { return strcmp($left, $right) <= 0; }\n    return $left <= $right;\n}\n\nfunction __doria_greater(string|int|float|bool $left, string|int|float|bool $right): bool\n{\n    if (is_string($left) && is_string($right)) { return strcmp($left, $right) > 0; }\n    return $left > $right;\n}\n\nfunction __doria_greater_equal(string|int|float|bool $left, string|int|float|bool $right): bool\n{\n    if (is_string($left) && is_string($right)) { return strcmp($left, $right) >= 0; }\n    return $left >= $right;\n}\n\n",
     );
     let mut scopes = PhpNameScopes::new();
     for item in &program.items {
@@ -113,7 +113,7 @@ fn validate_statement(statement: &Stmt, semantic_info: &SemanticInfo) -> Result<
             validate_expr(&decl.initializer, semantic_info)
         }
         Stmt::Assignment(assignment) => validate_assignment(assignment, semantic_info),
-        Stmt::Echo { expr, .. } => validate_expr(expr, semantic_info),
+        Stmt::Echo { expr, .. } => validate_display_expr(expr, semantic_info),
         Stmt::Return { expr, .. } => {
             if let Some(expr) = expr {
                 validate_expr(expr, semantic_info)?;
@@ -252,7 +252,7 @@ fn validate_expr(expr: &Expr, semantic_info: &SemanticInfo) -> Result<(), Backen
         Expr::InterpolatedString { parts, .. } => {
             for part in parts {
                 if let InterpolatedStringPart::Expr(expr) = part {
-                    validate_expr(expr, semantic_info)?;
+                    validate_display_expr(expr, semantic_info)?;
                 }
             }
             Ok(())
@@ -330,6 +330,10 @@ fn validate_expr(expr: &Expr, semantic_info: &SemanticInfo) -> Result<(), Backen
         } => {
             validate_expr(left, semantic_info)?;
             validate_expr(right, semantic_info)?;
+            if *op == BinaryOp::Concat {
+                validate_display_expr(left, semantic_info)?;
+                validate_display_expr(right, semantic_info)?;
+            }
             let float_operands = matches!(
                 (
                     semantic_info.float_type(left.span()),
@@ -374,6 +378,16 @@ fn validate_expr(expr: &Expr, semantic_info: &SemanticInfo) -> Result<(), Backen
             validate_expr(end, semantic_info)
         }
     }
+}
+
+fn validate_display_expr(expr: &Expr, semantic_info: &SemanticInfo) -> Result<(), BackendError> {
+    if semantic_info.float_type(expr.span()).is_some() {
+        return Err(unsupported_numeric_shape(
+            expr.span(),
+            "canonical Stage 16 float display formatting",
+        ));
+    }
+    validate_expr(expr, semantic_info)
 }
 
 fn validate_exprs(expressions: &[Expr], semantic_info: &SemanticInfo) -> Result<(), BackendError> {
@@ -1074,6 +1088,26 @@ fn emit_expr(expr: &Expr, scopes: &PhpNameScopes) -> String {
             ),
             BinaryOp::Concat => format!(
                 "__doria_display({}) . __doria_display({})",
+                emit_expr(left, scopes),
+                emit_expr(right, scopes)
+            ),
+            BinaryOp::Less => format!(
+                "__doria_less({}, {})",
+                emit_expr(left, scopes),
+                emit_expr(right, scopes)
+            ),
+            BinaryOp::LessEqual => format!(
+                "__doria_less_equal({}, {})",
+                emit_expr(left, scopes),
+                emit_expr(right, scopes)
+            ),
+            BinaryOp::Greater => format!(
+                "__doria_greater({}, {})",
+                emit_expr(left, scopes),
+                emit_expr(right, scopes)
+            ),
+            BinaryOp::GreaterEqual => format!(
+                "__doria_greater_equal({}, {})",
                 emit_expr(left, scopes),
                 emit_expr(right, scopes)
             ),
