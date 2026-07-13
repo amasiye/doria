@@ -2854,7 +2854,16 @@ class Accumulator
         }
     }
 }
+"#,
+    )
+    .expect("semantic check should succeed");
+}
 
+#[test]
+fn rejects_the_previously_accepted_writable_constructor_spelling() {
+    let diagnostics = doriac::check_source(
+        "test.doria",
+        r#"
 class Renamer
 {
     writable string $name;
@@ -2869,24 +2878,19 @@ class Renamer
         $this->name = $name;
     }
 }
-
-class Child
-{
-    writable string $name;
-}
-
-class Parent
-{
-    writable Child $child;
-
-    writable function __construct()
-    {
-        $this->child->name = "Lucy";
-    }
-}
 "#,
     )
-    .expect("semantic check should succeed");
+    .expect_err("writable construction must be rejected");
+
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "E0466"));
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "E0203"
+            && diagnostic
+                .message
+                .contains("cannot call writable method `Renamer::rename`")
+    }));
 }
 
 #[test]

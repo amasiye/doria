@@ -481,7 +481,14 @@ impl<'source> Lexer<'source> {
                     continue;
                 };
                 self.index += character.len_utf8();
-                if let Some(decoded) = decode_escape(character) {
+                let decoded = if matches!(quote_kind, StringQuoteKind::Single)
+                    && matches!(character, '{' | '}')
+                {
+                    None
+                } else {
+                    decode_escape(character)
+                };
+                if let Some(decoded) = decoded {
                     value.push(decoded);
                 } else {
                     value.push('\\');

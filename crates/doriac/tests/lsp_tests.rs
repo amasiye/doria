@@ -91,6 +91,29 @@ fn exposes_literal_brace_fix_as_a_preferred_code_action() {
 }
 
 #[test]
+fn exposes_writable_constructor_removal_as_a_preferred_code_action() {
+    let uri = "file:///lifecycle.doria";
+    let text = "class Person { writable function __construct() {} }";
+    let actions = code_actions_for_document(uri, text);
+    let action = actions
+        .iter()
+        .find(|action| {
+            action["title"]
+                .as_str()
+                .is_some_and(|title| title.contains("construction grants `__construct`"))
+        })
+        .expect("writable lifecycle diagnostic should expose a quick fix");
+
+    assert_eq!(action["kind"], "quickfix");
+    assert_eq!(action["isPreferred"], true);
+    assert_eq!(action["edit"]["changes"][uri][0]["newText"], "");
+    assert_eq!(
+        action["edit"]["changes"][uri][0]["range"]["start"]["character"],
+        text.find("writable").expect("writable modifier")
+    );
+}
+
+#[test]
 fn accepts_boolean_word_operators_without_lsp_diagnostics() {
     let diagnostics = diagnostics_for_document(
         "file:///operators.doria",

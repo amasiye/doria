@@ -505,6 +505,8 @@ fn rejects_malformed_string_interpolation() {
         ("echo \"{/* comment */}\";", "expected expression"),
         ("echo \"{// comment\n}\";", "expected expression"),
         ("echo \"A literal {word}\";", "unescaped `{`"),
+        ("echo \"{foo-bar}\";", "unescaped `{`"),
+        ("echo \"{word . suffix}\";", "unescaped `{`"),
         ("echo \"{{word}}\";", "unescaped `{`"),
     ] {
         let err = doriac::parse_source("test.doria", source)
@@ -514,6 +516,33 @@ fn rejects_malformed_string_interpolation() {
                 .any(|diagnostic| diagnostic.message.contains(message)),
             "expected diagnostic containing {message}, got {err:?}"
         );
+    }
+}
+
+#[test]
+fn rejects_truncated_collections_without_recursive_eof_parsing() {
+    for source in ["[", "f.unction ma { ec ;void { ec ; [\n"] {
+        let diagnostics = doriac::parse_source("fuzz-regression.doria", source)
+            .expect_err("truncated collection input must produce a diagnostic");
+        assert!(!diagnostics.is_empty());
+    }
+}
+
+#[test]
+fn identifier_composite_interpolations_receive_the_literal_brace_fix() {
+    for source in ["echo \"{foo-bar}\";", "echo \"{word . suffix}\";"] {
+        let diagnostics = doriac::parse_source("test.doria", source)
+            .expect_err("bare identifier composites must not become interpolation expressions");
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "P0002")
+            .unwrap_or_else(|| panic!("expected P0002 for {source}, got {diagnostics:?}"));
+        let fix = diagnostic
+            .fix
+            .as_ref()
+            .expect("P0002 should carry a machine-applicable fix");
+        assert_eq!(fix.replacement, "\\{");
+        assert_eq!(fix.span.start, source.find('{').expect("opening brace"));
     }
 }
 

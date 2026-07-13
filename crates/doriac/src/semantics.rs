@@ -285,6 +285,8 @@ impl<'program> Checker<'program> {
                         self.function_signatures
                             .insert(method.span.start, signature.clone());
 
+                        self.check_lifecycle_declaration_shape(method);
+
                         if method.name == "__destruct" && !method.params.is_empty() {
                             self.diagnostics.push(Diagnostic::new(
                                 "E0411",
@@ -307,7 +309,9 @@ impl<'program> Checker<'program> {
                                 method.name.clone(),
                                 MethodInfo {
                                     access: method.access.clone(),
-                                    writable_this: method.writable_this,
+                                    writable_this: method.writable_this
+                                        && LifecycleMethod::from_method_name(&method.name)
+                                            .is_none(),
                                     is_static: method.is_static,
                                     params: signature.params,
                                     return_ty: signature.return_ty,
@@ -405,6 +409,45 @@ impl<'program> Checker<'program> {
                 .with_help(
                     "declare exactly `function toString(): string` as an externally accessible readonly instance method",
                 ),
+            );
+        }
+    }
+
+    fn check_lifecycle_declaration_shape(&mut self, method: &FunctionDecl) {
+        let Some(lifecycle) = LifecycleMethod::from_method_name(&method.name) else {
+            return;
+        };
+
+        if let Some(span) = method.static_span {
+            let message = match lifecycle {
+                LifecycleMethod::Constructor => {
+                    "`__construct` is invoked by `new` and cannot be `static`"
+                }
+                LifecycleMethod::Destructor => {
+                    "`__destruct` is invoked automatically when an instance is destroyed and cannot be `static`"
+                }
+            };
+            self.diagnostics
+                .push(Diagnostic::new("E0465", message, span));
+        }
+
+        if let Some(span) = method.writable_span {
+            let help = match lifecycle {
+                LifecycleMethod::Constructor => {
+                    "remove `writable`; construction grants `__construct` its access to the new instance"
+                }
+                LifecycleMethod::Destructor => {
+                    "remove `writable`; destruction invokes `__destruct` through the lifecycle protocol"
+                }
+            };
+            self.diagnostics.push(
+                Diagnostic::new(
+                    "E0466",
+                    format!("`{}` cannot be declared `writable`", lifecycle.doria_name()),
+                    span,
+                )
+                .with_help(help)
+                .with_fix(span, ""),
             );
         }
     }
@@ -1161,11 +1204,12 @@ impl<'program> Checker<'program> {
                     self.check_property_initializer(&class_decl.name, property);
                 }
                 ClassMember::Method(method) => {
+                    let lifecycle = LifecycleMethod::from_method_name(&method.name);
                     self.check_function(
                         method,
                         Some(MethodContext {
                             class_name: class_decl.name.clone(),
-                            writable_this: method.writable_this,
+                            writable_this: method.writable_this && lifecycle.is_none(),
                             this_available: !method.is_static,
                         }),
                     );

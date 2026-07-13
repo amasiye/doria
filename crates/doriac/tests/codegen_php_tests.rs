@@ -1108,6 +1108,29 @@ class Person
 }
 
 #[test]
+fn rejects_static_lifecycle_methods_before_php_emission() {
+    let err = doriac::compile_source_to_php(
+        "test.doria",
+        r#"
+class Person
+{
+    static function __construct()
+    {
+    }
+}
+"#,
+    )
+    .expect_err("semantic checking should reject static construction before PHP codegen");
+
+    assert!(err.iter().any(|diagnostic| {
+        diagnostic.code == "E0465"
+            && diagnostic
+                .message
+                .contains("invoked by `new` and cannot be `static`")
+    }));
+}
+
+#[test]
 fn rejects_resource_type_before_php_codegen() {
     let err = doriac::compile_source_to_php(
         "test.doria",

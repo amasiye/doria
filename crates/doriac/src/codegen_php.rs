@@ -129,12 +129,12 @@ fn validate_item(item: &Item, semantic_info: &SemanticInfo) -> Result<(), Backen
                             validate_expr(initializer, semantic_info)?;
                         }
                     }
-                    ClassMember::Method(method) => validate_function(method, semantic_info)?,
+                    ClassMember::Method(method) => validate_function(method, semantic_info, true)?,
                 }
             }
             Ok(())
         }
-        Item::Function(function) => validate_function(function, semantic_info),
+        Item::Function(function) => validate_function(function, semantic_info, false),
         Item::Statement(statement) => validate_statement(statement, semantic_info),
     }
 }
@@ -142,7 +142,17 @@ fn validate_item(item: &Item, semantic_info: &SemanticInfo) -> Result<(), Backen
 fn validate_function(
     function: &FunctionDecl,
     semantic_info: &SemanticInfo,
+    is_method: bool,
 ) -> Result<(), BackendError> {
+    if is_method
+        && matches!(function.name.as_str(), "__construct" | "__destruct")
+        && (function.is_static || function.writable_this)
+    {
+        return Err(BackendError::new(format!(
+            "compiler invariant violated: invalid lifecycle method `{}` reached PHP emission after semantic validation",
+            function.name
+        )));
+    }
     for param in &function.params {
         validate_type(&param.ty, param.span)?;
         if let Some(default) = &param.default {

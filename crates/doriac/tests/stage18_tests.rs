@@ -151,6 +151,19 @@ fn acceptance_example_executes_with_exact_output() {
 }
 
 #[test]
+fn single_quoted_brace_backslashes_remain_literal_at_runtime() {
+    let mir = doriac::lower_source_to_mir(
+        "single_quotes.doria",
+        r#"function main(): void { echo '\{\}'; }"#,
+    )
+    .expect("single-quoted brace text should lower");
+    let output =
+        doriac::mir_interpreter::interpret(&mir).expect("single-quoted brace text should execute");
+
+    assert_eq!(output.stdout, b"\\{\\}");
+}
+
+#[test]
 fn empty_interpolation_diagnostic_matches_snapshot() {
     assert_snapshot(
         diagnostic_snapshot("echo \"{}\";", "P0001", false),

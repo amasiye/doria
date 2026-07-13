@@ -46,7 +46,7 @@ impl Parser {
             self.parse_unsupported_interface();
             None
         } else if self.match_kind(&TokenKind::Function) {
-            self.parse_function(MemberAccess::External, false, false, self.previous().span)
+            self.parse_function(MemberAccess::External, None, None, self.previous().span)
                 .map(Item::Function)
         } else {
             self.parse_statement().map(Item::Statement)
@@ -92,17 +92,21 @@ impl Parser {
 
     fn parse_class_member(&mut self) -> Option<ClassMember> {
         let access = self.parse_member_access();
-        let is_static = self.match_kind(&TokenKind::Static);
+        let static_span = self
+            .match_kind(&TokenKind::Static)
+            .then(|| self.previous().span);
 
-        let writable = self.match_kind(&TokenKind::Writable);
+        let writable_span = self
+            .match_kind(&TokenKind::Writable)
+            .then(|| self.previous().span);
         if self.match_kind(&TokenKind::Function) {
             let start = self.previous().span.start;
             return self
-                .parse_function(access, writable, is_static, Span::new(start, start))
+                .parse_function(access, writable_span, static_span, Span::new(start, start))
                 .map(ClassMember::Method);
         }
 
-        if is_static {
+        if static_span.is_some() {
             self.error(
                 "static properties are not implemented yet",
                 self.previous().span,
@@ -128,7 +132,7 @@ impl Parser {
 
         Some(ClassMember::Property(PropertyDecl {
             access,
-            writable,
+            writable: writable_span.is_some(),
             ty,
             name,
             initializer,
@@ -139,8 +143,8 @@ impl Parser {
     fn parse_function(
         &mut self,
         access: MemberAccess,
-        writable_this: bool,
-        is_static: bool,
+        writable_span: Option<Span>,
+        static_span: Option<Span>,
         start_span: Span,
     ) -> Option<FunctionDecl> {
         let start = start_span.start;
@@ -172,8 +176,10 @@ impl Parser {
         let span = Span::new(start, body.span.end);
         Some(FunctionDecl {
             access,
-            writable_this,
-            is_static,
+            writable_this: writable_span.is_some(),
+            writable_span,
+            is_static: static_span.is_some(),
+            static_span,
             name,
             params,
             return_type,
@@ -878,6 +884,15 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Option<Expr> {
+        if self.is_at_end() {
+            let span = if self.current == 0 {
+                self.peek().span
+            } else {
+                self.previous().span
+            };
+            self.error("expected expression", span);
+            return None;
+        }
         let token = self.advance().clone();
         match token.kind {
             TokenKind::Variable(name) => {
@@ -1097,12 +1112,53 @@ impl Parser {
         }
 
         let expr = expr?;
-        if matches!(expr, Expr::Identifier { .. }) {
+        if Self::contains_bare_identifier(&expr) {
             self.report_literal_open_brace(opening_brace_span);
             return None;
         }
 
         Some(expr)
+    }
+
+    fn contains_bare_identifier(expr: &Expr) -> bool {
+        match expr {
+            Expr::Identifier { .. } => true,
+            Expr::InterpolatedString { parts, .. } => parts.iter().any(|part| match part {
+                InterpolatedStringPart::Text { .. } => false,
+                InterpolatedStringPart::Expr(expr) => Self::contains_bare_identifier(expr),
+            }),
+            Expr::Array { elements, .. } => elements.iter().any(|element| {
+                element
+                    .key
+                    .as_ref()
+                    .is_some_and(Self::contains_bare_identifier)
+                    || Self::contains_bare_identifier(&element.value)
+            }),
+            Expr::PropertyAccess { object, .. } => Self::contains_bare_identifier(object),
+            Expr::MethodCall { object, args, .. } => {
+                Self::contains_bare_identifier(object)
+                    || args.iter().any(Self::contains_bare_identifier)
+            }
+            Expr::FunctionCall { args, .. }
+            | Expr::StaticCall { args, .. }
+            | Expr::New { args, .. } => args.iter().any(Self::contains_bare_identifier),
+            Expr::Grouped { expr, .. } | Expr::Unary { expr, .. } => {
+                Self::contains_bare_identifier(expr)
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::contains_bare_identifier(left) || Self::contains_bare_identifier(right)
+            }
+            Expr::Range { start, end, .. } => {
+                Self::contains_bare_identifier(start) || Self::contains_bare_identifier(end)
+            }
+            Expr::Variable { .. }
+            | Expr::This { .. }
+            | Expr::String { .. }
+            | Expr::Int { .. }
+            | Expr::Float { .. }
+            | Expr::Bool { .. }
+            | Expr::Null { .. } => false,
+        }
     }
 
     fn report_literal_open_brace(&mut self, span: Span) {

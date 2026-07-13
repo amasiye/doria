@@ -47,7 +47,9 @@ pub struct PropertyDecl {
 pub struct FunctionDecl {
     pub access: MemberAccess,
     pub writable_this: bool,
+    pub writable_span: Option<Span>,
     pub is_static: bool,
+    pub static_span: Option<Span>,
     pub name: String,
     pub params: Vec<Param>,
     pub return_type: Option<TypeRef>,
