@@ -295,7 +295,7 @@ class ImageResizer
 }
 
 // Stage 17 compiler-known I/O and checked formatting built-ins.
-let writable $line = readline();
+let writable $line = read_line();
 if ($line != null) {
     echo sprintf("line=%s", $line);
 }

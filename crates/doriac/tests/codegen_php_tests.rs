@@ -1202,7 +1202,7 @@ fn php_backend_lowers_stage17_io_with_doria_failure_checks() {
         r#"
 function main(): void
 {
-    let writable $line = readline();
+    let writable $line = read_line();
     if ($line != null) { write_stderr($line); }
     let $contents = read_file("input.txt");
     write_file("copy.txt", $contents);
@@ -1213,7 +1213,7 @@ function main(): void
     )
     .expect("Stage 17 PHP compatibility lowering should succeed");
 
-    assert!(php.contains("function __doria_readline(): ?string"));
+    assert!(php.contains("function __doria_read_line(): ?string"));
     assert!(php.contains("if ($line === false) { return null; }"));
     assert!(php.contains(
         "if (preg_match('//u', $line) !== 1) { __doria_io_panic(\"stdin contained invalid UTF-8\"); }"

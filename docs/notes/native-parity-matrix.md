@@ -75,8 +75,8 @@ Source of truth for sequencing remains `docs/doria-end-to-end-plan.md`. The dura
 | Mixed int/float and float-width rejection | Frontend | Frontend | Frontend | Covered | Semantic diagnostics prevent implicit cross-kind or cross-width values before MIR. |
 | PHP float32 boundary | Diagnostic | Diagnostic | Diagnostic | Covered | PHP never emits unknown float width names; exact float64 division uses `fdiv`. |
 | Invalid process status panic | Covered | Covered | Covered | Covered | Runtime entry validates `main(): int` and exits 101 on failure. |
-| Narrow `?string` seed and flow guards | Covered | Covered | Covered | Covered | `readline` EOF is distinct from empty string; assignment invalidates or re-establishes non-null facts. |
-| `readline` and repeated buffering | Covered | Covered | Covered | Covered | Raw sidecar stdin covers LF, CRLF, empty lines, buffered subsequent lines, and final unterminated input. |
+| Narrow `?string` seed and flow guards | Covered | Covered | Covered | Covered | `read_line` EOF is distinct from empty string; assignment invalidates or re-establishes non-null facts. |
+| `read_line` and repeated buffering | Covered | Covered | Covered | Covered | Raw sidecar stdin covers LF, CRLF, empty lines, buffered subsequent lines, and final unterminated input. |
 | `read_file` | Covered | Covered | Covered | Covered | Complete UTF-8 text and Unicode content agree through isolated fixture directories. |
 | `write_file` and file side effects | Covered | Covered | Covered | Covered | Create/truncate output is compared byte-for-byte against expected files. |
 | `write_stderr` | Covered | Covered | Covered | Covered | Exact stderr bytes with no implicit newline. |

@@ -234,11 +234,9 @@ fn run_native_executable(executable: &Path, cwd: &Path, stdin: &[u8]) -> io::Res
             .spawn()
         {
             Ok(mut child) => {
-                child
-                    .stdin
-                    .take()
-                    .expect("piped stdin should be available")
-                    .write_all(stdin)?;
+                let mut child_stdin = child.stdin.take().expect("piped stdin should be available");
+                write_stdin_tolerating_early_close(&mut child_stdin, stdin)?;
+                drop(child_stdin);
                 return child.wait_with_output();
             }
             Err(error) if is_transient_executable_busy(&error) && attempt + 1 < MAX_ATTEMPTS => {
@@ -248,6 +246,33 @@ fn run_native_executable(executable: &Path, cwd: &Path, stdin: &[u8]) -> io::Res
         }
     }
     unreachable!("retry loop returns on its final attempt")
+}
+
+fn write_stdin_tolerating_early_close(child_stdin: &mut dyn Write, stdin: &[u8]) -> io::Result<()> {
+    match child_stdin.write_all(stdin) {
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        result => result,
+    }
+}
+
+#[test]
+fn parity_runner_tolerates_an_executable_closing_stdin_early() {
+    struct ClosedStdin;
+
+    impl Write for ClosedStdin {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "executable closed stdin",
+            ))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    assert!(write_stdin_tolerating_early_close(&mut ClosedStdin, b"unused input").is_ok());
 }
 
 #[derive(Debug)]

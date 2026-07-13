@@ -703,8 +703,13 @@ function check_intellij_lexer(): void
         'IntelliJ lexer must classify calls from parenthesis and accessor context rather than a name list'
     );
     require_check(
-        strpos($lexerText, 'isCallName() -> callableTokenType()') < strpos($lexerText, 'text.first().isUpperCase() -> DoriaTokenTypes.TYPE_NAME'),
-        'IntelliJ lexer must prioritize call syntax over identifier capitalization'
+        str_contains($lexerText, 'isConstructorTypeName() -> DoriaTokenTypes.TYPE_NAME') &&
+            str_contains($lexerText, 'previousIdentifier() == "new"') &&
+            strpos($lexerText, 'isConstructorTypeName() -> DoriaTokenTypes.TYPE_NAME') <
+                strpos($lexerText, 'isCallName() -> callableTokenType()') &&
+            strpos($lexerText, 'isCallName() -> callableTokenType()') <
+                strpos($lexerText, 'text.first().isUpperCase() -> DoriaTokenTypes.TYPE_NAME'),
+        'IntelliJ lexer must preserve constructor type names while prioritizing other call syntax over capitalization'
     );
     foreach (['FUNCTION_CALL', 'METHOD_CALL', 'STATIC_METHOD_CALL'] as $callStyle) {
         require_check(

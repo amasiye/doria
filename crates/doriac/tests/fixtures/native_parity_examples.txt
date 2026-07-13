@@ -56,7 +56,7 @@ examples/native/main_narrow_recursive_42.doria
 examples/native/main_nested_loop_matrix_42.doria
 examples/native/main_nested_panic_stack.doria
 examples/native/main_readonly_local.doria
-examples/native/main_readline_echo.doria
+examples/native/main_read_line_echo.doria
 examples/native/main_recursive_depth_512_42.doria
 examples/native/main_recursive_fibonacci_55.doria
 examples/native/main_release_profile_42.doria

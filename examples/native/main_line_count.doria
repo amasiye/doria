@@ -1,11 +1,11 @@
 function main(): void
 {
     let writable $count = 0;
-    let writable $line = readline();
+    let writable $line = read_line();
 
     while ($line != null) {
         $count++;
-        $line = readline();
+        $line = read_line();
     }
 
     echo $count;

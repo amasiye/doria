@@ -29,7 +29,7 @@ pub fn generate(program: &Program) -> Result<String, BackendError> {
     exit(101);
 }
 
-function __doria_readline(): ?string
+function __doria_read_line(): ?string
 {
     $line = fgets(STDIN);
     if ($line === false) { return null; }
@@ -1267,7 +1267,7 @@ fn emit_binary_op(op: &BinaryOp) -> &'static str {
 
 fn emit_function_call(name: &str, args: &[Expr], scopes: &PhpNameScopes) -> String {
     let helper = match name {
-        "readline" => "__doria_readline",
+        "read_line" => "__doria_read_line",
         "read_file" => "__doria_read_file",
         "write_file" => "__doria_write_file",
         "write_stderr" => "__doria_write_stderr",

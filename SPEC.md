@@ -563,7 +563,7 @@ Simple collection literals infer collection element/key/value types when all cle
 Stage 17 provides these compiler-known built-ins:
 
 ```doria
-readline(): ?string
+read_line(): ?string
 sprintf(string $format, ...): string
 printf(string $format, ...): void
 read_file(string $path): string
@@ -571,7 +571,7 @@ write_file(string $path, string $contents): void
 write_stderr(string $value): void
 ```
 
-`readline` reads UTF-8 text, removes one LF ending and a preceding CR when present, preserves empty lines and final unterminated lines, and returns `null` only when EOF occurs before any bytes. Stage 17 implements only the `?string` seed required by this API. A `!= null` guard narrows it to `string`; assigning `null` or another nullable result invalidates that fact, while assigning a known `string` establishes a new non-null fact. General nullable types and null-safe operations remain Stage 22.
+`read_line` reads UTF-8 text, removes one LF ending and a preceding CR when present, preserves empty lines and final unterminated lines, and returns `null` only when EOF occurs before any bytes. Stage 17 implements only the `?string` seed required by this API. A `!= null` guard narrows it to `string`; assigning `null` or another nullable result invalidates that fact, while assigning a known `string` establishes a new non-null fact. General nullable types and null-safe operations remain Stage 22.
 
 `read_file` reads an entire UTF-8 text file. `write_file` creates or truncates a text file and writes the string's exact bytes. `write_stderr` writes exact bytes without adding a newline. Until checked errors land in Stage 29, I/O and UTF-8 failures use the fatal panic path.
 

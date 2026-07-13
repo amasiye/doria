@@ -463,8 +463,8 @@ fn completion_items() -> Value {
     items.extend(
         [
             (
-                "readline",
-                "readline(): ?string",
+                "read_line",
+                "read_line(): ?string",
                 "Reads one UTF-8 line, strips LF or CRLF, and returns null only at EOF.",
             ),
             (
@@ -668,10 +668,10 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
         TokenKind::FloatType => scalar_runtime_type_description("float"),
         TokenKind::Float32Type => scalar_runtime_type_description("float32"),
         TokenKind::Float64Type => scalar_runtime_type_description("float64"),
-        TokenKind::StringType => Some("The immutable UTF-8 `string` primitive type. Stage 17 also supports the narrow `?string` EOF seed used by `readline`.") ,
+        TokenKind::StringType => Some("The immutable UTF-8 `string` primitive type. Stage 17 also supports the narrow `?string` EOF seed used by `read_line`.") ,
         TokenKind::BoolType => scalar_runtime_type_description("bool"),
         TokenKind::True | TokenKind::False => Some("Boolean literal."),
-        TokenKind::Null => Some("Null literal. Stage 17 supports `?string` narrowly for `readline` EOF; general nullable types remain planned for Stage 22."),
+        TokenKind::Null => Some("Null literal. Stage 17 supports `?string` narrowly for `read_line` EOF; general nullable types remain planned for Stage 22."),
         TokenKind::Reserved(_) => Some("Reserved for future Doria syntax."),
         TokenKind::Identifier(name) => match name.as_str() {
             "List" => Some("Ordered collection alias: `List<T>`."),
@@ -684,7 +684,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
             "panic" => Some(
                 "Built-in fatal runtime function: `panic(\"message\");`. Panics are not catchable and exit with status 101.",
             ),
-            "readline" => Some("`readline(): ?string` reads one UTF-8 line, strips LF or CRLF, preserves empty and unterminated final lines, and returns `null` only at EOF."),
+            "read_line" => Some("`read_line(): ?string` reads one UTF-8 line, strips LF or CRLF, preserves empty and unterminated final lines, and returns `null` only at EOF."),
             "sprintf" => Some("`sprintf(string $format, ...): string` uses a compile-time-checked literal format string in Stage 17."),
             "printf" => Some("`printf(string $format, ...): void` uses the same checked formatter as `sprintf`, adds no newline, and returns void."),
             "read_file" => Some("`read_file(string $path): string` reads complete UTF-8 text and panics on failure."),
@@ -1112,7 +1112,7 @@ mod tests {
     #[test]
     fn completions_and_hover_expose_stage17_builtins() {
         for (name, signature, required_hover) in [
-            ("readline", "readline(): ?string", "only at EOF"),
+            ("read_line", "read_line(): ?string", "only at EOF"),
             (
                 "sprintf",
                 "sprintf(string $format, ...): string",

@@ -1057,7 +1057,7 @@ fn is_nullable_string_initializer(expr: &hir::Expr, context: &LoweringContext) -
         hir::Expr::Variable { name, span } => context
             .lookup_local(name, *span)
             .is_ok_and(|local| context.local_type(local) == mir::Type::NullableString),
-        hir::Expr::FunctionCall { name, span, .. } if name == "readline" => true,
+        hir::Expr::FunctionCall { name, span, .. } if name == "read_line" => true,
         hir::Expr::FunctionCall { name, span, .. } => {
             context.lookup_function(name, *span).is_ok_and(|signature| {
                 signature.return_type == mir::ReturnType::Value(mir::Type::NullableString)
@@ -1338,9 +1338,9 @@ fn lower_nullable_string_expression(
                 )]),
             }
         }
-        hir::Expr::FunctionCall { name, args, span } if name == "readline" => {
+        hir::Expr::FunctionCall { name, args, span } if name == "read_line" => {
             if !args.is_empty() {
-                return Err(vec![unsupported(*span, "readline expects no arguments")]);
+                return Err(vec![unsupported(*span, "read_line expects no arguments")]);
             }
             Ok(mir::NullableStringExpression::ReadLine)
         }

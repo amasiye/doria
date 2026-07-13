@@ -108,7 +108,7 @@ fn lowers_explicit_panic_to_object() {
 #[test]
 fn lowers_complete_stage17_io_and_format_mir_to_object() {
     for source in [
-        include_str!("../../../examples/native/main_readline_echo.doria"),
+        include_str!("../../../examples/native/main_read_line_echo.doria"),
         include_str!("../../../examples/native/main_file_copy.doria"),
         include_str!("../../../examples/native/main_sprintf_matrix.doria"),
         include_str!("../../../examples/native/main_printf_42.doria"),
@@ -118,7 +118,7 @@ fn lowers_complete_stage17_io_and_format_mir_to_object() {
 function identity(?string $value): ?string { return $value; }
 function main(): void
 {
-    let $line = identity(readline());
+    let $line = identity(read_line());
     if ($line != null) { echo $line; }
 }
 "#,

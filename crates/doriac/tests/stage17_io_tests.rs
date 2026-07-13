@@ -19,15 +19,15 @@ fn interpret(
 }
 
 #[test]
-fn readline_distinguishes_empty_lines_final_bytes_and_eof() {
+fn read_line_distinguishes_empty_lines_final_bytes_and_eof() {
     let output = interpret(
         r#"
 function main(): void
 {
-    let writable $line = readline();
+    let writable $line = read_line();
     while ($line != null) {
         echo "[" . $line . "]\n";
-        $line = readline();
+        $line = read_line();
     }
 }
 "#,
@@ -37,6 +37,30 @@ function main(): void
     assert_eq!(output.output.stdout, b"[alpha]\n[]\n[final]\n");
     assert!(output.output.stderr.is_empty());
     assert_eq!(output.output.exit_status, 0);
+}
+
+#[test]
+fn php_readline_spelling_is_rejected_with_doria_guidance() {
+    let diagnostics = doriac::check_source(
+        "test.doria",
+        "function main(): void { let $line = readline(); }",
+    )
+    .expect_err("the PHP readline spelling must not be accepted");
+
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "E0461"
+            && diagnostic.message.contains("`read_line`")
+            && diagnostic.help.as_deref() == Some("replace `readline()` with `read_line()`")
+    }));
+
+    let diagnostics = doriac::check_source(
+        "test.doria",
+        "function readline(): void {} function main(): void {}",
+    )
+    .expect_err("the PHP spelling must not be available for userland declarations");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "E0310" && diagnostic.message.contains("`read_line`")
+    }));
 }
 
 #[test]
@@ -66,7 +90,7 @@ function main(): int
 #[test]
 fn nullable_and_format_diagnostics_are_checked_before_mir() {
     for source in [
-        "function main(): void { let $line = readline(); echo $line; }",
+        "function main(): void { let $line = read_line(); echo $line; }",
         "function main(): void { let $format = \"%d\"; echo sprintf($format, 1); }",
         "function main(): void { echo sprintf(\"%d\", 1.5); }",
         "function main(): void { echo sprintf(\"%0s\", \"x\"); }",
@@ -84,7 +108,7 @@ fn nullable_assignment_invalidates_non_null_narrowing() {
     let source = r#"
 function main(): void
 {
-    let writable $line = readline();
+    let writable $line = read_line();
     if ($line != null) {
         $line = null;
         echo $line;
@@ -105,7 +129,7 @@ function main(): void
         r#"
 function main(): void
 {
-    let writable $line = readline();
+    let writable $line = read_line();
     if ($line != null) {
         $line = "known";
         echo $line;
@@ -122,7 +146,7 @@ fn nullable_flow_joins_loops_and_nested_guards_are_sound() {
         r#"
 function check(bool $condition): void
 {
-    let writable $line = readline();
+    let writable $line = read_line();
     if ($condition) { $line = "known"; } else { $line = null; }
     echo $line;
 }
@@ -131,7 +155,7 @@ function main(): void { check(true); }
         r#"
 function check(bool $condition): void
 {
-    let writable $line = readline();
+    let writable $line = read_line();
     if ($condition) { $line = "known"; }
     echo $line;
 }
@@ -140,9 +164,9 @@ function main(): void { check(true); }
         r#"
 function main(): void
 {
-    let writable $line = readline();
+    let writable $line = read_line();
     while ($line != null) {
-        $line = readline();
+        $line = read_line();
         echo $line;
     }
 }
@@ -163,7 +187,7 @@ function main(): void
         r#"
 function main(): void
 {
-    let $line = readline();
+    let $line = read_line();
     if ($line != null) {
         if ($line != "") {
             echo $line;
@@ -270,7 +294,7 @@ fn rejected_format_matrix_is_diagnosed_before_mir() {
         "function main(): void { echo sprintf(\"%d\", 1, 2); }",
         "function main(): void { echo sprintf(\"%f\", 1); }",
         "function main(): void { echo sprintf(\"%x\", \"x\"); }",
-        "function main(): void { let $line = readline(); echo sprintf(\"%s\", $line); }",
+        "function main(): void { let $line = read_line(); echo sprintf(\"%s\", $line); }",
         "function main(): void { echo sprintf(\"%.2d\", 1); }",
         "function main(): void { echo sprintf(\"%.2s\", \"x\"); }",
         "function main(): void { echo sprintf(\"%0s\", \"x\"); }",
