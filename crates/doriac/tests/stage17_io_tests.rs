@@ -83,10 +83,9 @@ fn php_readline_fixit_matches_diagnostic_snapshot() {
         diagnostic.span.end,
     );
 
-    assert_eq!(
-        snapshot,
-        include_str!("fixtures/diagnostics/php_readline_fixit.txt")
-    );
+    let expected =
+        include_str!("fixtures/diagnostics/php_readline_fixit.txt").replace("\r\n", "\n");
+    assert_eq!(snapshot, expected);
 }
 
 #[test]
