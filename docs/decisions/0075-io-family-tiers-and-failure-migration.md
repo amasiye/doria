@@ -15,7 +15,7 @@ Doria's file I/O family has three deliberate tiers:
 1. Stage 17 text functions: `read_file(string $path): string` and
    `write_file(string $path, string $contents): void`. Reads validate UTF-8 before constructing a
    string. Invalid bytes never enter `string`.
-2. Stage 23 binary functions: `read_file_bytes(): Bytes` and `write_file_bytes(...)`, introduced
+2. Stage 23 binary functions: `read_file_bytes(...)` and `write_file_bytes(...)`, introduced
    with the `Bytes` move type. Their complete parameter contracts are settled in Stage 23 rather
    than inferred early from the text API.
 3. Post-Stage 29 `File` and stream objects: owned RAII resources with buffered and seekable access.

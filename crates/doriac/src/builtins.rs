@@ -13,10 +13,7 @@ pub enum Builtin {
 ///
 /// This table is compiler-owned data so diagnostics and the future PHP
 /// migration command can teach the same spellings without duplicating policy.
-pub const PHP_FUNCTION_SUGGESTIONS: &[(&str, &str)] = &[
-    ("readline", "read_line"),
-    ("strcasecmp", "str_case_compare"),
-];
+pub const PHP_FUNCTION_SUGGESTIONS: &[(&str, &str)] = &[("readline", "read_line")];
 
 pub fn php_function_suggestion(name: &str) -> Option<&'static str> {
     PHP_FUNCTION_SUGGESTIONS

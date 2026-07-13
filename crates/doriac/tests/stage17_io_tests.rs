@@ -89,17 +89,16 @@ fn php_readline_fixit_matches_diagnostic_snapshot() {
 }
 
 #[test]
-fn php_spelling_suggestions_apply_only_to_unknown_functions() {
+fn unimplemented_doria_replacements_are_not_suggested() {
     let diagnostics = doriac::check_source(
         "test.doria",
         "function main(): void { let $result = strcasecmp(\"a\", \"b\"); }",
     )
-    .expect_err("an unknown PHP spelling should produce Doria guidance");
+    .expect_err("an undeclared function should remain unknown");
     assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "E0461"
-            && diagnostic.message.contains("`str_case_compare`")
-            && diagnostic.help.as_deref()
-                == Some("replace `strcasecmp()` with `str_case_compare()`")
+        diagnostic.code == "E0309"
+            && diagnostic.message == "unknown function `strcasecmp`"
+            && diagnostic.help.is_none()
     }));
 
     doriac::check_source(
