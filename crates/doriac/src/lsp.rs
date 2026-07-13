@@ -373,7 +373,7 @@ fn initialize_result() -> Value {
         },
         "serverInfo": {
             "name": "doria-lsp",
-            "version": env!("CARGO_PKG_VERSION")
+            "version": crate::TOOLCHAIN_VERSION
         }
     })
 }
@@ -924,6 +924,15 @@ fn send_message<W: Write>(writer: &mut W, message: &Value) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initialize_reports_canonical_toolchain_calver() {
+        assert_eq!(
+            initialize_result()["serverInfo"]["version"],
+            crate::TOOLCHAIN_VERSION
+        );
+        assert_eq!(crate::TOOLCHAIN_VERSION, "2026.03.1-canary");
+    }
 
     fn completion_item(label: &str) -> Value {
         completion_items()["items"]

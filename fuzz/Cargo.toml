@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-doriac = { path = "../crates/doriac" }
+doriac = { path = "../crates/doriac", default-features = false }
 
 [[bin]]
 name = "parser"
