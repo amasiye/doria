@@ -1178,6 +1178,49 @@ fn compiles_and_runs_void_main_string_literal_echo() {
 }
 
 #[test]
+fn native_read_file_panics_before_invalid_utf8_enters_a_string() {
+    if !host_linker_is_available() {
+        eprintln!(
+            "native invalid-UTF-8 integration test unavailable: host linker `{}` was not found",
+            host_linker()
+        );
+        return;
+    }
+
+    let directory = temp_working_directory("invalid_utf8_file");
+    fs::create_dir_all(&directory).expect("temporary directory should be created");
+    fs::write(directory.join("invalid.txt"), [b'D', 0xff, b'a'])
+        .expect("invalid UTF-8 fixture should be written");
+    let output = directory.join(if cfg!(windows) {
+        "program.exe"
+    } else {
+        "program"
+    });
+    compile_native_source(
+        r#"
+function main(): void
+{
+    echo read_file("invalid.txt");
+}
+"#,
+        &output,
+    );
+
+    let run = Command::new(&output)
+        .current_dir(&directory)
+        .output()
+        .expect("native executable should run");
+    assert_eq!(run.status.code(), Some(101));
+    assert!(run.stdout.is_empty());
+    assert_eq!(
+        run.stderr,
+        b"Panic: file contained invalid UTF-8\nStack Trace:\n  at main\n"
+    );
+
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
 fn compiles_and_runs_large_void_main_string_literal_echo() {
     if !host_linker_is_available() {
         eprintln!(
@@ -4002,6 +4045,14 @@ fn temp_executable_path(stem: &str) -> PathBuf {
         "doriac-{stem}-{}-{nanos}{extension}",
         std::process::id()
     ))
+}
+
+fn temp_working_directory(stem: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!("doriac-{stem}-{}-{nanos}", std::process::id()))
 }
 
 fn host_linker_is_available() -> bool {
