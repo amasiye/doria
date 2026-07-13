@@ -1206,9 +1206,7 @@ function main(): void
         &output,
     );
 
-    let run = Command::new(&output)
-        .current_dir(&directory)
-        .output()
+    let run = run_native_executable_in_directory(&output, &directory)
         .expect("native executable should run");
     assert_eq!(run.status.code(), Some(101));
     assert!(run.stdout.is_empty());
@@ -3969,6 +3967,10 @@ fn assert_native_run_output(output: &Path, stem: &str, expected_stdout: &[u8]) {
 
 fn run_native_executable(output: &Path) -> io::Result<Output> {
     retry_transient_executable_busy(|| Command::new(output).output())
+}
+
+fn run_native_executable_in_directory(output: &Path, directory: &Path) -> io::Result<Output> {
+    retry_transient_executable_busy(|| Command::new(output).current_dir(directory).output())
 }
 
 #[cfg(unix)]
