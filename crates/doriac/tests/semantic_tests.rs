@@ -3957,7 +3957,6 @@ class Office
     function index(List<Person> $people): Dictionary<string, Person>
     {
         foreach ($people as Person $person) {
-            let $copy = $person;
         }
 
         return [];

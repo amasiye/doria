@@ -690,6 +690,24 @@ fn collection_properties_are_move_values() {
 }
 
 #[test]
+fn foreach_move_bindings_are_borrowed_per_iteration() {
+    let diagnostics = doriac::check_source(
+        "foreach-borrowed-element.doria",
+        "class Guard {} function consume(take Guard $guard): void {} function inspect(Guard[] $items): void { foreach ($items as Guard $guard) { consume($guard); } }",
+    )
+    .expect_err("a foreach element is borrowed from its collection");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "E0474" && diagnostic.message.contains("borrowed `$guard`")
+    }));
+
+    doriac::check_source(
+        "foreach-borrowed-element-ok.doria",
+        "class Guard {} function observe(Guard $guard): void {} function inspect(Guard[] $items): void { foreach ($items as Guard $guard) { observe($guard); } }",
+    )
+    .expect("a foreach element remains available for borrowing");
+}
+
+#[test]
 fn literal_if_conditions_skip_unreachable_owner_moves() {
     for body in [
         "if (false) { consume($guard); } consume($guard);",

@@ -683,12 +683,12 @@ impl Checker {
                 let before = scopes.clone();
                 let mut body = before.clone();
                 let mut body_flow =
-                    self.check_block(&statement.body, &mut body, return_move_type, true);
+                    self.check_foreach_iteration(statement, &mut body, return_move_type);
                 if body_flow.falls_through {
                     body_flow.backedges.push(body);
                 }
-                self.check_second_iteration(
-                    &statement.body,
+                self.check_foreach_second_iteration(
+                    statement,
                     &body_flow.backedges,
                     return_move_type,
                 );
@@ -707,6 +707,62 @@ impl Checker {
                 backedges: vec![scopes.clone()],
                 breaks: Vec::new(),
             },
+        }
+    }
+
+    fn check_foreach_iteration(
+        &mut self,
+        statement: &ast::ForeachStmt,
+        scopes: &mut Scopes,
+        return_move_type: bool,
+    ) -> Flow {
+        scopes.push();
+        if let Some(key) = &statement.key {
+            self.declare_foreach_binding(key, scopes);
+        }
+        self.declare_foreach_binding(&statement.value, scopes);
+        let mut flow = self.check_block(&statement.body, scopes, return_move_type, false);
+        scopes.pop();
+        for backedge in &mut flow.backedges {
+            backedge.pop();
+        }
+        for break_exit in &mut flow.breaks {
+            break_exit.pop();
+        }
+        flow
+    }
+
+    fn declare_foreach_binding(&self, binding: &ast::ForeachBinding, scopes: &mut Scopes) {
+        let Some(ty) = &binding.ty else {
+            return;
+        };
+        if !type_ref_is_move_type(ty, &self.classes) {
+            return;
+        }
+        scopes.declare(
+            binding.name.clone(),
+            Binding {
+                class: self.classes.contains(&ty.name).then(|| ty.name.clone()),
+                mixed: ty.name == "mixed",
+                borrowed_place: true,
+                writable: false,
+                state: State::Borrowed,
+            },
+        );
+    }
+
+    fn check_foreach_second_iteration(
+        &mut self,
+        statement: &ast::ForeachStmt,
+        entries: &[Scopes],
+        return_move_type: bool,
+    ) {
+        for entry in entries {
+            let diagnostics_before = self.diagnostics.len();
+            let mut second_iteration = entry.clone();
+            let _ =
+                self.check_foreach_iteration(statement, &mut second_iteration, return_move_type);
+            self.deduplicate_diagnostics_from(diagnostics_before);
         }
     }
 

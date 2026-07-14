@@ -502,6 +502,7 @@ fn validate_class_expression(
 
             let mut initialized = HashSet::new();
             let mut consumed_class_arguments = HashSet::new();
+            let mut consumed_class_locals = HashSet::new();
             for (position, property) in properties.iter().enumerate() {
                 if property.property.index != position {
                     return Err(malformed_mir(format!(
@@ -528,6 +529,15 @@ fn validate_class_expression(
                 let source_type = match &property.source {
                     mir::PropertyValueSource::Expression(value) => {
                         validate_rvalue(program, function, value)?;
+                        if let mir::Rvalue::Class(mir::ClassExpression::Local { local, .. }) = value
+                        {
+                            if !consumed_class_locals.insert(*local) {
+                                return Err(malformed_mir(format!(
+                                    "class#{} new expression gives class local local{} to more than one property",
+                                    class.0, local.0
+                                )));
+                            }
+                        }
                         value.ty()
                     }
                     mir::PropertyValueSource::ConstructorArgument(index) => {
@@ -577,6 +587,12 @@ fn validate_class_expression(
                     constructor_parameters,
                     args,
                 )?;
+                if let Some(index) = consumed_class_arguments.iter().min() {
+                    return Err(malformed_mir(format!(
+                        "class#{} new expression gives constructor argument {} to a property and also passes it to {}",
+                        class.0, index, constructor.name
+                    )));
+                }
             }
             Ok(())
         }
