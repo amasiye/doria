@@ -213,6 +213,7 @@ pub(crate) fn check_program_with_inferred_move_returns(
         diagnostics: Vec::new(),
     };
     let mut top_level_scopes = Scopes::new();
+    let mut top_level_falls_through = true;
     for item in &program.items {
         match item {
             Item::Function(function) => checker.check_function(function, None),
@@ -232,7 +233,11 @@ pub(crate) fn check_program_with_inferred_move_returns(
                 }
             }
             Item::Statement(statement) => {
-                checker.check_statement(statement, &mut top_level_scopes, false);
+                if top_level_falls_through {
+                    top_level_falls_through = checker
+                        .check_statement(statement, &mut top_level_scopes, false)
+                        .falls_through;
+                }
             }
         }
     }

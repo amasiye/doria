@@ -501,6 +501,7 @@ fn validate_class_expression(
             };
 
             let mut initialized = HashSet::new();
+            let mut consumed_class_arguments = HashSet::new();
             for (position, property) in properties.iter().enumerate() {
                 if property.property.index != position {
                     return Err(malformed_mir(format!(
@@ -529,9 +530,8 @@ fn validate_class_expression(
                         validate_rvalue(program, function, value)?;
                         value.ty()
                     }
-                    mir::PropertyValueSource::ConstructorArgument(index) => args
-                        .get(*index)
-                        .ok_or_else(|| {
+                    mir::PropertyValueSource::ConstructorArgument(index) => {
+                        let argument = args.get(*index).ok_or_else(|| {
                             malformed_mir(format!(
                                 "class#{} property{} references constructor argument {} but only {} exist",
                                 class.0,
@@ -539,8 +539,17 @@ fn validate_class_expression(
                                 index,
                                 args.len()
                             ))
-                        })?
-                        .ty(),
+                        })?;
+                        if matches!(argument.ty(), mir::Type::Class(_))
+                            && !consumed_class_arguments.insert(*index)
+                        {
+                            return Err(malformed_mir(format!(
+                                "class#{} new expression gives constructor argument {} to more than one property",
+                                class.0, index
+                            )));
+                        }
+                        argument.ty()
+                    }
                 };
                 if source_type != definition.ty {
                     return Err(malformed_mir(format!(

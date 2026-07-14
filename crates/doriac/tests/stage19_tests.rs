@@ -240,6 +240,15 @@ fn top_level_ownership_state_is_preserved_between_statements() {
 }
 
 #[test]
+fn top_level_ownership_check_stops_after_terminating_flow() {
+    doriac::check_source(
+        "top-level-panic.doria",
+        "class Guard {} function consume(take Guard $guard): void {} let $guard = new Guard(); if (true) { consume($guard); panic(\"stop\"); } consume($guard);",
+    )
+    .expect("statements after an unconditionally terminating top-level path are unreachable");
+}
+
+#[test]
 fn terminating_branch_does_not_poison_the_fallthrough_owner() {
     doriac::check_source(
         "branch-return.doria",
