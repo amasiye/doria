@@ -425,6 +425,17 @@ fn validate_class_expression(
                     )));
                 }
             }
+            if initialized.len() != class_definition.properties.len() {
+                let missing = class_definition
+                    .properties
+                    .iter()
+                    .find(|property| !initialized.contains(&property.id))
+                    .expect("property count differs");
+                return Err(malformed_mir(format!(
+                    "class#{} new expression does not initialize property{}",
+                    class.0, missing.id.index
+                )));
+            }
             if let Some(constructor) = constructor {
                 validate_call_args_for_params(
                     program,

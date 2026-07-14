@@ -286,3 +286,72 @@ fn writable_move_promotion_fix_replaces_writable_with_take() {
     assert_eq!(fix.replacement, "take");
     assert_eq!(&source[fix.span.start..fix.span.end], "writable");
 }
+
+#[test]
+fn loop_conditions_recheck_ownership_transfers_on_backedges() {
+    let diagnostics = doriac::check_source(
+        "loop-condition-move.doria",
+        "class Guard {} function poll(take Guard $guard): bool { return false; } function repeat(take Guard $guard): void { while (poll($guard)) {} }",
+    )
+    .expect_err("each loop-condition evaluation would transfer the same owner");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "E0470"));
+}
+
+#[test]
+fn break_exits_contribute_to_post_loop_ownership() {
+    let diagnostics = doriac::check_source(
+        "loop-break-move.doria",
+        "class Guard {} function consume(take Guard $guard): void {} function route(bool $again, take Guard $guard): void { while ($again) { consume($guard); break; } consume($guard); }",
+    )
+    .expect_err("a break path can reach the use after transferring ownership");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "E0470"));
+}
+
+#[test]
+fn promoted_take_parameter_is_owned_by_the_property_before_the_body() {
+    let diagnostics = doriac::check_source(
+        "promoted-take-body.doria",
+        "class Child {} function consume(take Child $child): void {} class Parent { function __construct(take Child $child) { consume($child); } }",
+    )
+    .expect_err("the promoted property already owns the constructor argument");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "E0470"));
+}
+
+#[test]
+fn panic_branch_does_not_reach_the_fallthrough_owner() {
+    doriac::check_source(
+        "panic-terminates.doria",
+        "class Guard {} function consume(take Guard $guard): void {} function route(bool $bad, take Guard $guard): void { if ($bad) { consume($guard); panic(\"stop\"); } consume($guard); }",
+    )
+    .expect("panic terminates the branch after its ownership transfer");
+}
+
+#[test]
+fn borrowed_and_owned_branch_join_is_conservative() {
+    let diagnostics = doriac::check_source(
+        "borrowed-owned-join.doria",
+        "class Guard {} function consume(take Guard $guard): void {} function route(bool $replace, writable Guard $slot): void { if ($replace) { $slot = new Guard(); } consume($slot); }",
+    )
+    .expect_err("a conditionally borrowed binding cannot be transferred");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "E0474"));
+}
+
+#[test]
+fn assigning_a_class_owner_into_mixed_moves_the_source() {
+    let diagnostics = doriac::check_source(
+        "mixed-owner.doria",
+        "class Guard {} function consume(take Guard $guard): void {} function route(take Guard $guard): void { writable mixed $slot = 1; $slot = $guard; consume($guard); }",
+    )
+    .expect_err("storing the owner in mixed must consume the source binding");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "E0470"));
+}

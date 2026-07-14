@@ -306,6 +306,14 @@ fn shared_validator_rejects_invalid_class_new_property_sources() {
         .expect("matching constructor property source should validate");
 }
 
+#[test]
+fn shared_validator_rejects_class_new_with_missing_properties() {
+    let program = class_new_program();
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("class construction must initialize every property");
+    assert!(error.message.contains("does not initialize property0"));
+}
+
 fn decimal_spec() -> FormatSpec {
     FormatSpec {
         conversion: FormatConversion::Decimal,

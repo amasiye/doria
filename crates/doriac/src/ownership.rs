@@ -25,6 +25,7 @@ struct Signature {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum State {
     Borrowed,
+    BorrowedOrOwned,
     Owned,
     Given { at: Span },
     MaybeGiven { at: Span },
@@ -32,7 +33,8 @@ enum State {
 
 #[derive(Debug, Clone)]
 struct Binding {
-    class: String,
+    class: Option<String>,
+    mixed: bool,
     writable: bool,
     state: State,
 }
@@ -89,6 +91,13 @@ impl Scopes {
 fn join_state(left: &State, right: &State) -> State {
     match (left, right) {
         (State::Borrowed, State::Borrowed) => State::Borrowed,
+        (State::BorrowedOrOwned, State::Borrowed)
+        | (State::Borrowed, State::BorrowedOrOwned)
+        | (State::BorrowedOrOwned, State::BorrowedOrOwned)
+        | (State::BorrowedOrOwned, State::Owned)
+        | (State::Owned, State::BorrowedOrOwned)
+        | (State::Borrowed, State::Owned)
+        | (State::Owned, State::Borrowed) => State::BorrowedOrOwned,
         (State::Owned, State::Owned) => State::Owned,
         (State::Given { at: left }, State::Given { at: right }) if left == right => {
             State::Given { at: *left }
@@ -97,10 +106,11 @@ fn join_state(left: &State, right: &State) -> State {
         | (State::MaybeGiven { at }, _)
         | (_, State::MaybeGiven { at })
         | (State::Owned, State::Given { at })
-        | (State::Given { at }, State::Owned) => State::MaybeGiven { at: *at },
-        (State::Borrowed, _) | (_, State::Borrowed) => {
-            unreachable!("a binding cannot change between borrowed and owned")
-        }
+        | (State::Given { at }, State::Owned)
+        | (State::Borrowed, State::Given { at })
+        | (State::Given { at }, State::Borrowed)
+        | (State::BorrowedOrOwned, State::Given { at })
+        | (State::Given { at }, State::BorrowedOrOwned) => State::MaybeGiven { at: *at },
     }
 }
 
@@ -227,6 +237,7 @@ enum UseMode {
 struct Flow {
     falls_through: bool,
     backedges: Vec<Scopes>,
+    breaks: Vec<Scopes>,
 }
 
 impl Flow {
@@ -234,6 +245,7 @@ impl Flow {
         Self {
             falls_through: true,
             backedges: Vec::new(),
+            breaks: Vec::new(),
         }
     }
 
@@ -241,6 +253,15 @@ impl Flow {
         Self {
             falls_through: false,
             backedges: Vec::new(),
+            breaks: Vec::new(),
+        }
+    }
+
+    fn breaks(scopes: &Scopes) -> Self {
+        Self {
+            falls_through: false,
+            backedges: Vec::new(),
+            breaks: vec![scopes.clone()],
         }
     }
 }
@@ -265,9 +286,12 @@ impl Checker {
                 scopes.declare(
                     param.name.clone(),
                     Binding {
-                        class: param.ty.name.clone(),
+                        class: Some(param.ty.name.clone()),
+                        mixed: false,
                         writable: param.writable,
-                        state: if param.take {
+                        state: if param.take && param.promoted_access.is_some() {
+                            State::Given { at: param.span }
+                        } else if param.take {
                             State::Owned
                         } else {
                             State::Borrowed
@@ -303,11 +327,15 @@ impl Checker {
             let statement_flow = self.check_statement(statement, scopes, return_class);
             flow.falls_through = statement_flow.falls_through;
             flow.backedges.extend(statement_flow.backedges);
+            flow.breaks.extend(statement_flow.breaks);
         }
         if nested {
             scopes.pop();
             for backedge in &mut flow.backedges {
                 backedge.pop();
+            }
+            for break_exit in &mut flow.breaks {
+                break_exit.pop();
             }
         }
         flow
@@ -321,12 +349,13 @@ impl Checker {
     ) -> Flow {
         match statement {
             Stmt::VarDecl(decl) => {
-                let class = decl
+                let declared_class = decl
                     .ty
                     .as_ref()
                     .filter(|ty| self.classes.contains(&ty.name))
-                    .map(|ty| ty.name.clone())
-                    .or_else(|| self.expr_class(&decl.initializer, scopes));
+                    .map(|ty| ty.name.clone());
+                let mixed = decl.ty.as_ref().is_some_and(|ty| ty.name == "mixed");
+                let class = declared_class.or_else(|| self.expr_class(&decl.initializer, scopes));
                 self.use_expr(
                     &decl.initializer,
                     scopes,
@@ -336,11 +365,12 @@ impl Checker {
                         UseMode::Borrow
                     },
                 );
-                if let Some(class) = class {
+                if class.is_some() || mixed {
                     scopes.declare(
                         decl.name.clone(),
                         Binding {
                             class,
+                            mixed,
                             writable: decl.writable,
                             state: State::Owned,
                         },
@@ -356,8 +386,13 @@ impl Checker {
                 }
                 if let Expr::Variable { name, span } = &assignment.target {
                     let value_class = self.expr_class(&assignment.value, scopes);
-                    let target_class = scopes.get(name).map(|binding| binding.class.clone());
-                    if value_class.is_some() && value_class == target_class {
+                    let target = scopes.get(name).cloned();
+                    let class_assignment = value_class.is_some()
+                        && target
+                            .as_ref()
+                            .is_some_and(|binding| binding.mixed || binding.class == value_class);
+                    let mixed_assignment = target.as_ref().is_some_and(|binding| binding.mixed);
+                    if class_assignment || mixed_assignment {
                         if variable_name(&assignment.value).is_some_and(|source| source == name) {
                             self.diagnostics.push(
                                 Diagnostic::new(
@@ -385,9 +420,20 @@ impl Checker {
                                 ),
                             );
                         }
-                        self.use_expr(&assignment.value, scopes, UseMode::Give);
+                        self.use_expr(
+                            &assignment.value,
+                            scopes,
+                            if value_class.is_some() {
+                                UseMode::Give
+                            } else {
+                                UseMode::Borrow
+                            },
+                        );
                         if let Some(binding) = scopes.get_mut(name) {
                             binding.state = State::Owned;
+                            if binding.mixed {
+                                binding.class = value_class;
+                            }
                         }
                     } else {
                         self.use_expr(&assignment.value, scopes, UseMode::Borrow);
@@ -410,9 +456,17 @@ impl Checker {
                 }
                 Flow::fallthrough()
             }
-            Stmt::Echo { expr, .. } | Stmt::Expr { expr, .. } => {
+            Stmt::Echo { expr, .. } => {
                 self.use_expr(expr, scopes, UseMode::Borrow);
                 Flow::fallthrough()
+            }
+            Stmt::Expr { expr, .. } => {
+                self.use_expr(expr, scopes, UseMode::Borrow);
+                if is_panic_expr(expr) {
+                    Flow::stops()
+                } else {
+                    Flow::fallthrough()
+                }
             }
             Stmt::Return { expr, .. } => {
                 if let Some(expr) = expr {
@@ -456,9 +510,11 @@ impl Checker {
                     (false, false) => *scopes = before,
                 }
                 then_flow.backedges.append(&mut else_flow.backedges);
+                then_flow.breaks.append(&mut else_flow.breaks);
                 Flow {
                     falls_through: then_flow.falls_through || else_flow.falls_through,
                     backedges: then_flow.backedges,
+                    breaks: then_flow.breaks,
                 }
             }
             Stmt::While(statement) => {
@@ -470,8 +526,13 @@ impl Checker {
                 if body_flow.falls_through {
                     body_flow.backedges.push(body);
                 }
+                for repeat in &mut body_flow.backedges {
+                    self.use_expr(&statement.condition, repeat, UseMode::Borrow);
+                }
                 self.check_second_iteration(&statement.body, &body_flow.backedges, return_class);
-                merge_loop_exit(scopes, &before, &body_flow.backedges);
+                let mut exits = body_flow.backedges;
+                exits.extend(body_flow.breaks);
+                merge_loop_exit(scopes, &before, &exits);
                 Flow::fallthrough()
             }
             Stmt::For(statement) => {
@@ -519,9 +580,14 @@ impl Checker {
                             }
                         }
                     }
+                    if let Some(condition) = &statement.condition {
+                        self.use_expr(condition, repeat, UseMode::Borrow);
+                    }
                 }
                 self.check_second_iteration(&statement.body, &body_flow.backedges, return_class);
-                merge_loop_exit(scopes, &before, &body_flow.backedges);
+                let mut exits = body_flow.backedges;
+                exits.extend(body_flow.breaks);
+                merge_loop_exit(scopes, &before, &exits);
                 scopes.pop();
                 Flow::fallthrough()
             }
@@ -535,17 +601,20 @@ impl Checker {
                     body_flow.backedges.push(body);
                 }
                 self.check_second_iteration(&statement.body, &body_flow.backedges, return_class);
-                merge_loop_exit(scopes, &before, &body_flow.backedges);
+                let mut exits = body_flow.backedges;
+                exits.extend(body_flow.breaks);
+                merge_loop_exit(scopes, &before, &exits);
                 Flow::fallthrough()
             }
             Stmt::Increment(increment) => {
                 self.use_expr(&increment.target, scopes, UseMode::Borrow);
                 Flow::fallthrough()
             }
-            Stmt::Break { .. } => Flow::stops(),
+            Stmt::Break { .. } => Flow::breaks(scopes),
             Stmt::Continue { .. } => Flow {
                 falls_through: false,
                 backedges: vec![scopes.clone()],
+                breaks: Vec::new(),
             },
         }
     }
@@ -596,6 +665,19 @@ impl Checker {
                         );
                     }
                     State::Borrowed => {}
+                    State::BorrowedOrOwned if mode == UseMode::Give => {
+                        self.diagnostics.push(
+                            Diagnostic::new(
+                                "E0474",
+                                format!("`${name}` may still be borrowed and cannot be given away"),
+                                *span,
+                            )
+                            .with_help(
+                                "keep borrowed and owned values in separate bindings before transferring ownership",
+                            ),
+                        );
+                    }
+                    State::BorrowedOrOwned => {}
                     State::Owned if mode == UseMode::Give => {
                         binding.state = State::Given { at: *span };
                     }
@@ -728,7 +810,9 @@ impl Checker {
 
     fn expr_class(&self, expr: &Expr, scopes: &Scopes) -> Option<String> {
         match expr {
-            Expr::Variable { name, .. } => scopes.get(name).map(|binding| binding.class.clone()),
+            Expr::Variable { name, .. } => {
+                scopes.get(name).and_then(|binding| binding.class.clone())
+            }
             Expr::New { class_name, .. } if self.classes.contains(class_name) => {
                 Some(class_name.clone())
             }
@@ -768,6 +852,14 @@ fn variable_name(expr: &Expr) -> Option<&str> {
         Expr::Variable { name, .. } => Some(name),
         Expr::Grouped { expr, .. } => variable_name(expr),
         _ => None,
+    }
+}
+
+fn is_panic_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::FunctionCall { name, .. } => name == "panic",
+        Expr::Grouped { expr, .. } => is_panic_expr(expr),
+        _ => false,
     }
 }
 
