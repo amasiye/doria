@@ -494,7 +494,7 @@ fn validate_display_expr(expr: &Expr, semantic_info: &SemanticInfo) -> Result<()
     if semantic_info.float_type(expr.span()).is_some() {
         return Err(unsupported_numeric_shape(
             expr.span(),
-            "canonical Stage 16 float display formatting",
+            "canonical float display formatting",
         ));
     }
     validate_expr(expr, semantic_info)
@@ -524,7 +524,7 @@ fn validate_php_format_call(
             FormatConversion::Float => {
                 return Err(unsupported_numeric_shape(
                     argument.span(),
-                    "canonical Stage 17 `%f` formatting",
+                    "canonical `%f` float formatting",
                 ));
             }
             _ => validate_expr(argument, semantic_info)?,

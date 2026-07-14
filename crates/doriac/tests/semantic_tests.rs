@@ -2122,7 +2122,7 @@ class Profile
 
 class Person
 {
-    function __construct(Profile $profile)
+    function __construct(take Profile $profile)
     {
     }
 
@@ -3950,7 +3950,7 @@ class Office
 {
     Person $manager;
 
-    function __construct(Person $owner)
+    function __construct(take Person $owner)
     {
     }
 

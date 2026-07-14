@@ -388,7 +388,7 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                     }
                     mir::Type::Class(_) => {
                         return Err(malformed_mir(
-                            "class assignment reached LLVM before Stage 19 lowering",
+                            "class assignment reached LLVM before class lowering completed",
                         ));
                     }
                 }
@@ -445,7 +445,7 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
             }
             mir::Statement::AssignProperty { .. } | mir::Statement::DropClass { .. } => {
                 return Err(malformed_mir(
-                    "class operation reached LLVM before Stage 19 lowering",
+                    "class operation reached LLVM before class lowering completed",
                 ));
             }
         }
@@ -538,7 +538,7 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 Ok(self.lower_nullable_string_expression(value)?.into())
             }
             mir::Rvalue::Class(_) => Err(malformed_mir(
-                "class rvalue reached LLVM before Stage 19 lowering",
+                "class value reached LLVM before class lowering completed",
             )),
         }
     }

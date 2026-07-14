@@ -194,7 +194,7 @@ impl Parser {
         let message = if matches!(name.as_deref(), Some("Displayable")) {
             "`Displayable` is a compiler-known interface and cannot be redeclared"
         } else {
-            "general interface declarations are planned for Stage 35 and are not implemented yet"
+            "general interface declarations are not supported by this compiler"
         };
 
         let mut end = self.previous().span.end;

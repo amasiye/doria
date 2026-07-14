@@ -74,15 +74,13 @@ fn unsupported_after_parsing(source: &str) -> Vec<doriac::diagnostics::Diagnosti
     let ast = doriac::parse_source("test.doria", source).expect("source should parse");
     let hir = doriac::lowering::lower_program(&ast);
     doriac::mir_lowering::lower_program(&hir)
-        .expect_err("HIR should be outside Stage 11 MIR coverage")
+        .expect_err("HIR should be outside native compilation coverage")
 }
 
 fn assert_stage_11g_unsupported(diagnostics: &[doriac::diagnostics::Diagnostic], detail: &str) {
     assert_eq!(diagnostics[0].code, "M1101");
     assert!(
-        diagnostics[0]
-            .message
-            .contains("unsupported MIR Stage 11 coverage"),
+        !diagnostics[0].message.contains("Stage "),
         "unexpected diagnostic: {}",
         diagnostics[0].message
     );
@@ -1779,11 +1777,11 @@ fn rejects_break_and_continue_outside_loops_in_mir_lowering() {
     for (source, detail) in [
         (
             "function main(): void\n{\n    break;\n}\n",
-            "break requires an enclosing loop",
+            "`break` requires an enclosing loop",
         ),
         (
             "function main(): void\n{\n    continue;\n}\n",
-            "continue requires an enclosing loop",
+            "`continue` requires an enclosing loop",
         ),
     ] {
         let diagnostics = unsupported_after_parsing(source);
@@ -2378,7 +2376,7 @@ fn rejects_unsupported_stage_11e_foreach_shapes() {
 }
 "#,
     );
-    assert_stage_11g_unsupported(&collection, "collection and general iterable foreach");
+    assert_stage_11g_unsupported(&collection, "supports `foreach` only over integer ranges");
 
     let key_value = unsupported_after_parsing(
         r#"function main(): void
@@ -2501,7 +2499,7 @@ fn stage_11f_requires_exactly_one_main() {
 }
 "#,
     );
-    assert_stage_11g_unsupported(&missing, "exactly one top-level function main");
+    assert_stage_11g_unsupported(&missing, "exactly one top-level `main` function");
 
     let duplicate = unsupported_after_parsing(
         r#"function main(): int
@@ -2515,7 +2513,7 @@ function main(): int
 }
 "#,
     );
-    assert_stage_11g_unsupported(&duplicate, "exactly one top-level function main");
+    assert_stage_11g_unsupported(&duplicate, "exactly one top-level `main` function");
 }
 
 #[test]
@@ -3307,16 +3305,58 @@ fn stage_18_expression_interpolation_reuses_ordered_display_mir() {
 }
 
 #[test]
-fn stage_18_native_class_execution_stops_before_mir() {
+fn stage_19_class_metadata_precedes_top_level_execution_lowering() {
     let diagnostics = doriac::lower_source_to_mir(
         "displayable.doria",
         include_str!("../../../examples/php/displayable.doria"),
     )
-    .expect_err("native class layout and method dispatch begin in Stages 19 and 20");
+    .expect_err("top-level executable statements remain outside native MIR");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "M1101"
             && diagnostic
                 .message
-                .contains("classes are not lowered to MIR")
+                .contains("top-level executable statements are not supported")
     }));
+}
+
+#[test]
+fn native_class_property_gap_has_a_source_level_stage_neutral_diagnostic() {
+    let source = r#"class Message
+{
+    function __construct(string $text)
+    {
+    }
+
+    function __destruct()
+    {
+        echo "message released\n";
+    }
+}
+
+function deliver(take Message $message): void
+{
+    echo $message->text . "\n";
+}
+
+function main(): void
+{
+    let $message = new Message("Welcome to Doria");
+    deliver($message);
+}
+"#;
+
+    let diagnostics = doriac::lower_source_to_mir("main.doria", source)
+        .expect_err("class property execution is not supported yet");
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "M1101")
+        .expect("native coverage diagnostic");
+
+    assert_eq!(
+        diagnostic.message,
+        "class property access is not supported by native compilation"
+    );
+    assert!(!diagnostic.message.contains("Stage "));
+    assert!(!diagnostic.message.contains("MIR"));
+    assert!(!diagnostic.message.contains("condition"));
 }

@@ -303,7 +303,7 @@ impl Interpreter<'_> {
                     }
                     (mir::Type::Class(_), _) => {
                         return Err(InterpreterError::new(
-                            "class assignment reached the interpreter before Stage 19 lowering",
+                            "class assignment reached the interpreter before class lowering completed",
                         ));
                     }
                 }
@@ -337,7 +337,7 @@ impl Interpreter<'_> {
             }
             mir::Statement::AssignProperty { .. } | mir::Statement::DropClass { .. } => {
                 return Err(InterpreterError::new(
-                    "class operation reached the interpreter before Stage 19 lowering",
+                    "class operation reached the interpreter before class lowering completed",
                 ));
             }
         }
@@ -425,7 +425,7 @@ impl Interpreter<'_> {
                     .push(EvaluationTask::NullableString(value)),
                 mir::Rvalue::Class(_) => {
                     return Err(InterpreterError::new(
-                        "class rvalue reached the interpreter before Stage 19 lowering",
+                        "class value reached the interpreter before class lowering completed",
                     ));
                 }
             },

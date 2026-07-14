@@ -317,7 +317,7 @@ impl Checker {
                         self.diagnostics.push(
                             Diagnostic::new(
                                 "E0472",
-                                "direct moves into owned properties are unsupported in Stage 19",
+                                "direct moves into owned properties are not supported",
                                 assignment.span,
                             )
                             .with_help(
@@ -448,7 +448,7 @@ impl Checker {
                     self.diagnostics.push(
                         Diagnostic::new(
                             "E0472",
-                            "direct moves out of owned properties are unsupported in Stage 19",
+                            "direct moves out of owned properties are not supported",
                             *span,
                         )
                         .with_help(

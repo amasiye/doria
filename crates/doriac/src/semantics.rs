@@ -439,7 +439,7 @@ impl<'program> Checker<'program> {
                 self.diagnostics.push(Diagnostic::new(
                     "E0464",
                     format!(
-                        "general interface conformance for `{interface}` is planned for Stage 35 and is not implemented yet"
+                        "general interface conformance for `{interface}` is not supported by this compiler"
                     ),
                     class_decl.span,
                 ));
@@ -4408,8 +4408,8 @@ impl<'program> Checker<'program> {
                 ty,
                 span,
                 "E0454",
-                format!("Stage 17 supports `?string`, not `{ty}`"),
-                "general nullable types remain Stage 22",
+                format!("nullable type `{ty}` is not supported by this compiler"),
+                "only `?string` is currently available as a nullable type",
             );
         }
         if let Some(integer) = IntegerType::from_source_name(&ty.name) {

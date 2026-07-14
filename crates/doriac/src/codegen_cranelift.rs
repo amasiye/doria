@@ -560,7 +560,7 @@ fn lower_statement(
                 }
                 mir::Type::Class(_) => {
                     return Err(malformed_mir(
-                        "class assignment reached Cranelift before Stage 19 lowering",
+                        "class assignment reached Cranelift before class lowering completed",
                     ));
                 }
             }
@@ -630,7 +630,7 @@ fn lower_statement(
         }
         mir::Statement::AssignProperty { .. } | mir::Statement::DropClass { .. } => {
             return Err(malformed_mir(
-                "class operation reached Cranelift before Stage 19 lowering",
+                "class operation reached Cranelift before class lowering completed",
             ));
         }
     }
@@ -724,7 +724,7 @@ fn lower_rvalue(
             lower_nullable_string_expression(builder, value, resources)
         }
         mir::Rvalue::Class(_) => Err(malformed_mir(
-            "class rvalue reached Cranelift before Stage 19 lowering",
+            "class value reached Cranelift before class lowering completed",
         )),
     }
 }

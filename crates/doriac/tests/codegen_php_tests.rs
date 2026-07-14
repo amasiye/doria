@@ -328,7 +328,7 @@ fn php_backend_rejects_noncanonical_float_display() {
         assert_eq!(diagnostics[0].code, "B1301");
         assert!(diagnostics[0]
             .message
-            .contains("canonical Stage 16 float display formatting"));
+            .contains("canonical float display formatting"));
     }
 }
 
@@ -885,10 +885,14 @@ echo $name;
 "#,
         BackendTarget::Debug,
     )
-    .expect_err("broader source should remain outside Stage 11g MIR coverage");
+    .expect_err("broader source should remain outside native compilation coverage");
 
     assert_eq!(err[0].code, "M1101");
-    assert!(err[0].message.contains("unsupported MIR Stage 11 coverage"));
+    assert!(err[0]
+        .message
+        .contains("top-level executable statements are not supported"));
+    assert!(!err[0].message.contains("Stage "));
+    assert!(!err[0].message.contains("MIR"));
 }
 
 #[test]
@@ -1343,7 +1347,7 @@ fn php_backend_rejects_noncanonical_float_display_in_checked_formats() {
         assert_eq!(diagnostics[0].code, "B1301");
         assert!(diagnostics[0]
             .message
-            .contains("canonical Stage 16 float display formatting"));
+            .contains("canonical float display formatting"));
     }
 }
 
