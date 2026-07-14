@@ -274,6 +274,29 @@ fn repeatable_loop_body_cannot_move_the_same_owner_twice() {
 }
 
 #[test]
+fn unreachable_false_loop_body_does_not_move_its_owner() {
+    doriac::check_source(
+        "false-loop-move.doria",
+        "class Guard {} function consume(take Guard $guard): void {} function route(take Guard $guard): void { while (false) { consume($guard); } consume($guard); }",
+    )
+    .expect("a literal-false loop body cannot give away its owner");
+}
+
+#[test]
+fn inferred_mixed_returns_are_move_values_for_functions_and_methods() {
+    for source in [
+        "function make() { mixed $value = 1; return $value; } function duplicate(): void { let $first = make(); let $second = $first; let $third = $first; }",
+        "class Factory { function make() { mixed $value = 1; return $value; } } function duplicate(Factory $factory): void { let $first = $factory->make(); let $second = $first; let $third = $first; }",
+    ] {
+        let diagnostics = doriac::check_source("inferred-mixed-move.doria", source)
+            .expect_err("an inferred mixed return must not create multiple owners");
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0470"));
+    }
+}
+
+#[test]
 fn writable_move_promotion_fix_replaces_writable_with_take() {
     let source = "class Person {} class Team { function __construct(writable Person $manager) {} }";
     let diagnostics = doriac::check_source("writable-promotion.doria", source)

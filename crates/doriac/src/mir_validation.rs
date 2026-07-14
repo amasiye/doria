@@ -3,10 +3,15 @@
 use std::collections::HashSet;
 
 use crate::backend::BackendError;
+use crate::class_layout::{compute_class_layout, ClassId, FieldType};
 use crate::mir;
 use crate::numeric::IntegerType;
 
 pub fn validate_program(program: &mir::Program) -> Result<(), BackendError> {
+    for (index, class) in program.classes.iter().enumerate() {
+        validate_class(program, index, class)?;
+    }
+
     let entry = program
         .functions
         .get(program.entry.0)
@@ -41,6 +46,102 @@ pub fn validate_program(program: &mir::Program) -> Result<(), BackendError> {
         validate_function(program, function)?;
     }
     Ok(())
+}
+
+fn validate_class(
+    program: &mir::Program,
+    index: usize,
+    class: &mir::Class,
+) -> Result<(), BackendError> {
+    let expected_id = ClassId(index);
+    if class.id != expected_id {
+        return Err(malformed_mir(format!(
+            "class table slot {index} contains class#{}",
+            class.id.0
+        )));
+    }
+
+    for (property_index, property) in class.properties.iter().enumerate() {
+        if property.id.class != class.id || property.id.index != property_index {
+            return Err(malformed_mir(format!(
+                "class#{} property slot {property_index} contains property#{}:{}",
+                class.id.0, property.id.class.0, property.id.index
+            )));
+        }
+        if let mir::Type::Class(referenced) = property.ty {
+            class_in(program, referenced)?;
+        }
+    }
+
+    let pointer_size = std::mem::size_of::<usize>() as u32;
+    let expected_layout = compute_class_layout(
+        class.id,
+        class
+            .properties
+            .iter()
+            .map(|property| (property.id, field_type(property.ty))),
+        pointer_size,
+    );
+    if class.layout != expected_layout {
+        return Err(malformed_mir(format!(
+            "class#{} layout does not match its property table",
+            class.id.0
+        )));
+    }
+
+    if let Some(constructor) = class.constructor {
+        validate_lifecycle(program, class.id, constructor, "constructor", false)?;
+    }
+    if let Some(destructor) = class.destructor {
+        validate_lifecycle(program, class.id, destructor, "destructor", true)?;
+    }
+    Ok(())
+}
+
+fn validate_lifecycle(
+    program: &mir::Program,
+    class: ClassId,
+    function: mir::FunctionId,
+    kind: &str,
+    receiver_only: bool,
+) -> Result<(), BackendError> {
+    let function = function_in(program, function)?;
+    if function.return_type != mir::ReturnType::Void {
+        return Err(malformed_mir(format!(
+            "class#{} {kind} {} does not return void",
+            class.0, function.name
+        )));
+    }
+    let Some((receiver, parameters)) = function.params.split_first() else {
+        return Err(malformed_mir(format!(
+            "class#{} {kind} {} has no implicit receiver",
+            class.0, function.name
+        )));
+    };
+    if local_in(function, *receiver)?.ty != mir::Type::Class(class) {
+        return Err(malformed_mir(format!(
+            "class#{} {kind} {} has an incompatible implicit receiver",
+            class.0, function.name
+        )));
+    }
+    if receiver_only && !parameters.is_empty() {
+        return Err(malformed_mir(format!(
+            "class#{} destructor {} declares parameters",
+            class.0, function.name
+        )));
+    }
+    Ok(())
+}
+
+fn field_type(ty: mir::Type) -> FieldType {
+    match ty {
+        mir::Type::Scalar(mir::ScalarType::Integer(integer)) => FieldType::Integer(integer),
+        mir::Type::Scalar(mir::ScalarType::Float(float)) => FieldType::Float(float),
+        mir::Type::Scalar(mir::ScalarType::Bool) => FieldType::Bool,
+        mir::Type::String => FieldType::String,
+        mir::Type::NullableString => FieldType::NullableString,
+        mir::Type::Class(class) => FieldType::Class(class),
+    }
 }
 
 fn validate_function(program: &mir::Program, function: &mir::Function) -> Result<(), BackendError> {
@@ -795,6 +896,14 @@ fn function_in(
         .get(id.0)
         .filter(|function| function.id == id)
         .ok_or_else(|| malformed_mir(format!("FunctionId function{} does not exist", id.0)))
+}
+
+fn class_in(program: &mir::Program, id: ClassId) -> Result<&mir::Class, BackendError> {
+    program
+        .classes
+        .get(id.0)
+        .filter(|class| class.id == id)
+        .ok_or_else(|| malformed_mir(format!("ClassId class#{} does not exist", id.0)))
 }
 
 fn local_in(function: &mir::Function, id: mir::LocalId) -> Result<&mir::Local, BackendError> {

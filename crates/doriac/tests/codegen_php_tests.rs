@@ -1117,6 +1117,31 @@ fn rejects_deterministic_destruction_that_php_cannot_preserve() {
 }
 
 #[test]
+fn allows_take_on_copy_parameters_in_php() {
+    let php = doriac::compile_source_to_php(
+        "test.doria",
+        "function identity(take int $value): int { return $value; } function main(): int { return identity(42); }",
+    )
+    .expect("take on a Copy value is a semantic no-op");
+
+    assert!(php.contains("function identity(int $value): int"));
+    assert!(!php.contains("take int"));
+}
+
+#[test]
+fn rejects_take_on_move_parameters_in_php() {
+    let diagnostics = doriac::compile_source_to_php(
+        "test.doria",
+        "class Guard {} function consume(take Guard $guard): void {}",
+    )
+    .expect_err("PHP cannot preserve class ownership transfer");
+
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "B1901"));
+}
+
+#[test]
 fn rejects_static_lifecycle_methods_before_php_emission() {
     let err = doriac::compile_source_to_php(
         "test.doria",

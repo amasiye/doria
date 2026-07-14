@@ -61,9 +61,21 @@ pub fn analyze_program(program: &Program) -> DiagnosticResult<SemanticInfo> {
     let mut checker = Checker::new(program);
     checker.check();
     if checker.diagnostics.is_empty() {
+        let inferred_move_returns = checker
+            .function_signatures
+            .iter()
+            .filter_map(|(span_start, signature)| {
+                checker
+                    .type_contains_mixed(signature.return_ty)
+                    .then_some(*span_start)
+            })
+            .collect();
         checker
             .diagnostics
-            .extend(crate::ownership::check_program(program));
+            .extend(crate::ownership::check_program_with_inferred_move_returns(
+                program,
+                &inferred_move_returns,
+            ));
     }
     if checker.diagnostics.is_empty() {
         Ok(SemanticInfo {

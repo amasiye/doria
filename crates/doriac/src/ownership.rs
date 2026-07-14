@@ -123,6 +123,13 @@ fn join_state(left: &State, right: &State) -> State {
 }
 
 pub fn check_program(program: &ast::Program) -> Vec<Diagnostic> {
+    check_program_with_inferred_move_returns(program, &HashSet::new())
+}
+
+pub(crate) fn check_program_with_inferred_move_returns(
+    program: &ast::Program,
+    inferred_move_returns: &HashSet<usize>,
+) -> Vec<Diagnostic> {
     let classes = program
         .items
         .iter()
@@ -139,7 +146,10 @@ pub fn check_program(program: &ast::Program) -> Vec<Diagnostic> {
     for item in &program.items {
         match item {
             Item::Function(function) => {
-                signatures.insert(function.name.clone(), signature(function, &classes));
+                signatures.insert(
+                    function.name.clone(),
+                    signature(function, &classes, inferred_move_returns),
+                );
             }
             Item::Class(class) => {
                 for member in &class.members {
@@ -160,7 +170,8 @@ pub fn check_program(program: &ast::Program) -> Vec<Diagnostic> {
                             }
                         }
                         ClassMember::Method(method) => {
-                            let method_signature = signature(method, &classes);
+                            let method_signature =
+                                signature(method, &classes, inferred_move_returns);
                             methods.insert(
                                 (class.name.clone(), method.name.clone()),
                                 method_signature.clone(),
@@ -228,7 +239,11 @@ pub fn check_program(program: &ast::Program) -> Vec<Diagnostic> {
     checker.diagnostics
 }
 
-fn signature(function: &ast::FunctionDecl, classes: &HashSet<String>) -> Signature {
+fn signature(
+    function: &ast::FunctionDecl,
+    classes: &HashSet<String>,
+    inferred_move_returns: &HashSet<usize>,
+) -> Signature {
     Signature {
         params: function
             .params
@@ -246,7 +261,8 @@ fn signature(function: &ast::FunctionDecl, classes: &HashSet<String>) -> Signatu
         returns_move_type: function
             .return_type
             .as_ref()
-            .is_some_and(|ty| classes.contains(&ty.name) || ty.name == "mixed"),
+            .is_some_and(|ty| classes.contains(&ty.name) || ty.name == "mixed")
+            || inferred_move_returns.contains(&function.span.start),
     }
 }
 
@@ -583,6 +599,9 @@ impl Checker {
             }
             Stmt::While(statement) => {
                 self.use_expr(&statement.condition, scopes, UseMode::Borrow);
+                if bool_literal(&statement.condition) == Some(false) {
+                    return Flow::fallthrough();
+                }
                 let before = scopes.clone();
                 let mut body = before.clone();
                 let mut body_flow =

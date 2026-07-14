@@ -161,7 +161,7 @@ fn validate_function(
         )));
     }
     for param in &function.params {
-        if param.take {
+        if param.take && is_move_type(&param.ty, semantic_info) {
             return Err(unsupported_ownership_shape(
                 param.span,
                 format!("ownership transfer through `take ${}`", param.name),
@@ -176,6 +176,15 @@ fn validate_function(
         validate_type(return_type, function.span)?;
     }
     validate_block(&function.body, semantic_info)
+}
+
+fn is_move_type(ty: &TypeRef, semantic_info: &SemanticInfo) -> bool {
+    ty.name == "mixed"
+        || matches!(ty.name.as_str(), "[]" | "List" | "Dictionary" | "Set")
+        || semantic_info
+            .classes
+            .iter()
+            .any(|class| class.name == ty.name)
 }
 
 fn validate_type(ty: &TypeRef, span: Span) -> Result<(), BackendError> {

@@ -323,6 +323,90 @@ fn shared_validator_requires_constructors_to_return_void() {
     assert!(error.message.contains("constructor") && error.message.contains("return void"));
 }
 
+#[test]
+fn shared_validator_rejects_inconsistent_class_and_property_tables() {
+    let mut wrong_class_slot = class_program();
+    wrong_class_slot.classes[0].id = ClassId(1);
+    let error = doriac::mir_validation::validate_program(&wrong_class_slot)
+        .expect_err("class IDs must match their table slots");
+    assert!(error.message.contains("class table slot 0"));
+
+    let mut wrong_property_slot = class_new_program();
+    wrong_property_slot.classes[0].properties[0].id.index = 1;
+    let error = doriac::mir_validation::validate_program(&wrong_property_slot)
+        .expect_err("property IDs must match their table slots");
+    assert!(error.message.contains("property slot 0"));
+
+    let mut wrong_layout = class_new_program();
+    wrong_layout.classes[0].layout.size += 8;
+    let error = doriac::mir_validation::validate_program(&wrong_layout)
+        .expect_err("class layouts must be derived from property metadata");
+    assert!(error.message.contains("layout does not match"));
+}
+
+#[test]
+fn shared_validator_rejects_unknown_property_class_references() {
+    let mut program = class_program();
+    let property = PropertyId {
+        class: ClassId(0),
+        index: 0,
+    };
+    program.classes[0].properties.push(Property {
+        id: property,
+        name: "missing".to_string(),
+        ty: Type::Class(ClassId(99)),
+        writable: false,
+        promoted: false,
+    });
+    program.classes[0].layout = compute_class_layout(
+        ClassId(0),
+        [(property, FieldType::Class(ClassId(99)))],
+        std::mem::size_of::<usize>() as u32,
+    );
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("property types must reference declared classes");
+    assert!(error.message.contains("ClassId class#99 does not exist"));
+}
+
+#[test]
+fn shared_validator_checks_lifecycle_metadata_even_when_unused() {
+    let mut valid = class_program();
+    valid.classes[0].destructor = Some(FunctionId(1));
+    valid.functions.push(Function {
+        id: FunctionId(1),
+        name: "Class0::__destruct".to_string(),
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Void,
+        locals: vec![class_local(0, ClassId(0))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+    doriac::mir_validation::validate_program(&valid)
+        .expect("well-formed lifecycle metadata should validate");
+
+    let mut missing = valid.clone();
+    missing.classes[0].destructor = Some(FunctionId(99));
+    doriac::mir_validation::validate_program(&missing)
+        .expect_err("lifecycle function IDs must exist");
+
+    let mut wrong_receiver = valid.clone();
+    wrong_receiver.functions[1].locals[0].ty = Type::Class(ClassId(1));
+    let error = doriac::mir_validation::validate_program(&wrong_receiver)
+        .expect_err("lifecycle receivers must use the owning class");
+    assert!(error.message.contains("incompatible implicit receiver"));
+
+    let mut wrong_return = valid;
+    wrong_return.functions[1].return_type = ReturnType::Value(Type::String);
+    let error = doriac::mir_validation::validate_program(&wrong_return)
+        .expect_err("lifecycle functions must return void");
+    assert!(error.message.contains("does not return void"));
+}
+
 fn decimal_spec() -> FormatSpec {
     FormatSpec {
         conversion: FormatConversion::Decimal,
