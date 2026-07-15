@@ -311,6 +311,224 @@ fn shared_validator_rejects_invalid_class_new_property_sources() {
 }
 
 #[test]
+fn shared_validator_rejects_reusing_a_moved_constructor_argument() {
+    let mut program = class_program();
+    let first = PropertyId {
+        class: ClassId(0),
+        index: 0,
+    };
+    let second = PropertyId {
+        class: ClassId(0),
+        index: 1,
+    };
+    program.classes[0].properties = vec![
+        Property {
+            id: first,
+            name: "first".to_string(),
+            ty: Type::Class(ClassId(1)),
+            writable: false,
+            promoted: true,
+        },
+        Property {
+            id: second,
+            name: "second".to_string(),
+            ty: Type::Class(ClassId(1)),
+            writable: false,
+            promoted: true,
+        },
+    ];
+    program.classes[0].layout = compute_class_layout(
+        ClassId(0),
+        [
+            (first, FieldType::Class(ClassId(1))),
+            (second, FieldType::Class(ClassId(1))),
+        ],
+        std::mem::size_of::<usize>() as u32,
+    );
+    program.classes[0].constructor = Some(FunctionId(1));
+    program.functions[0].locals = vec![class_local(0, ClassId(0)), class_local(1, ClassId(1))];
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::AssignLocal {
+            target: LocalId(0),
+            value: Rvalue::Class(ClassExpression::New {
+                class: ClassId(0),
+                properties: vec![
+                    PropertyValue {
+                        property: first,
+                        source: PropertyValueSource::ConstructorArgument(0),
+                    },
+                    PropertyValue {
+                        property: second,
+                        source: PropertyValueSource::ConstructorArgument(0),
+                    },
+                ],
+                constructor: Some(FunctionId(1)),
+                args: vec![Rvalue::Class(ClassExpression::Local {
+                    class: ClassId(1),
+                    local: LocalId(1),
+                    transfer: true,
+                })],
+            }),
+        });
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "Pair::__construct".to_string(),
+        params: vec![LocalId(0), LocalId(1)],
+        return_type: ReturnType::Void,
+        locals: vec![class_local(0, ClassId(0)), class_local(1, ClassId(1))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("one class owner cannot initialize multiple properties");
+    assert!(error
+        .message
+        .contains("gives constructor argument 0 to more than one property"));
+}
+
+#[test]
+fn shared_validator_rejects_reusing_a_class_local_for_properties() {
+    let mut program = class_program();
+    let first = PropertyId {
+        class: ClassId(0),
+        index: 0,
+    };
+    let second = PropertyId {
+        class: ClassId(0),
+        index: 1,
+    };
+    program.classes[0].properties = vec![
+        Property {
+            id: first,
+            name: "first".to_string(),
+            ty: Type::Class(ClassId(1)),
+            writable: false,
+            promoted: false,
+        },
+        Property {
+            id: second,
+            name: "second".to_string(),
+            ty: Type::Class(ClassId(1)),
+            writable: false,
+            promoted: false,
+        },
+    ];
+    program.classes[0].layout = compute_class_layout(
+        ClassId(0),
+        [
+            (first, FieldType::Class(ClassId(1))),
+            (second, FieldType::Class(ClassId(1))),
+        ],
+        std::mem::size_of::<usize>() as u32,
+    );
+    program.functions[0].locals = vec![class_local(0, ClassId(0)), class_local(1, ClassId(1))];
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::AssignLocal {
+            target: LocalId(0),
+            value: Rvalue::Class(ClassExpression::New {
+                class: ClassId(0),
+                properties: vec![
+                    PropertyValue {
+                        property: first,
+                        source: PropertyValueSource::Expression(Rvalue::Class(
+                            ClassExpression::Local {
+                                class: ClassId(1),
+                                local: LocalId(1),
+                                transfer: true,
+                            },
+                        )),
+                    },
+                    PropertyValue {
+                        property: second,
+                        source: PropertyValueSource::Expression(Rvalue::Class(
+                            ClassExpression::Local {
+                                class: ClassId(1),
+                                local: LocalId(1),
+                                transfer: true,
+                            },
+                        )),
+                    },
+                ],
+                constructor: None,
+                args: vec![],
+            }),
+        });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("one class local cannot initialize multiple properties");
+    assert!(error
+        .message
+        .contains("gives class local local1 to more than one property"));
+}
+
+#[test]
+fn shared_validator_rejects_a_promoted_class_owner_also_owned_by_the_constructor_parameter() {
+    let mut program = class_program();
+    let child = PropertyId {
+        class: ClassId(0),
+        index: 0,
+    };
+    program.classes[0].properties = vec![Property {
+        id: child,
+        name: "child".to_string(),
+        ty: Type::Class(ClassId(1)),
+        writable: false,
+        promoted: true,
+    }];
+    program.classes[0].layout = compute_class_layout(
+        ClassId(0),
+        [(child, FieldType::Class(ClassId(1)))],
+        std::mem::size_of::<usize>() as u32,
+    );
+    program.classes[0].constructor = Some(FunctionId(1));
+    program.functions[0].locals = vec![class_local(0, ClassId(0)), class_local(1, ClassId(1))];
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::AssignLocal {
+            target: LocalId(0),
+            value: Rvalue::Class(ClassExpression::New {
+                class: ClassId(0),
+                properties: vec![PropertyValue {
+                    property: child,
+                    source: PropertyValueSource::ConstructorArgument(0),
+                }],
+                constructor: Some(FunctionId(1)),
+                args: vec![Rvalue::Class(ClassExpression::Local {
+                    class: ClassId(1),
+                    local: LocalId(1),
+                    transfer: true,
+                })],
+            }),
+        });
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "Parent::__construct".to_string(),
+        params: vec![LocalId(0), LocalId(1)],
+        return_type: ReturnType::Void,
+        locals: vec![class_local(0, ClassId(0)), class_local(1, ClassId(1))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("a promoted class owner cannot also be owned by the constructor parameter");
+    assert!(error.message.contains(
+        "gives constructor argument 0 to a property and an owning constructor parameter"
+    ));
+}
+
+#[test]
 fn shared_validator_rejects_class_new_with_missing_properties() {
     let program = class_new_program();
     let error = doriac::mir_validation::validate_program(&program)
@@ -430,6 +648,51 @@ fn shared_validator_rejects_unknown_property_class_references() {
 
     let error = doriac::mir_validation::validate_program(&program)
         .expect_err("property types must reference declared classes");
+    assert!(error.message.contains("ClassId class#99 does not exist"));
+}
+
+#[test]
+fn shared_validator_rejects_unknown_classes_in_function_types() {
+    let mut local = valid_void_program();
+    local.functions[0].locals.push(class_local(0, ClassId(99)));
+    let error = doriac::mir_validation::validate_program(&local)
+        .expect_err("local types must reference declared classes");
+    assert!(error.message.contains("ClassId class#99 does not exist"));
+
+    let mut parameter = valid_void_program();
+    parameter.functions.push(Function {
+        id: FunctionId(1),
+        name: "missingClassParameter".to_string(),
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Void,
+        locals: vec![class_local(0, ClassId(99))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+    let error = doriac::mir_validation::validate_program(&parameter)
+        .expect_err("parameter types must reference declared classes");
+    assert!(error.message.contains("ClassId class#99 does not exist"));
+
+    let mut returned = valid_void_program();
+    returned.functions.push(Function {
+        id: FunctionId(1),
+        name: "missingClass".to_string(),
+        params: vec![],
+        return_type: ReturnType::Value(Type::Class(ClassId(99))),
+        locals: vec![],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::Unreachable,
+        }],
+        entry_block: BlockId(0),
+    });
+    let error = doriac::mir_validation::validate_program(&returned)
+        .expect_err("return types must reference declared classes");
     assert!(error.message.contains("ClassId class#99 does not exist"));
 }
 

@@ -158,7 +158,7 @@ pub(crate) fn check_program_with_inferred_move_returns(
                             let property_class = classes
                                 .contains(&property.ty.name)
                                 .then(|| property.ty.name.clone());
-                            let move_type = property_class.is_some() || property.ty.name == "mixed";
+                            let move_type = type_ref_is_move_type(&property.ty, &classes);
                             if move_type {
                                 properties.insert(
                                     (class.name.clone(), property.name.clone()),
@@ -182,8 +182,7 @@ pub(crate) fn check_program_with_inferred_move_returns(
                                     let property_class = classes
                                         .contains(&param.ty.name)
                                         .then(|| param.ty.name.clone());
-                                    let move_type =
-                                        property_class.is_some() || param.ty.name == "mixed";
+                                    let move_type = type_ref_is_move_type(&param.ty, &classes);
                                     if param.promoted_access.is_some() && move_type {
                                         properties.insert(
                                             (class.name.clone(), param.name.clone()),
@@ -214,6 +213,7 @@ pub(crate) fn check_program_with_inferred_move_returns(
         diagnostics: Vec::new(),
     };
     let mut top_level_scopes = Scopes::new();
+    let mut top_level_falls_through = true;
     for item in &program.items {
         match item {
             Item::Function(function) => checker.check_function(function, None),
@@ -233,7 +233,11 @@ pub(crate) fn check_program_with_inferred_move_returns(
                 }
             }
             Item::Statement(statement) => {
-                checker.check_statement(statement, &mut top_level_scopes, false);
+                if top_level_falls_through {
+                    top_level_falls_through = checker
+                        .check_statement(statement, &mut top_level_scopes, false)
+                        .falls_through;
+                }
             }
         }
     }
@@ -262,7 +266,7 @@ fn signature(
         returns_move_type: function
             .return_type
             .as_ref()
-            .is_some_and(|ty| classes.contains(&ty.name) || ty.name == "mixed")
+            .is_some_and(|ty| type_ref_is_move_type(ty, classes))
             || inferred_move_returns.contains(&function.span.start),
     }
 }
@@ -447,7 +451,8 @@ impl Checker {
                             .as_ref()
                             .is_some_and(|binding| binding.mixed || binding.class == value_class);
                     let mixed_assignment = target.as_ref().is_some_and(|binding| binding.mixed);
-                    if class_assignment || mixed_assignment {
+                    let move_assignment = target.is_some() && value_moves;
+                    if class_assignment || mixed_assignment || move_assignment {
                         if variable_name(&assignment.value).is_some_and(|source| source == name) {
                             self.diagnostics.push(
                                 Diagnostic::new(
@@ -543,7 +548,7 @@ impl Checker {
             }
             Stmt::If(statement) => {
                 self.use_expr(&statement.condition, scopes, UseMode::Borrow);
-                if let Some(condition) = bool_literal(&statement.condition) {
+                if let Some(condition) = constant_bool(&statement.condition) {
                     if condition {
                         return self.check_block(
                             &statement.then_block,
@@ -606,7 +611,7 @@ impl Checker {
             }
             Stmt::While(statement) => {
                 self.use_expr(&statement.condition, scopes, UseMode::Borrow);
-                if bool_literal(&statement.condition) == Some(false) {
+                if constant_bool(&statement.condition) == Some(false) {
                     return Flow::fallthrough();
                 }
                 let before = scopes.clone();
@@ -651,7 +656,7 @@ impl Checker {
                 }
                 if let Some(condition) = &statement.condition {
                     self.use_expr(condition, scopes, UseMode::Borrow);
-                    if bool_literal(condition) == Some(false) {
+                    if constant_bool(condition) == Some(false) {
                         scopes.pop();
                         return Flow::fallthrough();
                     }
@@ -678,12 +683,12 @@ impl Checker {
                 let before = scopes.clone();
                 let mut body = before.clone();
                 let mut body_flow =
-                    self.check_block(&statement.body, &mut body, return_move_type, true);
+                    self.check_foreach_iteration(statement, &mut body, return_move_type);
                 if body_flow.falls_through {
                     body_flow.backedges.push(body);
                 }
-                self.check_second_iteration(
-                    &statement.body,
+                self.check_foreach_second_iteration(
+                    statement,
                     &body_flow.backedges,
                     return_move_type,
                 );
@@ -702,6 +707,62 @@ impl Checker {
                 backedges: vec![scopes.clone()],
                 breaks: Vec::new(),
             },
+        }
+    }
+
+    fn check_foreach_iteration(
+        &mut self,
+        statement: &ast::ForeachStmt,
+        scopes: &mut Scopes,
+        return_move_type: bool,
+    ) -> Flow {
+        scopes.push();
+        if let Some(key) = &statement.key {
+            self.declare_foreach_binding(key, scopes);
+        }
+        self.declare_foreach_binding(&statement.value, scopes);
+        let mut flow = self.check_block(&statement.body, scopes, return_move_type, false);
+        scopes.pop();
+        for backedge in &mut flow.backedges {
+            backedge.pop();
+        }
+        for break_exit in &mut flow.breaks {
+            break_exit.pop();
+        }
+        flow
+    }
+
+    fn declare_foreach_binding(&self, binding: &ast::ForeachBinding, scopes: &mut Scopes) {
+        let Some(ty) = &binding.ty else {
+            return;
+        };
+        if !type_ref_is_move_type(ty, &self.classes) {
+            return;
+        }
+        scopes.declare(
+            binding.name.clone(),
+            Binding {
+                class: self.classes.contains(&ty.name).then(|| ty.name.clone()),
+                mixed: ty.name == "mixed",
+                borrowed_place: true,
+                writable: false,
+                state: State::Borrowed,
+            },
+        );
+    }
+
+    fn check_foreach_second_iteration(
+        &mut self,
+        statement: &ast::ForeachStmt,
+        entries: &[Scopes],
+        return_move_type: bool,
+    ) {
+        for entry in entries {
+            let diagnostics_before = self.diagnostics.len();
+            let mut second_iteration = entry.clone();
+            let _ =
+                self.check_foreach_iteration(statement, &mut second_iteration, return_move_type);
+            self.deduplicate_diagnostics_from(diagnostics_before);
         }
     }
 
@@ -898,9 +959,9 @@ impl Checker {
             Expr::Array { elements, .. } => {
                 for element in elements {
                     if let Some(key) = &element.key {
-                        self.use_expr(key, scopes, UseMode::Borrow);
+                        self.use_owned_expression(key, scopes);
                     }
-                    self.use_expr(&element.value, scopes, mode);
+                    self.use_owned_expression(&element.value, scopes);
                 }
             }
             Expr::Unary { expr, .. } => self.use_expr(expr, scopes, UseMode::Borrow),
@@ -911,7 +972,7 @@ impl Checker {
                 ..
             } => {
                 self.use_expr(left, scopes, UseMode::Borrow);
-                match (op, bool_literal(left)) {
+                match (op, constant_bool(left)) {
                     (BinaryOp::And, Some(false)) | (BinaryOp::Or, Some(true)) => {}
                     (BinaryOp::And, Some(true)) | (BinaryOp::Or, Some(false)) => {
                         self.use_expr(right, scopes, UseMode::Borrow);
@@ -996,6 +1057,15 @@ impl Checker {
             }
             self.use_expr(arg, scopes, mode);
         }
+    }
+
+    fn use_owned_expression(&mut self, expr: &Expr, scopes: &mut Scopes) {
+        let mode = if self.expr_is_move_value(expr, scopes) {
+            UseMode::Give
+        } else {
+            UseMode::Borrow
+        };
+        self.use_expr(expr, scopes, mode);
     }
 
     fn expr_is_move_value(&self, expr: &Expr, scopes: &Scopes) -> bool {
@@ -1110,10 +1180,43 @@ fn call_arg_mode(signature: &Signature, index: usize) -> UseMode {
         .map_or(UseMode::Borrow, |_| UseMode::Give)
 }
 
-fn bool_literal(expr: &Expr) -> Option<bool> {
+fn constant_bool(expr: &Expr) -> Option<bool> {
     match expr {
         Expr::Bool { value, .. } => Some(*value),
-        Expr::Grouped { expr, .. } => bool_literal(expr),
+        Expr::Grouped { expr, .. } => constant_bool(expr),
+        Expr::Unary {
+            op: ast::UnaryOp::Not,
+            expr,
+            ..
+        } => constant_bool(expr).map(|value| !value),
+        Expr::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+            ..
+        } => match constant_bool(left) {
+            Some(false) => Some(false),
+            Some(true) => constant_bool(right),
+            None if constant_bool(right) == Some(false) => Some(false),
+            None => None,
+        },
+        Expr::Binary {
+            left,
+            op: BinaryOp::Or,
+            right,
+            ..
+        } => match constant_bool(left) {
+            Some(true) => Some(true),
+            Some(false) => constant_bool(right),
+            None if constant_bool(right) == Some(true) => Some(true),
+            None => None,
+        },
+        Expr::Binary {
+            left,
+            op: BinaryOp::Xor,
+            right,
+            ..
+        } => Some(constant_bool(left)? ^ constant_bool(right)?),
         _ => None,
     }
 }

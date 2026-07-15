@@ -145,6 +145,9 @@ fn field_type(ty: mir::Type) -> FieldType {
 }
 
 fn validate_function(program: &mir::Program, function: &mir::Function) -> Result<(), BackendError> {
+    if let mir::ReturnType::Value(ty) = function.return_type {
+        validate_type(program, ty)?;
+    }
     for (index, local) in function.locals.iter().enumerate() {
         if local.id != mir::LocalId(index) {
             return Err(malformed_mir(format!(
@@ -152,6 +155,7 @@ fn validate_function(program: &mir::Program, function: &mir::Function) -> Result
                 function.name, local.id.0
             )));
         }
+        validate_type(program, local.ty)?;
     }
     for parameter in &function.params {
         let local = local_in(function, *parameter)?;
@@ -169,6 +173,13 @@ fn validate_function(program: &mir::Program, function: &mir::Function) -> Result
             validate_statement(program, function, statement)?;
         }
         validate_terminator(program, function, &block.terminator)?;
+    }
+    Ok(())
+}
+
+fn validate_type(program: &mir::Program, ty: mir::Type) -> Result<(), BackendError> {
+    if let mir::Type::Class(class) = ty {
+        class_in(program, class)?;
     }
     Ok(())
 }
@@ -547,6 +558,8 @@ fn validate_class_expression(
             };
 
             let mut initialized = HashSet::new();
+            let mut consumed_class_arguments = HashSet::new();
+            let mut consumed_class_locals = HashSet::new();
             for (position, property) in properties.iter().enumerate() {
                 if property.property.index != position {
                     return Err(malformed_mir(format!(
@@ -573,11 +586,19 @@ fn validate_class_expression(
                 let source_type = match &property.source {
                     mir::PropertyValueSource::Expression(value) => {
                         validate_rvalue(program, function, value)?;
+                        if let mir::Rvalue::Class(mir::ClassExpression::Local { local, .. }) = value
+                        {
+                            if !consumed_class_locals.insert(*local) {
+                                return Err(malformed_mir(format!(
+                                    "class#{} new expression gives class local local{} to more than one property",
+                                    class.0, local.0
+                                )));
+                            }
+                        }
                         value.ty()
                     }
-                    mir::PropertyValueSource::ConstructorArgument(index) => args
-                        .get(*index)
-                        .ok_or_else(|| {
+                    mir::PropertyValueSource::ConstructorArgument(index) => {
+                        let argument = args.get(*index).ok_or_else(|| {
                             malformed_mir(format!(
                                 "class#{} property{} references constructor argument {} but only {} exist",
                                 class.0,
@@ -585,8 +606,17 @@ fn validate_class_expression(
                                 index,
                                 args.len()
                             ))
-                        })?
-                        .ty(),
+                        })?;
+                        if matches!(argument.ty(), mir::Type::Class(_))
+                            && !consumed_class_arguments.insert(*index)
+                        {
+                            return Err(malformed_mir(format!(
+                                "class#{} new expression gives constructor argument {} to more than one property",
+                                class.0, index
+                            )));
+                        }
+                        argument.ty()
+                    }
                     mir::PropertyValueSource::ConstructorBody => {
                         let Some(constructor) = constructor else {
                             return Err(malformed_mir(format!(
@@ -666,6 +696,20 @@ fn validate_class_expression(
                             .collect(),
                     ),
                 )?;
+                for index in &consumed_class_arguments {
+                    let parameter = constructor_parameters.get(*index).ok_or_else(|| {
+                        malformed_mir(format!(
+                            "constructor {} has no parameter {}",
+                            constructor.name, index
+                        ))
+                    })?;
+                    if local_in(constructor, *parameter)?.owned {
+                        return Err(malformed_mir(format!(
+                            "class#{} new expression gives constructor argument {} to a property and an owning constructor parameter",
+                            class.0, index
+                        )));
+                    }
+                }
             }
             Ok(())
         }

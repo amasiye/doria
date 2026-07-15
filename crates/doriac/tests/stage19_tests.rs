@@ -240,6 +240,15 @@ fn top_level_ownership_state_is_preserved_between_statements() {
 }
 
 #[test]
+fn top_level_ownership_check_stops_after_terminating_flow() {
+    doriac::check_source(
+        "top-level-panic.doria",
+        "class Guard {} function consume(take Guard $guard): void {} let $guard = new Guard(); if (true) { consume($guard); panic(\"stop\"); } consume($guard);",
+    )
+    .expect("statements after an unconditionally terminating top-level path are unreachable");
+}
+
+#[test]
 fn terminating_branch_does_not_poison_the_fallthrough_owner() {
     doriac::check_source(
         "branch-return.doria",
@@ -299,6 +308,22 @@ fn inferred_mixed_returns_are_move_values_for_functions_and_methods() {
     ] {
         let diagnostics = doriac::check_source("inferred-mixed-move.doria", source)
             .expect_err("an inferred mixed return must not create multiple owners");
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0470"));
+    }
+}
+
+#[test]
+fn inferred_move_returns_cover_classes_collections_methods_and_forward_calls() {
+    for source in [
+        "class Guard {} function make() { return new Guard(); } function duplicate(): void { let $first = make(); let $second = $first; let $third = $first; }",
+        "class Guard {} class Factory { function make() { return new Guard(); } } function duplicate(Factory $factory): void { let $first = $factory->make(); let $second = $first; let $third = $first; }",
+        "class Guard {} function forward() { return make(); } function make() { return new Guard(); } function duplicate(): void { let $first = forward(); let $second = $first; let $third = $first; }",
+        "class Guard {} function make() { Guard[] $items = []; return $items; } function duplicate(): void { let $first = make(); let $second = $first; let $third = $first; }",
+    ] {
+        let diagnostics = doriac::check_source("inferred-move-return.doria", source)
+            .expect_err("every inferred move return must retain one-owner semantics");
         assert!(diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "E0470"));
@@ -604,6 +629,115 @@ fn owning_array_literals_move_their_elements() {
 }
 
 #[test]
+fn owning_dictionary_literals_move_their_keys() {
+    for key in ["$guard", "($guard)"] {
+        let source = format!(
+            "class Guard {{}} function consume(take Guard $guard): void {{}} function route(take Guard $guard): void {{ mixed $payload = [{key} => 1]; consume($guard); }}"
+        );
+        let diagnostics = doriac::check_source("dictionary-key-move.doria", source)
+            .expect_err("the dictionary payload owns move-typed keys and values");
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0470"));
+    }
+}
+
+#[test]
+fn collection_reassignment_moves_the_source_owner() {
+    for collection in [
+        "Guard[]",
+        "List<Guard>",
+        "Dictionary<string, Guard>",
+        "Set<Guard>",
+    ] {
+        let source = format!(
+            "class Guard {{}} function sink(take {collection} $items): void {{}} function route(take {collection} $src): void {{ writable {collection} $dst = []; $dst = $src; sink($src); }}"
+        );
+        let diagnostics = doriac::check_source("collection-reassignment.doria", source)
+            .expect_err("assigning the collection transfers its owner");
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0470"));
+    }
+}
+
+#[test]
+fn borrowed_array_arguments_still_move_owned_elements_into_the_temporary() {
+    let diagnostics = doriac::check_source(
+        "borrowed-array-element.doria",
+        "class Guard {} function inspect(Guard[] $items): void {} function consume(take Guard $guard): void {} function route(take Guard $guard): void { inspect([$guard]); consume($guard); }",
+    )
+    .expect_err("the temporary array owns its class element");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "E0470"));
+}
+
+#[test]
+fn promoted_collection_parameters_require_take() {
+    for collection in [
+        "Guard[]",
+        "List<Guard>",
+        "Dictionary<string, Guard>",
+        "Set<Guard>",
+    ] {
+        let source = format!(
+            "class Guard {{}} class Box {{ function __construct({collection} $items) {{}} }}"
+        );
+        let diagnostics = doriac::check_source("collection-promotion.doria", source)
+            .expect_err("promotion must transfer collection ownership");
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0468"));
+
+        doriac::check_source(
+            "collection-promotion-take.doria",
+            format!(
+                "class Guard {{}} class Box {{ function __construct(take {collection} $items) {{}} }}"
+            ),
+        )
+        .expect("take transfers the collection into the promoted property");
+    }
+}
+
+#[test]
+fn collection_properties_are_move_values() {
+    for collection in [
+        "Guard[]",
+        "List<Guard>",
+        "Dictionary<string, Guard>",
+        "Set<Guard>",
+    ] {
+        let source = format!(
+            "class Guard {{}} function sink(take {collection} $items): void {{}} class Box {{ {collection} $items = []; function release(): void {{ sink($this->items); }} }}"
+        );
+        let diagnostics = doriac::check_source("collection-property-move.doria", source)
+            .expect_err("direct collection-property moves remain unsupported");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "E0472" && diagnostic.message.contains("moves out")
+        }));
+    }
+}
+
+#[test]
+fn foreach_move_bindings_are_borrowed_per_iteration() {
+    let diagnostics = doriac::check_source(
+        "foreach-borrowed-element.doria",
+        "class Guard {} function consume(take Guard $guard): void {} function inspect(Guard[] $items): void { foreach ($items as Guard $guard) { consume($guard); } }",
+    )
+    .expect_err("a foreach element is borrowed from its collection");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "E0474" && diagnostic.message.contains("borrowed `$guard`")
+    }));
+
+    doriac::check_source(
+        "foreach-borrowed-element-ok.doria",
+        "class Guard {} function observe(Guard $guard): void {} function inspect(Guard[] $items): void { foreach ($items as Guard $guard) { observe($guard); } }",
+    )
+    .expect("a foreach element remains available for borrowing");
+}
+
+#[test]
 fn literal_if_conditions_skip_unreachable_owner_moves() {
     for body in [
         "if (false) { consume($guard); } consume($guard);",
@@ -614,5 +748,25 @@ fn literal_if_conditions_skip_unreachable_owner_moves() {
         );
         doriac::check_source("literal-if.doria", source)
             .expect("unreachable branches cannot consume the owner");
+    }
+}
+
+#[test]
+fn constant_boolean_expressions_drive_ownership_reachability() {
+    for body in [
+        "if (false && true) { consume($guard); } consume($guard);",
+        "if (true || false) {} else { consume($guard); } consume($guard);",
+        "if (!true) { consume($guard); } consume($guard);",
+        "if (false xor false) { consume($guard); } consume($guard);",
+        "if ($enabled && false) { consume($guard); } consume($guard);",
+        "if ($enabled || true) {} else { consume($guard); } consume($guard);",
+        "while (false && true) { consume($guard); } consume($guard);",
+        "for (; !true; ) { consume($guard); } consume($guard);",
+    ] {
+        let source = format!(
+            "class Guard {{}} function consume(take Guard $guard): void {{}} function route(bool $enabled, take Guard $guard): void {{ {body} }}"
+        );
+        doriac::check_source("constant-reachability.doria", source)
+            .expect("constant boolean reachability must exclude impossible ownership transfers");
     }
 }
