@@ -2579,6 +2579,9 @@ fn lower_property_place(
     expr: &hir::Expr,
     context: &LoweringContext,
 ) -> DiagnosticResult<(mir::LocalId, crate::class_layout::PropertyId, mir::Type)> {
+    if let hir::Expr::Grouped { expr, .. } = expr {
+        return lower_property_place(expr, context);
+    }
     let hir::Expr::PropertyAccess {
         object,
         property,

@@ -3564,6 +3564,36 @@ function main(): void
 }
 
 #[test]
+fn stage_19_lowers_grouped_property_assignment_targets() {
+    let source = r#"class Message
+{
+    writable string $text;
+
+    function __construct(string $value)
+    {
+        ($this->text) = $value;
+    }
+
+    function __destruct()
+    {
+        echo $this->text;
+    }
+}
+
+function main(): void
+{
+    let $message = new Message("ready");
+}
+"#;
+
+    let output = interpret(source);
+    assert_eq!(output.exit_status, 0);
+    assert_eq!(output.stdout, b"ready");
+    assert!(output.stderr.is_empty());
+    assert!(!lower_object(source).is_empty());
+}
+
+#[test]
 fn stage_19_mir_drops_borrowed_constructor_temporaries_in_reverse_order() {
     let mut program = lower(
         r#"class Child

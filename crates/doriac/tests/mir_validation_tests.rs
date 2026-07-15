@@ -431,6 +431,69 @@ fn shared_validator_tracks_nested_transfers_across_outer_call_arguments() {
 }
 
 #[test]
+fn shared_validator_tracks_property_borrows_across_outer_call_arguments() {
+    let mut program = class_program();
+    let label = PropertyId {
+        class: ClassId(0),
+        index: 0,
+    };
+    program.classes[0].properties.push(Property {
+        id: label,
+        name: "label".to_string(),
+        ty: Type::String,
+        writable: false,
+        promoted: false,
+    });
+    program.classes[0].layout = compute_class_layout(ClassId(0), [(label, FieldType::String)], 8);
+    program.functions[0].locals.push(class_local(0, ClassId(0)));
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::CallVoid {
+            function: FunctionId(1),
+            args: vec![
+                Rvalue::Class(ClassExpression::Local {
+                    class: ClassId(0),
+                    local: LocalId(0),
+                    transfer: true,
+                }),
+                Rvalue::String(StringExpression::Property {
+                    object: LocalId(0),
+                    property: label,
+                }),
+            ],
+        });
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "takeWithLabel".to_string(),
+        params: vec![LocalId(0), LocalId(1)],
+        return_type: ReturnType::Void,
+        locals: vec![
+            class_local(0, ClassId(0)),
+            Local {
+                id: LocalId(1),
+                name: "label".to_string(),
+                ty: Type::String,
+                writable: false,
+                synthetic: false,
+                owned: false,
+            },
+        ],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("a call cannot read a property after transferring its object");
+    assert!(error
+        .message
+        .contains("both borrows and transfers class local local0"));
+}
+
+#[test]
 fn shared_validator_rejects_invalid_class_new_property_sources() {
     let property = PropertyId {
         class: ClassId(0),
@@ -645,7 +708,95 @@ fn shared_validator_rejects_reusing_a_class_local_for_properties() {
         .expect_err("one class local cannot initialize multiple properties");
     assert!(error
         .message
-        .contains("gives class local local1 to more than one property"));
+        .contains("transfers class local local1 more than once"));
+}
+
+#[test]
+fn shared_validator_tracks_nested_transfers_across_property_initializers() {
+    let mut program = class_program();
+    let first = PropertyId {
+        class: ClassId(0),
+        index: 0,
+    };
+    let second = PropertyId {
+        class: ClassId(0),
+        index: 1,
+    };
+    program.classes[0].properties = vec![
+        Property {
+            id: first,
+            name: "first".to_string(),
+            ty: Type::Class(ClassId(1)),
+            writable: false,
+            promoted: false,
+        },
+        Property {
+            id: second,
+            name: "second".to_string(),
+            ty: Type::Class(ClassId(1)),
+            writable: false,
+            promoted: false,
+        },
+    ];
+    program.classes[0].layout = compute_class_layout(
+        ClassId(0),
+        [
+            (first, FieldType::Class(ClassId(1))),
+            (second, FieldType::Class(ClassId(1))),
+        ],
+        8,
+    );
+    program.functions[0].locals = vec![class_local(0, ClassId(0)), class_local(1, ClassId(1))];
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::AssignLocal {
+            target: LocalId(0),
+            value: Rvalue::Class(ClassExpression::New {
+                class: ClassId(0),
+                properties: [first, second]
+                    .into_iter()
+                    .map(|property| PropertyValue {
+                        property,
+                        source: PropertyValueSource::Expression(Rvalue::Class(
+                            ClassExpression::Call {
+                                class: ClassId(1),
+                                function: FunctionId(1),
+                                args: vec![Rvalue::Class(ClassExpression::Local {
+                                    class: ClassId(1),
+                                    local: LocalId(1),
+                                    transfer: true,
+                                })],
+                            },
+                        )),
+                    })
+                    .collect(),
+                constructor: None,
+                args: vec![],
+            }),
+        });
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "relay".to_string(),
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Value(Type::Class(ClassId(1))),
+        locals: vec![class_local(0, ClassId(1))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::Return(Rvalue::Class(ClassExpression::Local {
+                class: ClassId(1),
+                local: LocalId(0),
+                transfer: true,
+            })),
+        }],
+        entry_block: BlockId(0),
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("nested property initializers cannot transfer one owner twice");
+    assert!(error
+        .message
+        .contains("transfers class local local1 more than once"));
 }
 
 #[test]
