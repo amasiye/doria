@@ -970,6 +970,10 @@ fn statement_prevents_direct_property_init(statement: &hir::Stmt, property: &str
             target_reads_property
                 || expression_may_observe_this_property(&assignment.value, property)
         }
+        hir::Stmt::Expr {
+            expr: hir::Expr::FunctionCall { name, .. },
+            ..
+        } if name == "panic" => true,
         hir::Stmt::Echo { expr, .. } | hir::Stmt::Expr { expr, .. } => {
             expression_may_observe_this_property(expr, property)
         }

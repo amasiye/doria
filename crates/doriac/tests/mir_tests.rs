@@ -3452,6 +3452,36 @@ function main(): void
 }
 
 #[test]
+fn stage_19_rejects_constructor_initialization_after_unconditional_panic() {
+    let diagnostics = doriac::lower_source_to_mir(
+        "constructor-panic-before-init.doria",
+        r#"class Message
+{
+    string $text;
+
+    function __construct(string $value)
+    {
+        panic("bad");
+        $this->text = $value;
+    }
+}
+
+function main(): void
+{
+    let $message = new Message("unreachable");
+}
+"#,
+    )
+    .expect_err("an unreachable write cannot establish definite initialization");
+
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "M1101"
+            && diagnostic.message.contains("property `$text`")
+            && diagnostic.message.contains("not definitely initialized")
+    }));
+}
+
+#[test]
 fn stage_19_infers_string_property_loads_and_comparisons() {
     let source = r#"class Message
 {

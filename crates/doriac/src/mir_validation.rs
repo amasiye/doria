@@ -242,7 +242,11 @@ fn validate_statement(
                             target.0
                         )));
                     }
-                    validate_class_expression(program, function, expression)
+                    validate_class_expression(program, function, expression)?;
+                    require_owned_class_expression(
+                        expression,
+                        &format!("class assignment to local{}", target.0),
+                    )
                 }
                 (mir::Type::Class(expected), _) => Err(malformed_mir(format!(
                     "class#{} local local{} receives a mismatched rvalue",
@@ -299,7 +303,16 @@ fn validate_statement(
                     property_definition.ty
                 )));
             }
-            validate_rvalue(program, function, value)
+            validate_rvalue(program, function, value)?;
+            if let (mir::Type::Class(_), mir::Rvalue::Class(expression)) =
+                (property_definition.ty, value)
+            {
+                require_owned_class_expression(
+                    expression,
+                    &format!("assignment to property{}", property.index),
+                )?;
+            }
+            Ok(())
         }
         mir::Statement::DropClass { local, class } => {
             let definition = local_in(function, *local)?;
@@ -341,7 +354,11 @@ fn validate_terminator(
                     return_type
                 )));
             }
-            validate_rvalue(program, function, expression)
+            validate_rvalue(program, function, expression)?;
+            if let (mir::Type::Class(_), mir::Rvalue::Class(class)) = (return_type, expression) {
+                require_owned_class_expression(class, &format!("return from {}", function.name))?;
+            }
+            Ok(())
         }
         mir::Terminator::ReturnVoid => {
             if function.return_type != mir::ReturnType::Void {
@@ -454,6 +471,29 @@ fn validate_rvalue(
             validate_nullable_string_expression(program, function, value)
         }
         mir::Rvalue::Class(value) => validate_class_expression(program, function, value),
+    }
+}
+
+fn require_owned_class_expression(
+    expression: &mir::ClassExpression,
+    destination: &str,
+) -> Result<(), BackendError> {
+    match expression {
+        mir::ClassExpression::Local { transfer: true, .. }
+        | mir::ClassExpression::Call { .. }
+        | mir::ClassExpression::New { .. } => Ok(()),
+        mir::ClassExpression::Local {
+            local,
+            transfer: false,
+            ..
+        } => Err(malformed_mir(format!(
+            "{destination} receives borrowed class local local{}",
+            local.0
+        ))),
+        mir::ClassExpression::Property { property, .. } => Err(malformed_mir(format!(
+            "{destination} receives borrowed class property{}",
+            property.index
+        ))),
     }
 }
 
@@ -586,6 +626,17 @@ fn validate_class_expression(
                 let source_type = match &property.source {
                     mir::PropertyValueSource::Expression(value) => {
                         validate_rvalue(program, function, value)?;
+                        if let (mir::Type::Class(_), mir::Rvalue::Class(expression)) =
+                            (definition.ty, value)
+                        {
+                            require_owned_class_expression(
+                                expression,
+                                &format!(
+                                    "class#{} property{} initializer",
+                                    class.0, property.property.index
+                                ),
+                            )?;
+                        }
                         if let mir::Rvalue::Class(mir::ClassExpression::Local { local, .. }) = value
                         {
                             if !consumed_class_locals.insert(*local) {
@@ -818,6 +869,7 @@ fn validate_call_args_for_params(
             args.len()
         )));
     }
+    let mut transferred_class_locals = HashSet::new();
     for (index, (argument, parameter)) in args.iter().zip(params).enumerate() {
         let parameter_definition = local_in(callee, *parameter)?;
         let parameter_type = parameter_definition.ty;
@@ -831,31 +883,53 @@ fn validate_call_args_for_params(
             )));
         }
         validate_rvalue(program, caller, argument)?;
+        if let mir::Rvalue::Class(mir::ClassExpression::Local {
+            local,
+            transfer: true,
+            ..
+        }) = argument
+        {
+            if !transferred_class_locals.insert(*local) {
+                return Err(malformed_mir(format!(
+                    "call to {} transfers class local local{} more than once",
+                    callee.name, local.0
+                )));
+            }
+        }
         if matches!(parameter_type, mir::Type::Class(_)) {
-            match argument {
-                mir::Rvalue::Class(mir::ClassExpression::Local { transfer: true, .. })
-                    if !parameter_definition.owned
-                        && !promoted_transfers.is_some_and(|indices| indices.contains(&index)) =>
-                {
-                    return Err(malformed_mir(format!(
-                        "call to {} transfers argument {} into a borrowed parameter",
-                        callee.name,
-                        index + 1
-                    )));
-                }
-                mir::Rvalue::Class(
+            let promoted_transfer =
+                promoted_transfers.is_some_and(|indices| indices.contains(&index));
+            let mir::Rvalue::Class(expression) = argument else {
+                unreachable!("class parameter type was checked against its argument")
+            };
+            if parameter_definition.owned
+                && matches!(
+                    expression,
                     mir::ClassExpression::Local {
-                        transfer: false, ..
-                    }
-                    | mir::ClassExpression::Property { .. },
-                ) if parameter_definition.owned => {
-                    return Err(malformed_mir(format!(
-                        "call to {} borrows argument {} for an owned parameter",
-                        callee.name,
-                        index + 1
-                    )));
-                }
-                _ => {}
+                        transfer: false,
+                        ..
+                    } | mir::ClassExpression::Property { .. }
+                )
+            {
+                return Err(malformed_mir(format!(
+                    "call to {} borrows argument {} for an owned parameter",
+                    callee.name,
+                    index + 1
+                )));
+            } else if parameter_definition.owned || promoted_transfer {
+                require_owned_class_expression(
+                    expression,
+                    &format!("call to {} argument {}", callee.name, index + 1),
+                )?;
+            } else if matches!(
+                expression,
+                mir::ClassExpression::Local { transfer: true, .. }
+            ) {
+                return Err(malformed_mir(format!(
+                    "call to {} transfers argument {} into a borrowed parameter",
+                    callee.name,
+                    index + 1
+                )));
             }
         }
     }
