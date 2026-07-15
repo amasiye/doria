@@ -198,6 +198,15 @@ fn define_function(
             .collect::<Vec<_>>();
         let pointer_type = module.target_config().pointer_type();
         let pointer_bytes = pointer_type.bytes();
+        let deferred_class_temporary_slots = (0..mir::class_temporary_capacity(function))
+            .map(|_| {
+                builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    pointer_bytes,
+                    pointer_bytes.trailing_zeros() as u8,
+                ))
+            })
+            .collect::<Vec<_>>();
         let frame_slot = builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             pointer_bytes * 3,
@@ -206,6 +215,10 @@ fn define_function(
 
         builder.switch_to_block(entry);
         initialize_locals(&mut builder, function, &local_slots, pointer_type)?;
+        let zero = builder.ins().iconst(pointer_type, 0);
+        for slot in &deferred_class_temporary_slots {
+            builder.ins().stack_store(zero, *slot, 0);
+        }
         bind_parameters(&mut builder, function, &local_slots, entry)?;
         let parent_frame = builder.block_params(entry)[0];
         let function_name = define_named_data(
@@ -231,6 +244,7 @@ fn define_function(
             program,
             function_ids,
             &local_slots,
+            deferred_class_temporary_slots,
             function.id,
             current_frame,
         );
@@ -369,6 +383,48 @@ fn cleanup_class_locals(
     Ok(())
 }
 
+fn flush_deferred_class_temporary_drops(
+    builder: &mut FunctionBuilder,
+    resources: &mut LoweringResources<'_, '_>,
+) -> Result<(), BackendError> {
+    let drops = std::mem::take(&mut resources.deferred_class_temporary_drops);
+    emit_deferred_class_temporary_drops(builder, &drops, resources)
+}
+
+fn emit_deferred_class_temporary_drops(
+    builder: &mut FunctionBuilder,
+    drops: &[(StackSlot, crate::class_layout::ClassId)],
+    resources: &mut LoweringResources<'_, '_>,
+) -> Result<(), BackendError> {
+    let pointer = resources.module.target_config().pointer_type();
+    for (slot, class) in drops.iter().rev() {
+        let value = builder.ins().stack_load(pointer, *slot, 0);
+        let zero = builder.ins().iconst(pointer, 0);
+        builder.ins().stack_store(zero, *slot, 0);
+        lower_drop_class_value_checked(builder, value, *class, resources)?;
+    }
+    Ok(())
+}
+
+fn defer_or_drop_class_temporary(
+    builder: &mut FunctionBuilder,
+    value: Value,
+    class: crate::class_layout::ClassId,
+    resources: &mut LoweringResources<'_, '_>,
+) -> Result<(), BackendError> {
+    if !resources.defer_class_temporary_drops {
+        return lower_drop_class_value_checked(builder, value, class, resources);
+    }
+    let slot = *resources
+        .deferred_class_temporary_slots
+        .get(resources.deferred_class_temporary_slot_cursor)
+        .ok_or_else(|| malformed_mir("class temporary stack-slot capacity was exhausted"))?;
+    resources.deferred_class_temporary_slot_cursor += 1;
+    builder.ins().stack_store(value, slot, 0);
+    resources.deferred_class_temporary_drops.push((slot, class));
+    Ok(())
+}
+
 fn define_process_main(
     module: &mut ObjectModule,
     program: &mir::Program,
@@ -432,12 +488,16 @@ struct LoweringResources<'module, 'program> {
     program: &'program mir::Program,
     function_ids: &'program [FuncId],
     local_slots: &'program [Option<StackSlot>],
+    deferred_class_temporary_slots: Vec<StackSlot>,
+    deferred_class_temporary_slot_cursor: usize,
     write_stdout_func_id: Option<FuncId>,
     panic_func_id: Option<FuncId>,
     runtime_functions: HashMap<&'static str, FuncId>,
     next_data_id: usize,
     function_id: mir::FunctionId,
     current_frame: Value,
+    defer_class_temporary_drops: bool,
+    deferred_class_temporary_drops: Vec<(StackSlot, crate::class_layout::ClassId)>,
 }
 
 impl<'module, 'program> LoweringResources<'module, 'program> {
@@ -446,6 +506,7 @@ impl<'module, 'program> LoweringResources<'module, 'program> {
         program: &'program mir::Program,
         function_ids: &'program [FuncId],
         local_slots: &'program [Option<StackSlot>],
+        deferred_class_temporary_slots: Vec<StackSlot>,
         function_id: mir::FunctionId,
         current_frame: Value,
     ) -> Self {
@@ -454,12 +515,16 @@ impl<'module, 'program> LoweringResources<'module, 'program> {
             program,
             function_ids,
             local_slots,
+            deferred_class_temporary_slots,
+            deferred_class_temporary_slot_cursor: 0,
             write_stdout_func_id: None,
             panic_func_id: None,
             runtime_functions: HashMap::new(),
             next_data_id: 0,
             function_id,
             current_frame,
+            defer_class_temporary_drops: false,
+            deferred_class_temporary_drops: Vec::new(),
         }
     }
 
@@ -539,6 +604,8 @@ fn lower_statement(
     statement: &mir::Statement,
     resources: &mut LoweringResources<'_, '_>,
 ) -> Result<(), BackendError> {
+    debug_assert!(resources.deferred_class_temporary_drops.is_empty());
+    resources.defer_class_temporary_drops = true;
     match statement {
         mir::Statement::AssignLocal { target, value } => {
             let definition = local_definition(resources.program, resources.function_id, *target)?;
@@ -717,7 +784,8 @@ fn lower_statement(
             lower_drop_class_value_checked(builder, value, class, resources)?;
         }
     }
-    Ok(())
+    resources.defer_class_temporary_drops = false;
+    flush_deferred_class_temporary_drops(builder, resources)
 }
 
 fn lower_terminator(
@@ -728,7 +796,11 @@ fn lower_terminator(
 ) -> Result<(), BackendError> {
     match terminator {
         mir::Terminator::Return(expression) => {
+            debug_assert!(resources.deferred_class_temporary_drops.is_empty());
+            resources.defer_class_temporary_drops = true;
             let value = lower_rvalue(builder, expression, resources)?;
+            resources.defer_class_temporary_drops = false;
+            flush_deferred_class_temporary_drops(builder, resources)?;
             cleanup_class_locals(builder, resources)?;
             cleanup_string_locals(builder, resources)?;
             builder.ins().return_(&[value]);
@@ -774,13 +846,32 @@ fn lower_terminator(
             condition,
             then_block,
             else_block,
-        } => lower_condition_to_branch(
-            builder,
-            condition,
-            block_for(blocks, *then_block)?,
-            block_for(blocks, *else_block)?,
-            resources,
-        )?,
+        } => {
+            if mir::bool_class_temporary_capacity(condition) == 0 {
+                return lower_condition_to_branch(
+                    builder,
+                    condition,
+                    block_for(blocks, *then_block)?,
+                    block_for(blocks, *else_block)?,
+                    resources,
+                );
+            }
+            debug_assert!(resources.deferred_class_temporary_drops.is_empty());
+            let cleanup_then = builder.create_block();
+            let cleanup_else = builder.create_block();
+            resources.defer_class_temporary_drops = true;
+            lower_condition_to_branch(builder, condition, cleanup_then, cleanup_else, resources)?;
+            resources.defer_class_temporary_drops = false;
+            let drops = std::mem::take(&mut resources.deferred_class_temporary_drops);
+
+            builder.switch_to_block(cleanup_then);
+            emit_deferred_class_temporary_drops(builder, &drops, resources)?;
+            builder.ins().jump(block_for(blocks, *then_block)?, &[]);
+
+            builder.switch_to_block(cleanup_else);
+            emit_deferred_class_temporary_drops(builder, &drops, resources)?;
+            builder.ins().jump(block_for(blocks, *else_block)?, &[]);
+        }
     }
     Ok(())
 }
@@ -851,9 +942,20 @@ fn lower_class_expression(
             constructor,
             args,
         } => {
-            // Constructor arguments are source expressions and must be evaluated
-            // exactly once. Promoted properties and the lifecycle call share the
-            // resulting values instead of lowering either expression twice.
+            // Explicit property initializers precede promoted properties in the
+            // canonical construction order, so evaluate their source expressions
+            // before any constructor-argument side effects. Arguments are still
+            // evaluated exactly once and shared by promotion and the lifecycle call.
+            let mut lowered_properties = Vec::with_capacity(properties.len());
+            for property in properties {
+                lowered_properties.push(match &property.source {
+                    mir::PropertyValueSource::Expression(value) => {
+                        Some(lower_rvalue(builder, value, resources)?)
+                    }
+                    mir::PropertyValueSource::ConstructorArgument(_)
+                    | mir::PropertyValueSource::ConstructorBody => None,
+                });
+            }
             let lowered_args = lower_call_args(builder, args, resources)?;
             let class_definition = class_definition(resources.program, *class)?;
             let size = builder
@@ -871,11 +973,9 @@ fn lower_class_expression(
                 resources,
             )?
             .ok_or_else(|| backend_failure("class allocation produced no result"))?;
-            for property in properties {
+            for (property, lowered_property) in properties.iter().zip(lowered_properties) {
                 let value = match &property.source {
-                    mir::PropertyValueSource::Expression(value) => {
-                        Some(lower_rvalue(builder, value, resources)?)
-                    }
+                    mir::PropertyValueSource::Expression(_) => lowered_property,
                     mir::PropertyValueSource::ConstructorArgument(index) => {
                         Some(*lowered_args.values.get(*index).ok_or_else(|| {
                             malformed_mir(format!("constructor argument {index} does not exist"))
@@ -932,12 +1032,8 @@ fn lower_class_expression(
                                 ))
                             })?;
                     if !promoted && !local_in(constructor_definition, parameter)?.owned {
-                        lower_drop_class_value_checked(
-                            builder,
-                            lowered_args.values[index],
-                            *class,
-                            resources,
-                        )?;
+                        let value = lowered_args.values[index];
+                        defer_or_drop_class_temporary(builder, value, *class, resources)?;
                     }
                 }
             }
@@ -1969,7 +2065,8 @@ fn lower_function_call(
             ))
         })?;
         if !local_in(callee_definition, parameter)?.owned {
-            lower_drop_class_value_checked(builder, lowered.values[index], *class, resources)?;
+            let value = lowered.values[index];
+            defer_or_drop_class_temporary(builder, value, *class, resources)?;
         }
     }
     Ok(result)

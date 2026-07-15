@@ -130,6 +130,7 @@ enum EvaluationTask {
         expectation: ReturnExpectation,
         temporary_class_args: Vec<bool>,
     },
+    FinishStatement,
     DropTemporaryClasses(Vec<(usize, crate::class_layout::ClassId)>),
     Assign(mir::LocalId),
     AssignProperty {
@@ -166,6 +167,7 @@ struct CallFrame {
     locals: Vec<Option<LocalValue>>,
     tasks: Vec<EvaluationTask>,
     values: Vec<EvaluationValue>,
+    statement_temporary_drops: Vec<(usize, crate::class_layout::ClassId)>,
     caller_expectation: Option<ReturnExpectation>,
 }
 
@@ -284,6 +286,9 @@ impl Interpreter<'_> {
 
         if let Some(statement) = block.statements.get(statement_index).cloned() {
             self.current_frame_mut()?.statement_index += 1;
+            self.current_frame_mut()?
+                .tasks
+                .push(EvaluationTask::FinishStatement);
             return self.execute_statement(function, statement);
         }
 
@@ -437,6 +442,7 @@ impl Interpreter<'_> {
                 let frame = self.current_frame_mut()?;
                 frame.tasks.push(EvaluationTask::ReturnValue(expected));
                 frame.tasks.push(EvaluationTask::CleanupFrame);
+                frame.tasks.push(EvaluationTask::FinishStatement);
                 frame.tasks.push(EvaluationTask::Rvalue(operand));
                 Ok(StepOutcome::Continue)
             }
@@ -476,6 +482,7 @@ impl Interpreter<'_> {
                     then_block,
                     else_block,
                 });
+                frame.tasks.push(EvaluationTask::FinishStatement);
                 frame.tasks.push(EvaluationTask::Bool(condition));
                 Ok(StepOutcome::Continue)
             }
@@ -532,8 +539,8 @@ impl Interpreter<'_> {
                 property_expression_count,
                 temporary_class_args,
             } => {
-                let property_expressions = self.take_call_arguments(property_expression_count)?;
                 let arguments = self.take_call_arguments(argument_count)?;
+                let property_expressions = self.take_call_arguments(property_expression_count)?;
                 let object_id = self.next_object;
                 self.next_object += 1;
                 let class_definition = self.program.classes.get(class.0).ok_or_else(|| {
@@ -631,8 +638,8 @@ impl Interpreter<'_> {
                         });
                     if !temporary_drops.is_empty() {
                         self.current_frame_mut()?
-                            .tasks
-                            .push(EvaluationTask::DropTemporaryClasses(temporary_drops));
+                            .statement_temporary_drops
+                            .extend(temporary_drops);
                     }
                     self.push_frame(
                         constructor,
@@ -880,10 +887,19 @@ impl Interpreter<'_> {
                 }
                 if !drops.is_empty() {
                     self.current_frame_mut()?
+                        .statement_temporary_drops
+                        .extend(drops);
+                }
+                self.push_frame(function, &args, Some(expectation))?;
+            }
+            EvaluationTask::FinishStatement => {
+                let drops =
+                    std::mem::take(&mut self.current_frame_mut()?.statement_temporary_drops);
+                if !drops.is_empty() {
+                    self.current_frame_mut()?
                         .tasks
                         .push(EvaluationTask::DropTemporaryClasses(drops));
                 }
-                self.push_frame(function, &args, Some(expectation))?;
             }
             EvaluationTask::DropTemporaryClasses(drops) => {
                 let frame = self.current_frame_mut()?;
@@ -1435,13 +1451,13 @@ impl Interpreter<'_> {
                     property_expression_count,
                     temporary_class_args,
                 });
+                for argument in args.into_iter().rev() {
+                    frame.tasks.push(EvaluationTask::Rvalue(argument));
+                }
                 for property in properties.into_iter().rev() {
                     if let mir::PropertyValueSource::Expression(value) = property.source {
                         frame.tasks.push(EvaluationTask::Rvalue(value));
                     }
-                }
-                for argument in args.into_iter().rev() {
-                    frame.tasks.push(EvaluationTask::Rvalue(argument));
                 }
             }
         }
@@ -1545,6 +1561,7 @@ impl Interpreter<'_> {
             locals,
             tasks: Vec::new(),
             values: Vec::new(),
+            statement_temporary_drops: Vec::new(),
             caller_expectation,
         });
         Ok(())

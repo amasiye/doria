@@ -4,6 +4,12 @@ function initializeLabel(): string
     return "ready";
 }
 
+function initializeMessage(): string
+{
+    echo "constructor argument\n";
+    return "message";
+}
+
 class Message
 {
     string $label = initializeLabel();
@@ -29,5 +35,5 @@ class Message
 
 function main(): void
 {
-    let $message = new Message("message");
+    let $message = new Message(initializeMessage());
 }

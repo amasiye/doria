@@ -32,6 +32,16 @@ function inspect(Token $token): void
 {
 }
 
+function label(Token $token): string
+{
+    return $token->name;
+}
+
+function ready(Token $token): bool
+{
+    return true;
+}
+
 function makeToken(string $name): Token
 {
     return new Token($name);
@@ -52,7 +62,10 @@ function scenario(): void
     let writable $slot = new Token("old");
     $slot = makeToken("replacement");
     consume(new Token("temporary"));
-    inspect(new Token("borrowed temporary"));
+    echo label(new Token("borrowed temporary")) . " output\n";
+    if (false || ready(new Token("condition temporary"))) {
+        echo "condition ready\n";
+    }
 
     foreach (0..<2 as $index) {
         let $foreach = new Token("foreach");

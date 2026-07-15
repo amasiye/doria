@@ -202,6 +202,16 @@ fn define_function<'ctx>(
             }
         }
     }
+    let mut deferred_class_temporary_slots =
+        Vec::with_capacity(mir::class_temporary_capacity(function));
+    for index in 0..mir::class_temporary_capacity(function) {
+        let slot = build(builder.build_alloca(
+            context.ptr_type(AddressSpace::default()),
+            &format!("class.temporary.{index}"),
+        ))?;
+        build(builder.build_store(slot, context.ptr_type(AddressSpace::default()).const_null()))?;
+        deferred_class_temporary_slots.push(slot);
+    }
     for (index, parameter) in function.params.iter().enumerate() {
         let value = llvm_function
             .get_nth_param((index + 1) as u32)
@@ -247,6 +257,10 @@ fn define_function<'ctx>(
         blocks,
         current_frame: frame,
         next_data_id: 0,
+        defer_class_temporary_drops: false,
+        deferred_class_temporary_slots,
+        deferred_class_temporary_slot_cursor: 0,
+        deferred_class_temporary_drops: Vec::new(),
     };
     lowerer.retain_string_parameters()?;
     build(
@@ -322,6 +336,10 @@ struct FunctionLowerer<'ctx, 'program> {
     blocks: Vec<BasicBlock<'ctx>>,
     current_frame: PointerValue<'ctx>,
     next_data_id: usize,
+    defer_class_temporary_drops: bool,
+    deferred_class_temporary_slots: Vec<PointerValue<'ctx>>,
+    deferred_class_temporary_slot_cursor: usize,
+    deferred_class_temporary_drops: Vec<(PointerValue<'ctx>, crate::class_layout::ClassId)>,
 }
 
 impl<'ctx> FunctionLowerer<'ctx, '_> {
@@ -333,6 +351,8 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
     }
 
     fn lower_statement(&mut self, statement: &mir::Statement) -> Result<(), BackendError> {
+        debug_assert!(self.deferred_class_temporary_drops.is_empty());
+        self.defer_class_temporary_drops = true;
         match statement {
             mir::Statement::AssignLocal { target, value } => {
                 let local = local_in(self.function, *target)?;
@@ -498,13 +518,18 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 self.drop_class_value_checked(value, class)?;
             }
         }
-        Ok(())
+        self.defer_class_temporary_drops = false;
+        self.flush_deferred_class_temporary_drops()
     }
 
     fn lower_terminator(&mut self, terminator: &mir::Terminator) -> Result<(), BackendError> {
         match terminator {
             mir::Terminator::Return(expression) => {
+                debug_assert!(self.deferred_class_temporary_drops.is_empty());
+                self.defer_class_temporary_drops = true;
                 let value = self.lower_rvalue(expression)?;
+                self.defer_class_temporary_drops = false;
+                self.flush_deferred_class_temporary_drops()?;
                 self.cleanup_class_locals()?;
                 self.cleanup_string_locals()?;
                 build(self.builder.build_return(Some(&value)))?;
@@ -556,11 +581,41 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 condition,
                 then_block,
                 else_block,
-            } => self.lower_condition_to_branch(
-                condition,
-                block_for(&self.blocks, *then_block)?,
-                block_for(&self.blocks, *else_block)?,
-            )?,
+            } => {
+                if mir::bool_class_temporary_capacity(condition) == 0 {
+                    return self.lower_condition_to_branch(
+                        condition,
+                        block_for(&self.blocks, *then_block)?,
+                        block_for(&self.blocks, *else_block)?,
+                    );
+                }
+                debug_assert!(self.deferred_class_temporary_drops.is_empty());
+                let function = current_function(&self.builder)?;
+                let cleanup_then = self
+                    .context
+                    .append_basic_block(function, "condition.cleanup.then");
+                let cleanup_else = self
+                    .context
+                    .append_basic_block(function, "condition.cleanup.else");
+                self.defer_class_temporary_drops = true;
+                self.lower_condition_to_branch(condition, cleanup_then, cleanup_else)?;
+                self.defer_class_temporary_drops = false;
+                let drops = std::mem::take(&mut self.deferred_class_temporary_drops);
+
+                self.builder.position_at_end(cleanup_then);
+                self.emit_deferred_class_temporary_drops(&drops)?;
+                build(
+                    self.builder
+                        .build_unconditional_branch(block_for(&self.blocks, *then_block)?),
+                )?;
+
+                self.builder.position_at_end(cleanup_else);
+                self.emit_deferred_class_temporary_drops(&drops)?;
+                build(
+                    self.builder
+                        .build_unconditional_branch(block_for(&self.blocks, *else_block)?),
+                )?;
+            }
         }
         Ok(())
     }
@@ -628,8 +683,19 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 constructor,
                 args,
             } => {
-                // Evaluate source arguments once, then share those values between
-                // promoted-property initialization and the lifecycle call.
+                // Explicit property initializers precede promoted properties in
+                // the canonical construction order, so evaluate them before any
+                // constructor-argument side effects. Arguments remain exactly-once.
+                let mut lowered_properties = Vec::with_capacity(properties.len());
+                for property in properties {
+                    lowered_properties.push(match &property.source {
+                        mir::PropertyValueSource::Expression(value) => {
+                            Some(self.lower_rvalue(value)?)
+                        }
+                        mir::PropertyValueSource::ConstructorArgument(_)
+                        | mir::PropertyValueSource::ConstructorBody => None,
+                    });
+                }
                 let mut lowered_args = Vec::with_capacity(args.len());
                 let mut owned_strings = Vec::new();
                 for (index, argument) in args.iter().enumerate() {
@@ -655,11 +721,9 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                     )?
                     .ok_or_else(|| backend_failure("class allocation produced no result"))?
                     .into_pointer_value();
-                for property in properties {
+                for (property, lowered_property) in properties.iter().zip(lowered_properties) {
                     let value = match &property.source {
-                        mir::PropertyValueSource::Expression(value) => {
-                            Some(self.lower_rvalue(value)?)
-                        }
+                        mir::PropertyValueSource::Expression(_) => lowered_property,
                         mir::PropertyValueSource::ConstructorArgument(index) => {
                             Some(*lowered_args.get(*index).ok_or_else(|| {
                                 malformed_mir(format!(
@@ -728,10 +792,8 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                                     ))
                                 })?;
                         if !promoted && !local_in(constructor_definition, parameter)?.owned {
-                            self.drop_class_value_checked(
-                                lowered_args[index].into_pointer_value(),
-                                *class,
-                            )?;
+                            let value = lowered_args[index].into_pointer_value();
+                            self.defer_or_drop_class_temporary(value, *class)?;
                         }
                     }
                 }
@@ -917,6 +979,46 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
             build(self.builder.build_store(slot, pointer.const_null()))?;
             self.drop_class_value_checked(value, class)?;
         }
+        Ok(())
+    }
+
+    fn flush_deferred_class_temporary_drops(&mut self) -> Result<(), BackendError> {
+        let drops = std::mem::take(&mut self.deferred_class_temporary_drops);
+        self.emit_deferred_class_temporary_drops(&drops)
+    }
+
+    fn emit_deferred_class_temporary_drops(
+        &mut self,
+        drops: &[(PointerValue<'ctx>, crate::class_layout::ClassId)],
+    ) -> Result<(), BackendError> {
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        for (slot, class) in drops.iter().rev() {
+            let value = build(
+                self.builder
+                    .build_load(pointer, *slot, "class.temporary.drop"),
+            )?
+            .into_pointer_value();
+            build(self.builder.build_store(*slot, pointer.const_null()))?;
+            self.drop_class_value_checked(value, *class)?;
+        }
+        Ok(())
+    }
+
+    fn defer_or_drop_class_temporary(
+        &mut self,
+        value: PointerValue<'ctx>,
+        class: crate::class_layout::ClassId,
+    ) -> Result<(), BackendError> {
+        if !self.defer_class_temporary_drops {
+            return self.drop_class_value_checked(value, class);
+        }
+        let slot = *self
+            .deferred_class_temporary_slots
+            .get(self.deferred_class_temporary_slot_cursor)
+            .ok_or_else(|| malformed_mir("class temporary stack-slot capacity was exhausted"))?;
+        self.deferred_class_temporary_slot_cursor += 1;
+        build(self.builder.build_store(slot, value))?;
+        self.deferred_class_temporary_drops.push((slot, class));
         Ok(())
     }
 
@@ -1971,7 +2073,8 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 ))
             })?;
             if !local_in(callee_definition, parameter)?.owned {
-                self.drop_class_value_checked(lowered_args[index].into_pointer_value(), *class)?;
+                let value = lowered_args[index].into_pointer_value();
+                self.defer_or_drop_class_temporary(value, *class)?;
             }
         }
         Ok(result)

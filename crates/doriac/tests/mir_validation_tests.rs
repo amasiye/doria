@@ -316,6 +316,50 @@ fn shared_validator_requires_promoted_class_arguments_to_transfer_ownership() {
 }
 
 #[test]
+fn shared_validator_rejects_borrowing_and_transferring_one_class_local_in_a_call() {
+    let mut program = class_program();
+    program.functions[0].locals.push(class_local(0, ClassId(0)));
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::CallVoid {
+            function: FunctionId(1),
+            args: vec![
+                Rvalue::Class(ClassExpression::Local {
+                    class: ClassId(0),
+                    local: LocalId(0),
+                    transfer: false,
+                }),
+                Rvalue::Class(ClassExpression::Local {
+                    class: ClassId(0),
+                    local: LocalId(0),
+                    transfer: true,
+                }),
+            ],
+        });
+    let mut borrowed = class_local(0, ClassId(0));
+    borrowed.owned = false;
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "borrowAndTake".to_string(),
+        params: vec![LocalId(0), LocalId(1)],
+        return_type: ReturnType::Void,
+        locals: vec![borrowed, class_local(1, ClassId(0))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("a class local cannot be borrowed and transferred by one call");
+    assert!(error
+        .message
+        .contains("both borrows and transfers class local local0"));
+}
+
+#[test]
 fn shared_validator_rejects_invalid_class_new_property_sources() {
     let property = PropertyId {
         class: ClassId(0),
@@ -656,6 +700,91 @@ fn shared_validator_requires_class_properties_in_construction_order() {
     let error = doriac::mir_validation::validate_program(&program)
         .expect_err("property initializers must retain canonical construction order");
     assert!(error.message.contains("out of construction order"));
+}
+
+#[test]
+fn shared_validator_requires_constructor_body_initializers_on_every_return_path() {
+    let mut program = class_program();
+    let property = PropertyId {
+        class: ClassId(0),
+        index: 0,
+    };
+    program.classes[0].properties.push(Property {
+        id: property,
+        name: "text".to_string(),
+        ty: Type::String,
+        writable: false,
+        promoted: false,
+    });
+    program.classes[0].layout = compute_class_layout(
+        ClassId(0),
+        [(property, FieldType::String)],
+        std::mem::size_of::<usize>() as u32,
+    );
+    program.classes[0].constructor = Some(FunctionId(1));
+    program.functions[0].locals.push(class_local(0, ClassId(0)));
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::AssignLocal {
+            target: LocalId(0),
+            value: Rvalue::Class(ClassExpression::New {
+                class: ClassId(0),
+                properties: vec![PropertyValue {
+                    property,
+                    source: PropertyValueSource::ConstructorBody,
+                }],
+                constructor: Some(FunctionId(1)),
+                args: vec![],
+            }),
+        });
+    let mut receiver = class_local(0, ClassId(0));
+    receiver.owned = false;
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "Message::__construct".to_string(),
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Void,
+        locals: vec![receiver],
+        blocks: vec![
+            BasicBlock {
+                id: BlockId(0),
+                statements: vec![],
+                terminator: Terminator::Branch {
+                    condition: doriac::mir::BoolExpression::Use {
+                        operand: Operand::Scalar(ScalarValue::Bool(true)),
+                    },
+                    then_block: BlockId(1),
+                    else_block: BlockId(2),
+                },
+            },
+            BasicBlock {
+                id: BlockId(1),
+                statements: vec![Statement::AssignProperty {
+                    object: LocalId(0),
+                    property,
+                    value: Rvalue::String(StringExpression::Literal("ready".to_string())),
+                }],
+                terminator: Terminator::Jump(BlockId(3)),
+            },
+            BasicBlock {
+                id: BlockId(2),
+                statements: vec![],
+                terminator: Terminator::Jump(BlockId(3)),
+            },
+            BasicBlock {
+                id: BlockId(3),
+                statements: vec![],
+                terminator: Terminator::ReturnVoid,
+            },
+        ],
+        entry_block: BlockId(0),
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("constructor-body initialization must dominate every normal return");
+    assert!(error
+        .message
+        .contains("can return without initializing property0"));
 }
 
 #[test]

@@ -708,6 +708,11 @@ fn validate_class_expression(
                                 class.0, property.property.index
                             )));
                         }
+                        validate_constructor_body_initializer(
+                            constructor,
+                            receiver,
+                            property.property,
+                        )?;
                         definition.ty
                     }
                 };
@@ -771,6 +776,403 @@ fn validate_class_expression(
             Ok(())
         }
     }
+}
+
+fn validate_constructor_body_initializer(
+    constructor: &mir::Function,
+    receiver: mir::LocalId,
+    property: crate::class_layout::PropertyId,
+) -> Result<(), BackendError> {
+    let mut reachable = vec![false; constructor.blocks.len()];
+    let mut pending = vec![constructor.entry_block];
+    while let Some(block_id) = pending.pop() {
+        let block = block_in(constructor, block_id)?;
+        if std::mem::replace(&mut reachable[block_id.0], true) {
+            continue;
+        }
+        pending.extend(terminator_targets(&block.terminator));
+    }
+
+    let mut predecessors = vec![Vec::new(); constructor.blocks.len()];
+    for block in constructor
+        .blocks
+        .iter()
+        .filter(|block| reachable[block.id.0])
+    {
+        for target in terminator_targets(&block.terminator) {
+            block_in(constructor, target)?;
+            predecessors[target.0].push(block.id);
+        }
+    }
+
+    let assigns_property = constructor
+        .blocks
+        .iter()
+        .map(|block| {
+            block.statements.iter().any(|statement| {
+                matches!(
+                    statement,
+                    mir::Statement::AssignProperty {
+                        object,
+                        property: assigned,
+                        ..
+                    } if *object == receiver && *assigned == property
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut initialized_on_entry = vec![true; constructor.blocks.len()];
+    let mut initialized_on_exit = vec![true; constructor.blocks.len()];
+    initialized_on_entry[constructor.entry_block.0] = false;
+
+    loop {
+        let mut changed = false;
+        for block in constructor
+            .blocks
+            .iter()
+            .filter(|block| reachable[block.id.0])
+        {
+            let initialized = if block.id == constructor.entry_block {
+                false
+            } else {
+                predecessors[block.id.0]
+                    .iter()
+                    .filter(|predecessor| reachable[predecessor.0])
+                    .all(|predecessor| initialized_on_exit[predecessor.0])
+            };
+            let exits_initialized = initialized || assigns_property[block.id.0];
+            if initialized_on_entry[block.id.0] != initialized
+                || initialized_on_exit[block.id.0] != exits_initialized
+            {
+                initialized_on_entry[block.id.0] = initialized;
+                initialized_on_exit[block.id.0] = exits_initialized;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    for block in constructor
+        .blocks
+        .iter()
+        .filter(|block| reachable[block.id.0])
+    {
+        let mut initialized = initialized_on_entry[block.id.0];
+        for statement in &block.statements {
+            if !initialized && statement_observes_property(statement, receiver, property) {
+                return Err(malformed_mir(format!(
+                    "constructor {} reads or exposes property{} before it is initialized",
+                    constructor.name, property.index
+                )));
+            }
+            if matches!(
+                statement,
+                mir::Statement::AssignProperty {
+                    object,
+                    property: assigned,
+                    ..
+                } if *object == receiver && *assigned == property
+            ) {
+                initialized = true;
+            }
+        }
+        if !initialized && terminator_observes_property(&block.terminator, receiver, property) {
+            return Err(malformed_mir(format!(
+                "constructor {} reads or exposes property{} before it is initialized",
+                constructor.name, property.index
+            )));
+        }
+        if !initialized
+            && matches!(
+                block.terminator,
+                mir::Terminator::Return(_) | mir::Terminator::ReturnVoid
+            )
+        {
+            return Err(malformed_mir(format!(
+                "constructor {} can return without initializing property{}",
+                constructor.name, property.index
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn terminator_targets(terminator: &mir::Terminator) -> Vec<mir::BlockId> {
+    match terminator {
+        mir::Terminator::Jump(target) => vec![*target],
+        mir::Terminator::Branch {
+            then_block,
+            else_block,
+            ..
+        } => vec![*then_block, *else_block],
+        mir::Terminator::Return(_)
+        | mir::Terminator::ReturnVoid
+        | mir::Terminator::Panic(_)
+        | mir::Terminator::Unreachable => Vec::new(),
+    }
+}
+
+fn statement_observes_property(
+    statement: &mir::Statement,
+    receiver: mir::LocalId,
+    property: crate::class_layout::PropertyId,
+) -> bool {
+    match statement {
+        mir::Statement::AssignLocal { value, .. } => {
+            rvalue_observes_property(value, receiver, property)
+        }
+        mir::Statement::EchoStringLiteral(_) | mir::Statement::DropClass { .. } => false,
+        mir::Statement::EchoString(value) | mir::Statement::WriteStderr(value) => {
+            string_observes_property(value, receiver, property)
+        }
+        mir::Statement::CallVoid { args, .. } => args
+            .iter()
+            .any(|value| rvalue_observes_property(value, receiver, property)),
+        mir::Statement::Printf(format) => format_observes_property(format, receiver, property),
+        mir::Statement::WriteFile { path, contents } => {
+            string_observes_property(path, receiver, property)
+                || string_observes_property(contents, receiver, property)
+        }
+        mir::Statement::AssignProperty { value, .. } => {
+            rvalue_observes_property(value, receiver, property)
+        }
+    }
+}
+
+fn terminator_observes_property(
+    terminator: &mir::Terminator,
+    receiver: mir::LocalId,
+    property: crate::class_layout::PropertyId,
+) -> bool {
+    match terminator {
+        mir::Terminator::Return(value) => rvalue_observes_property(value, receiver, property),
+        mir::Terminator::Panic(value) => string_observes_property(value, receiver, property),
+        mir::Terminator::Branch { condition, .. } => {
+            bool_observes_property(condition, receiver, property)
+        }
+        mir::Terminator::ReturnVoid | mir::Terminator::Unreachable | mir::Terminator::Jump(_) => {
+            false
+        }
+    }
+}
+
+fn rvalue_observes_property(
+    value: &mir::Rvalue,
+    receiver: mir::LocalId,
+    property: crate::class_layout::PropertyId,
+) -> bool {
+    match value {
+        mir::Rvalue::Value(value) => value_observes_property(value, receiver, property),
+        mir::Rvalue::String(value) => string_observes_property(value, receiver, property),
+        mir::Rvalue::NullableString(value) => {
+            nullable_string_observes_property(value, receiver, property)
+        }
+        mir::Rvalue::Class(value) => class_observes_property(value, receiver, property),
+    }
+}
+
+fn value_observes_property(
+    value: &mir::ValueExpression,
+    receiver: mir::LocalId,
+    property: crate::class_layout::PropertyId,
+) -> bool {
+    match value {
+        mir::ValueExpression::Integer(value) => {
+            integer_observes_property(value, receiver, property)
+        }
+        mir::ValueExpression::Float(value) => float_observes_property(value, receiver, property),
+        mir::ValueExpression::Bool(value) => bool_observes_property(value, receiver, property),
+    }
+}
+
+fn operand_observes_property(
+    operand: &mir::Operand,
+    receiver: mir::LocalId,
+    property: crate::class_layout::PropertyId,
+) -> bool {
+    matches!(
+        operand,
+        mir::Operand::Property {
+            object,
+            property: observed,
+        } if *object == receiver && *observed == property
+    )
+}
+
+fn integer_observes_property(
+    value: &mir::IntegerExpression,
+    receiver: mir::LocalId,
+    property: crate::class_layout::PropertyId,
+) -> bool {
+    match value {
+        mir::IntegerExpression::Use { operand, .. } => {
+            operand_observes_property(operand, receiver, property)
+        }
+        mir::IntegerExpression::Unary { operand, .. }
+        | mir::IntegerExpression::Convert { value: operand, .. } => {
+            integer_observes_property(operand, receiver, property)
+        }
+        mir::IntegerExpression::Binary { left, right, .. } => {
+            integer_observes_property(left, receiver, property)
+                || integer_observes_property(right, receiver, property)
+        }
+        mir::IntegerExpression::FloatToInt { value } => {
+            float_observes_property(value, receiver, property)
+        }
+        mir::IntegerExpression::Call { args, .. } => args
+            .iter()
+            .any(|value| rvalue_observes_property(value, receiver, property)),
+    }
+}
+
+fn float_observes_property(
+    value: &mir::FloatExpression,
+    receiver: mir::LocalId,
+    property: crate::class_layout::PropertyId,
+) -> bool {
+    match value {
+        mir::FloatExpression::Use { operand, .. } => {
+            operand_observes_property(operand, receiver, property)
+        }
+        mir::FloatExpression::Negate { operand, .. } => {
+            float_observes_property(operand, receiver, property)
+        }
+        mir::FloatExpression::Binary { left, right, .. } => {
+            float_observes_property(left, receiver, property)
+                || float_observes_property(right, receiver, property)
+        }
+        mir::FloatExpression::IntToFloat { value } => {
+            integer_observes_property(value, receiver, property)
+        }
+        mir::FloatExpression::Call { args, .. } => args
+            .iter()
+            .any(|value| rvalue_observes_property(value, receiver, property)),
+    }
+}
+
+fn string_observes_property(
+    value: &mir::StringExpression,
+    receiver: mir::LocalId,
+    property: crate::class_layout::PropertyId,
+) -> bool {
+    match value {
+        mir::StringExpression::Property {
+            object,
+            property: observed,
+        } => *object == receiver && *observed == property,
+        mir::StringExpression::Concat(parts) => parts
+            .iter()
+            .any(|part| string_observes_property(part, receiver, property)),
+        mir::StringExpression::Display(value) => value_observes_property(value, receiver, property),
+        mir::StringExpression::Call { args, .. } => args
+            .iter()
+            .any(|value| rvalue_observes_property(value, receiver, property)),
+        mir::StringExpression::ReadFile(path) => string_observes_property(path, receiver, property),
+        mir::StringExpression::Format(format) => {
+            format_observes_property(format, receiver, property)
+        }
+        mir::StringExpression::Literal(_)
+        | mir::StringExpression::Local(_)
+        | mir::StringExpression::NullableLocalAssumeNonNull(_) => false,
+    }
+}
+
+fn nullable_string_observes_property(
+    value: &mir::NullableStringExpression,
+    receiver: mir::LocalId,
+    property: crate::class_layout::PropertyId,
+) -> bool {
+    match value {
+        mir::NullableStringExpression::String(value) => {
+            string_observes_property(value, receiver, property)
+        }
+        mir::NullableStringExpression::Property {
+            object,
+            property: observed,
+        } => *object == receiver && *observed == property,
+        mir::NullableStringExpression::Call { args, .. } => args
+            .iter()
+            .any(|value| rvalue_observes_property(value, receiver, property)),
+        mir::NullableStringExpression::Null
+        | mir::NullableStringExpression::Local(_)
+        | mir::NullableStringExpression::ReadLine => false,
+    }
+}
+
+fn class_observes_property(
+    value: &mir::ClassExpression,
+    receiver: mir::LocalId,
+    property: crate::class_layout::PropertyId,
+) -> bool {
+    match value {
+        mir::ClassExpression::Local { local, .. } => *local == receiver,
+        mir::ClassExpression::Property {
+            object,
+            property: observed,
+            ..
+        } => *object == receiver && *observed == property,
+        mir::ClassExpression::Call { args, .. } => args
+            .iter()
+            .any(|value| rvalue_observes_property(value, receiver, property)),
+        mir::ClassExpression::New {
+            properties, args, ..
+        } => {
+            properties.iter().any(|value| {
+                matches!(
+                    &value.source,
+                    mir::PropertyValueSource::Expression(value)
+                        if rvalue_observes_property(value, receiver, property)
+                )
+            }) || args
+                .iter()
+                .any(|value| rvalue_observes_property(value, receiver, property))
+        }
+    }
+}
+
+fn bool_observes_property(
+    value: &mir::BoolExpression,
+    receiver: mir::LocalId,
+    property: crate::class_layout::PropertyId,
+) -> bool {
+    match value {
+        mir::BoolExpression::Use { operand } => {
+            operand_observes_property(operand, receiver, property)
+        }
+        mir::BoolExpression::Compare { left, right, .. } => {
+            value_observes_property(left, receiver, property)
+                || value_observes_property(right, receiver, property)
+        }
+        mir::BoolExpression::StringCompare { left, right, .. } => {
+            string_observes_property(left, receiver, property)
+                || string_observes_property(right, receiver, property)
+        }
+        mir::BoolExpression::NullableStringCompare { left, right, .. } => {
+            nullable_string_observes_property(left, receiver, property)
+                || nullable_string_observes_property(right, receiver, property)
+        }
+        mir::BoolExpression::Not(value) => bool_observes_property(value, receiver, property),
+        mir::BoolExpression::Binary { left, right, .. } => {
+            bool_observes_property(left, receiver, property)
+                || bool_observes_property(right, receiver, property)
+        }
+        mir::BoolExpression::Call { args, .. } => args
+            .iter()
+            .any(|value| rvalue_observes_property(value, receiver, property)),
+    }
+}
+
+fn format_observes_property(
+    format: &mir::FormatExpression,
+    receiver: mir::LocalId,
+    property: crate::class_layout::PropertyId,
+) -> bool {
+    format.arguments.iter().any(|argument| match argument {
+        mir::FormatArgument::Value(value) => value_observes_property(value, receiver, property),
+        mir::FormatArgument::String(value) => string_observes_property(value, receiver, property),
+    })
 }
 
 fn validate_float_expression(
@@ -869,6 +1271,7 @@ fn validate_call_args_for_params(
             args.len()
         )));
     }
+    let mut borrowed_class_locals = HashSet::new();
     let mut transferred_class_locals = HashSet::new();
     for (index, (argument, parameter)) in args.iter().zip(params).enumerate() {
         let parameter_definition = local_in(callee, *parameter)?;
@@ -884,16 +1287,30 @@ fn validate_call_args_for_params(
         }
         validate_rvalue(program, caller, argument)?;
         if let mir::Rvalue::Class(mir::ClassExpression::Local {
-            local,
-            transfer: true,
-            ..
+            local, transfer, ..
         }) = argument
         {
-            if !transferred_class_locals.insert(*local) {
-                return Err(malformed_mir(format!(
-                    "call to {} transfers class local local{} more than once",
-                    callee.name, local.0
-                )));
+            if *transfer {
+                if borrowed_class_locals.contains(local) {
+                    return Err(malformed_mir(format!(
+                        "call to {} both borrows and transfers class local local{}",
+                        callee.name, local.0
+                    )));
+                }
+                if !transferred_class_locals.insert(*local) {
+                    return Err(malformed_mir(format!(
+                        "call to {} transfers class local local{} more than once",
+                        callee.name, local.0
+                    )));
+                }
+            } else {
+                if transferred_class_locals.contains(local) {
+                    return Err(malformed_mir(format!(
+                        "call to {} both borrows and transfers class local local{}",
+                        callee.name, local.0
+                    )));
+                }
+                borrowed_class_locals.insert(*local);
             }
         }
         if matches!(parameter_type, mir::Type::Class(_)) {
