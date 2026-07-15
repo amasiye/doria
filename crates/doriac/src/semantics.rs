@@ -756,6 +756,7 @@ impl<'program> Checker<'program> {
                 name: param.name.clone(),
                 ty,
                 take: param.take,
+                writable: param.writable,
                 has_default,
             });
         }
@@ -4279,6 +4280,24 @@ impl<'program> Checker<'program> {
             if self.is_expr_assignable(param.ty, arg, scopes, method_context)
                 || self.is_assignable(param.ty, got)
             {
+                if param.writable
+                    && matches!(self.types.kind(param.ty), TypeKind::Class(_))
+                    && !self.is_writable_object_path(arg, scopes, method_context)
+                {
+                    self.diagnostics.push(
+                        Diagnostic::new(
+                            "E0204",
+                            format!(
+                                "argument {} of {callee} must be a writable class value",
+                                index + 1
+                            ),
+                            arg.span(),
+                        )
+                        .with_help(
+                            "declare the argument binding `writable` before passing it for mutation",
+                        ),
+                    );
+                }
                 continue;
             }
 

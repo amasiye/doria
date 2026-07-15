@@ -40,6 +40,7 @@ pub struct ParamInfo {
     pub name: String,
     pub ty: TypeId,
     pub take: bool,
+    pub writable: bool,
     pub has_default: bool,
 }
 

@@ -1,0 +1,19 @@
+drop token old
+drop token temporary
+borrowed temporary output
+drop token borrowed temporary
+drop token borrowed second
+drop token borrowed first
+drop token condition temporary
+condition ready
+drop token foreach
+drop token foreach
+drop token inner
+drop token continued
+drop token continued
+drop token early
+leaving scenario
+drop token replacement
+drop pair
+drop token second
+drop token first

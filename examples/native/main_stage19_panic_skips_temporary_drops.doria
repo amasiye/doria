@@ -1,0 +1,17 @@
+class Guard
+{
+    function __destruct()
+    {
+        echo "dropped\n";
+    }
+}
+
+function label(Guard $guard): string
+{
+    return "boom";
+}
+
+function main(): void
+{
+    panic(label(new Guard()));
+}

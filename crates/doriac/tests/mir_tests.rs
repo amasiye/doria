@@ -1,9 +1,10 @@
 use doriac::backend::{BackendOutput, BackendTarget};
+use doriac::class_layout::compute_class_layout;
 use doriac::mir::{
-    BasicBlock, BlockId, BoolBinaryOp as ConditionBinaryOp, BoolExpression as Condition, CompareOp,
-    Function, FunctionId, IntegerBinaryOp, IntegerExpression, Local, LocalId, Operand, Program,
-    ReturnType, Rvalue, ScalarType, ScalarValue, Statement, StringExpression, Terminator, Type,
-    ValueExpression,
+    BasicBlock, BlockId, BoolBinaryOp as ConditionBinaryOp, BoolExpression as Condition,
+    ClassExpression, CompareOp, Function, FunctionId, IntegerBinaryOp, IntegerExpression, Local,
+    LocalId, Operand, Program, ReturnType, Rvalue, ScalarType, ScalarValue, Statement,
+    StringExpression, Terminator, Type, ValueExpression,
 };
 use doriac::numeric::{IntegerType, IntegerValue};
 
@@ -120,6 +121,7 @@ fn conditional_program(condition: Condition, then_status: i64, else_status: i64)
                 ty: Type::Scalar(ScalarType::Integer(DEFAULT_INT)),
                 writable: false,
                 synthetic: true,
+                owned: false,
             }],
             blocks: vec![
                 BasicBlock {
@@ -781,6 +783,7 @@ fn interpreter_reports_arithmetic_overflow_as_runtime_panic() {
                 ty: Type::Scalar(ScalarType::Integer(DEFAULT_INT)),
                 writable: false,
                 synthetic: true,
+                owned: false,
             }],
             blocks: vec![BasicBlock {
                 id: BlockId(0),
@@ -2890,6 +2893,7 @@ fn explicitly_limited_interpreter_can_bound_call_frames() {
                 ty: Type::Scalar(ScalarType::Integer(DEFAULT_INT)),
                 writable: false,
                 synthetic: true,
+                owned: false,
             }],
             blocks: vec![BasicBlock {
                 id: BlockId(0),
@@ -3320,7 +3324,7 @@ fn stage_19_class_metadata_precedes_top_level_execution_lowering() {
 }
 
 #[test]
-fn native_class_property_gap_has_a_source_level_stage_neutral_diagnostic() {
+fn stage_19_class_property_access_and_destructor_execute_in_debug_mir() {
     let source = r#"class Message
 {
     function __construct(string $text)
@@ -3345,18 +3349,395 @@ function main(): void
 }
 "#;
 
-    let diagnostics = doriac::lower_source_to_mir("main.doria", source)
-        .expect_err("class property execution is not supported yet");
-    let diagnostic = diagnostics
-        .iter()
-        .find(|diagnostic| diagnostic.code == "M1101")
-        .expect("native coverage diagnostic");
-
+    let output = interpret(source);
+    assert_eq!(output.exit_status, 0);
     assert_eq!(
-        diagnostic.message,
-        "class property access is not supported by native compilation"
+        String::from_utf8(output.stdout).expect("stdout is UTF-8"),
+        "Welcome to Doria\nmessage released\n"
     );
-    assert!(!diagnostic.message.contains("Stage "));
-    assert!(!diagnostic.message.contains("MIR"));
-    assert!(!diagnostic.message.contains("condition"));
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn stage_19_constructor_body_executes_after_promoted_properties_are_initialized() {
+    let source = r#"class Message
+{
+    function __construct(string $text)
+    {
+        echo "constructed ";
+        echo $this->text;
+        echo "\n";
+    }
+
+    function __destruct()
+    {
+        echo "released ";
+        echo $this->text;
+        echo "\n";
+    }
+}
+
+function main(): void
+{
+    let $message = new Message("once");
+}
+"#;
+
+    let output = interpret(source);
+    assert_eq!(output.exit_status, 0);
+    assert_eq!(output.stdout, b"constructed once\nreleased once\n");
+    assert!(output.stderr.is_empty());
+    assert!(!lower_object(source).is_empty());
+}
+
+#[test]
+fn stage_19_constructor_body_can_directly_initialize_a_proven_property() {
+    let source = r#"class Message
+{
+    string $text;
+
+    function __construct(string $value)
+    {
+        $this->text = $value;
+    }
+
+    function __destruct()
+    {
+        echo $this->text;
+        echo " released\n";
+    }
+}
+
+function main(): void
+{
+    let $message = new Message("direct");
+}
+"#;
+
+    let output = interpret(source);
+    assert_eq!(output.exit_status, 0);
+    assert_eq!(output.stdout, b"direct released\n");
+    assert!(output.stderr.is_empty());
+    assert!(!lower_object(source).is_empty());
+}
+
+#[test]
+fn stage_19_rejects_constructor_reads_before_direct_property_initialization() {
+    let diagnostics = doriac::lower_source_to_mir(
+        "constructor-read-before-init.doria",
+        r#"class Message
+{
+    string $text;
+
+    function __construct(string $value)
+    {
+        echo $this->text;
+        $this->text = $value;
+    }
+}
+
+function main(): void
+{
+    let $message = new Message("late");
+}
+"#,
+    )
+    .expect_err("the Stage 19 soundness gate must reject a read before initialization");
+
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "M1101"
+            && diagnostic.message.contains("property `$text`")
+            && diagnostic.message.contains("initialized")
+    }));
+}
+
+#[test]
+fn stage_19_rejects_constructor_initialization_after_unconditional_panic() {
+    let diagnostics = doriac::lower_source_to_mir(
+        "constructor-panic-before-init.doria",
+        r#"class Message
+{
+    string $text;
+
+    function __construct(string $value)
+    {
+        panic("bad");
+        $this->text = $value;
+    }
+}
+
+function main(): void
+{
+    let $message = new Message("unreachable");
+}
+"#,
+    )
+    .expect_err("an unreachable write cannot establish definite initialization");
+
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "M1101"
+            && diagnostic.message.contains("property `$text`")
+            && diagnostic.message.contains("not definitely initialized")
+    }));
+}
+
+#[test]
+fn stage_19_infers_string_property_loads_and_comparisons() {
+    let source = r#"class Message
+{
+    function __construct(string $text)
+    {
+    }
+}
+
+function main(): void
+{
+    let $message = new Message("ready");
+    let $copy = $message->text;
+    if ($message->text == "ready") {
+        echo $copy;
+    }
+}
+"#;
+
+    let output = interpret(source);
+    assert_eq!(output.exit_status, 0);
+    assert_eq!(output.stdout, b"ready");
+    assert!(output.stderr.is_empty());
+    assert!(!lower_object(source).is_empty());
+}
+
+#[test]
+fn stage_19_infers_nullable_string_property_loads_and_comparisons() {
+    let source = r#"class Box
+{
+    ?string $value = null;
+}
+
+function main(): void
+{
+    let $left = new Box();
+    let $right = new Box();
+    let $copy = $left->value;
+    if ($left->value == $right->value && $copy == null) {
+        echo "null";
+    }
+}
+"#;
+
+    let output = interpret(source);
+    assert_eq!(output.exit_status, 0);
+    assert_eq!(output.stdout, b"null");
+    assert!(output.stderr.is_empty());
+    assert!(!lower_object(source).is_empty());
+}
+
+#[test]
+fn stage_19_allows_writable_property_mutation_after_constructor_initialization() {
+    let source = r#"class Message
+{
+    writable string $text;
+
+    function __construct(string $first, string $second)
+    {
+        $this->text = $first;
+        $this->text = $second;
+    }
+
+    function __destruct()
+    {
+        echo $this->text;
+    }
+}
+
+function main(): void
+{
+    let $message = new Message("first", "second");
+}
+"#;
+
+    let output = interpret(source);
+    assert_eq!(output.exit_status, 0);
+    assert_eq!(output.stdout, b"second");
+    assert!(output.stderr.is_empty());
+    assert!(!lower_object(source).is_empty());
+}
+
+#[test]
+fn stage_19_lowers_grouped_property_assignment_targets() {
+    let source = r#"class Message
+{
+    writable string $text;
+
+    function __construct(string $value)
+    {
+        ($this->text) = $value;
+    }
+
+    function __destruct()
+    {
+        echo $this->text;
+    }
+}
+
+function main(): void
+{
+    let $message = new Message("ready");
+}
+"#;
+
+    let output = interpret(source);
+    assert_eq!(output.exit_status, 0);
+    assert_eq!(output.stdout, b"ready");
+    assert!(output.stderr.is_empty());
+    assert!(!lower_object(source).is_empty());
+}
+
+#[test]
+fn stage_19_mir_drops_borrowed_constructor_temporaries_in_reverse_order() {
+    let mut program = lower(
+        r#"class Child
+{
+    function __construct(string $name)
+    {
+    }
+
+    function __destruct()
+    {
+        echo "drop ";
+        echo $this->name;
+        echo "\n";
+    }
+}
+
+class Parent
+{
+    function __construct(take Child $first, take Child $second)
+    {
+    }
+}
+
+function main(): void
+{
+    let $parent = new Parent(new Child("first"), new Child("second"));
+}
+"#,
+    );
+
+    // Source constructors promote every parameter, so a borrowed, unpromoted
+    // class parameter is not source-reachable today. Keep the shared MIR and
+    // all consumers sound for hand-built MIR and future constructor shapes by
+    // removing the promotion while retaining the borrowed lifecycle parameter.
+    let parent = program
+        .classes
+        .iter_mut()
+        .find(|class| class.name == "Parent")
+        .expect("Parent metadata");
+    let parent_id = parent.id;
+    parent.properties.clear();
+    parent.layout = compute_class_layout(parent_id, [], std::mem::size_of::<usize>() as u32);
+    for function in &mut program.functions {
+        for block in &mut function.blocks {
+            for statement in &mut block.statements {
+                if let Statement::AssignLocal {
+                    value:
+                        Rvalue::Class(ClassExpression::New {
+                            class, properties, ..
+                        }),
+                    ..
+                } = statement
+                {
+                    if *class == parent_id {
+                        properties.clear();
+                    }
+                }
+            }
+        }
+    }
+
+    doriac::mir_validation::validate_program(&program)
+        .expect("borrowed unpromoted constructor MIR should remain well formed");
+    let output = doriac::mir_interpreter::interpret(&program).expect("MIR should interpret");
+    assert_eq!(output.stdout, b"drop second\ndrop first\n");
+    assert!(!doriac::codegen_cranelift::lower_mir_to_object(&program)
+        .expect("MIR should lower to Cranelift")
+        .is_empty());
+    #[cfg(feature = "llvm-backend")]
+    assert!(!doriac::codegen_llvm::lower_mir_to_object(&program)
+        .expect("MIR should lower to LLVM")
+        .is_empty());
+}
+
+#[test]
+fn stage_19_property_initializers_run_before_the_constructor_body() {
+    let source = r#"function initializeText(): string
+{
+    echo "property initializer\n";
+    return "ready";
+}
+
+class Message
+{
+    string $text = initializeText();
+
+    function __construct(string $label)
+    {
+        echo "constructor ";
+        echo $this->text;
+        echo "\n";
+    }
+}
+
+function main(): void
+{
+    let $message = new Message("message");
+}
+"#;
+
+    let output = interpret(source);
+    assert_eq!(output.exit_status, 0);
+    assert_eq!(output.stdout, b"property initializer\nconstructor ready\n");
+    assert!(output.stderr.is_empty());
+    assert!(!lower_object(source).is_empty());
+}
+
+#[test]
+fn stage_19_class_values_move_through_arguments_and_returns() {
+    let source = r#"class Token
+{
+    function __construct(string $name)
+    {
+    }
+
+    function __destruct()
+    {
+        echo "drop ";
+        echo $this->name;
+        echo "\n";
+    }
+}
+
+function makeToken(): Token
+{
+    return new Token("returned");
+}
+
+function relay(take Token $token): Token
+{
+    return $token;
+}
+
+function main(): void
+{
+    let $token = relay(makeToken());
+    echo $token->name;
+    echo "\n";
+}
+"#;
+
+    let output = interpret(source);
+    assert_eq!(output.exit_status, 0);
+    assert_eq!(output.stdout, b"returned\ndrop returned\n");
+    assert!(output.stderr.is_empty());
+    assert!(!lower_object(source).is_empty());
 }

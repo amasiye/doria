@@ -83,6 +83,7 @@ fn shared_validator_rejects_scalar_string_assignment_mixing() {
         ty: Type::String,
         writable: true,
         synthetic: false,
+        owned: false,
     });
     program.functions[0].blocks[0]
         .statements
@@ -124,6 +125,7 @@ fn shared_validator_rejects_nullable_rvalue_assigned_to_plain_string() {
         ty: Type::String,
         writable: true,
         synthetic: false,
+        owned: false,
     });
     program.functions[0].blocks[0]
         .statements
@@ -192,6 +194,7 @@ fn shared_validator_requires_class_calls_to_return_the_declared_class() {
             terminator: Terminator::Return(Rvalue::Class(ClassExpression::Local {
                 class: ClassId(1),
                 local: LocalId(0),
+                transfer: true,
             })),
         }],
         entry_block: BlockId(0),
@@ -228,13 +231,14 @@ fn shared_validator_skips_the_implicit_constructor_receiver() {
         params: vec![LocalId(0), LocalId(1)],
         return_type: ReturnType::Void,
         locals: vec![
-            class_local(0, ClassId(0)),
+            borrowed_class_local(0, ClassId(0)),
             Local {
                 id: LocalId(1),
                 name: "text".to_string(),
                 ty: Type::String,
                 writable: false,
                 synthetic: false,
+                owned: false,
             },
         ],
         blocks: vec![BasicBlock {
@@ -247,6 +251,457 @@ fn shared_validator_skips_the_implicit_constructor_receiver() {
 
     doriac::mir_validation::validate_program(&program)
         .expect("source constructor arguments exclude the synthetic receiver");
+}
+
+#[test]
+fn shared_validator_requires_promoted_class_arguments_to_transfer_ownership() {
+    let mut program = class_program();
+    let child = PropertyId {
+        class: ClassId(0),
+        index: 0,
+    };
+    program.classes[0].properties = vec![Property {
+        id: child,
+        name: "child".to_string(),
+        ty: Type::Class(ClassId(1)),
+        writable: false,
+        promoted: true,
+    }];
+    program.classes[0].layout = compute_class_layout(
+        ClassId(0),
+        [(child, FieldType::Class(ClassId(1)))],
+        std::mem::size_of::<usize>() as u32,
+    );
+    program.classes[0].constructor = Some(FunctionId(1));
+    program.functions[0].locals = vec![class_local(0, ClassId(0)), class_local(1, ClassId(1))];
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::AssignLocal {
+            target: LocalId(0),
+            value: Rvalue::Class(ClassExpression::New {
+                class: ClassId(0),
+                properties: vec![PropertyValue {
+                    property: child,
+                    source: PropertyValueSource::ConstructorArgument(0),
+                }],
+                constructor: Some(FunctionId(1)),
+                args: vec![Rvalue::Class(ClassExpression::Local {
+                    class: ClassId(1),
+                    local: LocalId(1),
+                    transfer: false,
+                })],
+            }),
+        });
+    let mut borrowed_child = class_local(1, ClassId(1));
+    borrowed_child.owned = false;
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "Parent::__construct".to_string(),
+        params: vec![LocalId(0), LocalId(1)],
+        return_type: ReturnType::Void,
+        locals: vec![borrowed_class_local(0, ClassId(0)), borrowed_child],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("a promoted class property must receive ownership");
+    assert!(error
+        .message
+        .contains("argument 1 receives borrowed class local local1"));
+}
+
+#[test]
+fn shared_validator_rejects_borrowing_and_transferring_one_class_local_in_a_call() {
+    let mut program = class_program();
+    program.functions[0].locals.push(class_local(0, ClassId(0)));
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::CallVoid {
+            function: FunctionId(1),
+            args: vec![
+                Rvalue::Class(ClassExpression::Local {
+                    class: ClassId(0),
+                    local: LocalId(0),
+                    transfer: false,
+                }),
+                Rvalue::Class(ClassExpression::Local {
+                    class: ClassId(0),
+                    local: LocalId(0),
+                    transfer: true,
+                }),
+            ],
+        });
+    let mut borrowed = class_local(0, ClassId(0));
+    borrowed.owned = false;
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "borrowAndTake".to_string(),
+        params: vec![LocalId(0), LocalId(1)],
+        return_type: ReturnType::Void,
+        locals: vec![borrowed, class_local(1, ClassId(0))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("a class local cannot be borrowed and transferred by one call");
+    assert!(error
+        .message
+        .contains("both borrows and transfers class local local0"));
+}
+
+#[test]
+fn shared_validator_requires_writable_class_arguments_for_writable_parameters() {
+    let mut program = class_program();
+    program.functions[0].locals.push(class_local(0, ClassId(0)));
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::CallVoid {
+            function: FunctionId(1),
+            args: vec![Rvalue::Class(ClassExpression::Local {
+                class: ClassId(0),
+                local: LocalId(0),
+                transfer: false,
+            })],
+        });
+    let mut parameter = borrowed_class_local(0, ClassId(0));
+    parameter.writable = true;
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "mutate".to_string(),
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Void,
+        locals: vec![parameter],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("readonly class arguments cannot satisfy writable parameters");
+    assert!(error.message.contains("requires a writable class value"));
+
+    program.functions[0].locals[0].writable = true;
+    doriac::mir_validation::validate_program(&program)
+        .expect("a writable class argument should satisfy a writable parameter");
+}
+
+#[test]
+fn shared_validator_does_not_keep_nested_argument_borrows_alive() {
+    let mut program = class_program();
+    program.functions[0].locals.push(class_local(0, ClassId(0)));
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::CallVoid {
+            function: FunctionId(2),
+            args: vec![
+                Rvalue::String(StringExpression::Call {
+                    function: FunctionId(1),
+                    args: vec![Rvalue::Class(ClassExpression::Local {
+                        class: ClassId(0),
+                        local: LocalId(0),
+                        transfer: false,
+                    })],
+                }),
+                Rvalue::Class(ClassExpression::Local {
+                    class: ClassId(0),
+                    local: LocalId(0),
+                    transfer: true,
+                }),
+            ],
+        });
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "label".to_string(),
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Value(Type::String),
+        locals: vec![borrowed_class_local(0, ClassId(0))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::Return(Rvalue::String(StringExpression::Literal(
+                "box".to_string(),
+            ))),
+        }],
+        entry_block: BlockId(0),
+    });
+    program.functions.push(Function {
+        id: FunctionId(2),
+        name: "sink".to_string(),
+        params: vec![LocalId(0), LocalId(1)],
+        return_type: ReturnType::Void,
+        locals: vec![
+            Local {
+                id: LocalId(0),
+                name: "label".to_string(),
+                ty: Type::String,
+                writable: false,
+                owned: false,
+                synthetic: false,
+            },
+            class_local(1, ClassId(0)),
+        ],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+
+    doriac::mir_validation::validate_program(&program)
+        .expect("a nested borrow should end before the next outer argument");
+}
+
+#[test]
+fn shared_validator_preserves_constant_boolean_move_reachability() {
+    let mut program = class_program();
+    program.functions[0].locals.push(class_local(0, ClassId(0)));
+    program.functions[0].blocks = vec![
+        BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::Branch {
+                condition: doriac::mir::BoolExpression::Binary {
+                    op: doriac::mir::BoolBinaryOp::And,
+                    left: Box::new(doriac::mir::BoolExpression::Use {
+                        operand: Operand::Scalar(ScalarValue::Bool(false)),
+                    }),
+                    right: Box::new(doriac::mir::BoolExpression::Call {
+                        function: FunctionId(1),
+                        args: vec![Rvalue::Class(ClassExpression::Local {
+                            class: ClassId(0),
+                            local: LocalId(0),
+                            transfer: true,
+                        })],
+                    }),
+                },
+                then_block: BlockId(1),
+                else_block: BlockId(2),
+            },
+        },
+        BasicBlock {
+            id: BlockId(1),
+            statements: vec![Statement::CallVoid {
+                function: FunctionId(2),
+                args: vec![Rvalue::Class(ClassExpression::Local {
+                    class: ClassId(0),
+                    local: LocalId(0),
+                    transfer: true,
+                })],
+            }],
+            terminator: Terminator::Jump(BlockId(3)),
+        },
+        BasicBlock {
+            id: BlockId(2),
+            statements: vec![],
+            terminator: Terminator::Jump(BlockId(3)),
+        },
+        BasicBlock {
+            id: BlockId(3),
+            statements: vec![Statement::CallVoid {
+                function: FunctionId(3),
+                args: vec![Rvalue::Class(ClassExpression::Local {
+                    class: ClassId(0),
+                    local: LocalId(0),
+                    transfer: false,
+                })],
+            }],
+            terminator: Terminator::ReturnVoid,
+        },
+    ];
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "probe".to_string(),
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Value(Type::Scalar(ScalarType::Bool)),
+        locals: vec![class_local(0, ClassId(0))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::Return(Rvalue::Value(ValueExpression::Bool(
+                doriac::mir::BoolExpression::Use {
+                    operand: Operand::Scalar(ScalarValue::Bool(true)),
+                },
+            ))),
+        }],
+        entry_block: BlockId(0),
+    });
+    program.functions.push(Function {
+        id: FunctionId(2),
+        name: "consume".to_string(),
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Void,
+        locals: vec![class_local(0, ClassId(0))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+    program.functions.push(Function {
+        id: FunctionId(3),
+        name: "inspect".to_string(),
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Void,
+        locals: vec![borrowed_class_local(0, ClassId(0))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+
+    doriac::mir_validation::validate_program(&program)
+        .expect("short-circuited and unreachable transfers must not move the class local");
+}
+
+#[test]
+fn shared_validator_tracks_nested_transfers_across_outer_call_arguments() {
+    let mut program = class_program();
+    program.functions[0].locals.push(class_local(0, ClassId(0)));
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::CallVoid {
+            function: FunctionId(1),
+            args: vec![
+                Rvalue::Class(ClassExpression::Local {
+                    class: ClassId(0),
+                    local: LocalId(0),
+                    transfer: false,
+                }),
+                Rvalue::String(StringExpression::Call {
+                    function: FunctionId(2),
+                    args: vec![Rvalue::Class(ClassExpression::Local {
+                        class: ClassId(0),
+                        local: LocalId(0),
+                        transfer: true,
+                    })],
+                }),
+            ],
+        });
+
+    let mut borrowed = class_local(0, ClassId(0));
+    borrowed.owned = false;
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "inspectWithLabel".to_string(),
+        params: vec![LocalId(0), LocalId(1)],
+        return_type: ReturnType::Void,
+        locals: vec![
+            borrowed,
+            Local {
+                id: LocalId(1),
+                name: "label".to_string(),
+                ty: Type::String,
+                writable: false,
+                synthetic: false,
+                owned: false,
+            },
+        ],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+    program.functions.push(Function {
+        id: FunctionId(2),
+        name: "consumeAndLabel".to_string(),
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Value(Type::String),
+        locals: vec![class_local(0, ClassId(0))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::Unreachable,
+        }],
+        entry_block: BlockId(0),
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("nested transfers must conflict with persistent outer-call borrows");
+    assert!(error
+        .message
+        .contains("both borrows and transfers class local local0"));
+}
+
+#[test]
+fn shared_validator_tracks_property_borrows_across_outer_call_arguments() {
+    let mut program = class_program();
+    let label = PropertyId {
+        class: ClassId(0),
+        index: 0,
+    };
+    program.classes[0].properties.push(Property {
+        id: label,
+        name: "label".to_string(),
+        ty: Type::String,
+        writable: false,
+        promoted: false,
+    });
+    program.classes[0].layout = compute_class_layout(ClassId(0), [(label, FieldType::String)], 8);
+    program.functions[0].locals.push(class_local(0, ClassId(0)));
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::CallVoid {
+            function: FunctionId(1),
+            args: vec![
+                Rvalue::Class(ClassExpression::Local {
+                    class: ClassId(0),
+                    local: LocalId(0),
+                    transfer: true,
+                }),
+                Rvalue::String(StringExpression::Property {
+                    object: LocalId(0),
+                    property: label,
+                }),
+            ],
+        });
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "takeWithLabel".to_string(),
+        params: vec![LocalId(0), LocalId(1)],
+        return_type: ReturnType::Void,
+        locals: vec![
+            class_local(0, ClassId(0)),
+            Local {
+                id: LocalId(1),
+                name: "label".to_string(),
+                ty: Type::String,
+                writable: false,
+                synthetic: false,
+                owned: false,
+            },
+        ],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("a call cannot read a property after transferring its object");
+    assert!(error
+        .message
+        .contains("both borrows and transfers class local local0"));
 }
 
 #[test]
@@ -363,6 +818,7 @@ fn shared_validator_rejects_reusing_a_moved_constructor_argument() {
                 args: vec![Rvalue::Class(ClassExpression::Local {
                     class: ClassId(1),
                     local: LocalId(1),
+                    transfer: true,
                 })],
             }),
         });
@@ -371,7 +827,10 @@ fn shared_validator_rejects_reusing_a_moved_constructor_argument() {
         name: "Pair::__construct".to_string(),
         params: vec![LocalId(0), LocalId(1)],
         return_type: ReturnType::Void,
-        locals: vec![class_local(0, ClassId(0)), class_local(1, ClassId(1))],
+        locals: vec![
+            borrowed_class_local(0, ClassId(0)),
+            class_local(1, ClassId(1)),
+        ],
         blocks: vec![BasicBlock {
             id: BlockId(0),
             statements: vec![],
@@ -436,6 +895,7 @@ fn shared_validator_rejects_reusing_a_class_local_for_properties() {
                             ClassExpression::Local {
                                 class: ClassId(1),
                                 local: LocalId(1),
+                                transfer: true,
                             },
                         )),
                     },
@@ -445,6 +905,7 @@ fn shared_validator_rejects_reusing_a_class_local_for_properties() {
                             ClassExpression::Local {
                                 class: ClassId(1),
                                 local: LocalId(1),
+                                transfer: true,
                             },
                         )),
                     },
@@ -458,11 +919,99 @@ fn shared_validator_rejects_reusing_a_class_local_for_properties() {
         .expect_err("one class local cannot initialize multiple properties");
     assert!(error
         .message
-        .contains("gives class local local1 to more than one property"));
+        .contains("transfers class local local1 more than once"));
 }
 
 #[test]
-fn shared_validator_rejects_passing_a_promoted_class_owner_to_the_constructor() {
+fn shared_validator_tracks_nested_transfers_across_property_initializers() {
+    let mut program = class_program();
+    let first = PropertyId {
+        class: ClassId(0),
+        index: 0,
+    };
+    let second = PropertyId {
+        class: ClassId(0),
+        index: 1,
+    };
+    program.classes[0].properties = vec![
+        Property {
+            id: first,
+            name: "first".to_string(),
+            ty: Type::Class(ClassId(1)),
+            writable: false,
+            promoted: false,
+        },
+        Property {
+            id: second,
+            name: "second".to_string(),
+            ty: Type::Class(ClassId(1)),
+            writable: false,
+            promoted: false,
+        },
+    ];
+    program.classes[0].layout = compute_class_layout(
+        ClassId(0),
+        [
+            (first, FieldType::Class(ClassId(1))),
+            (second, FieldType::Class(ClassId(1))),
+        ],
+        8,
+    );
+    program.functions[0].locals = vec![class_local(0, ClassId(0)), class_local(1, ClassId(1))];
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::AssignLocal {
+            target: LocalId(0),
+            value: Rvalue::Class(ClassExpression::New {
+                class: ClassId(0),
+                properties: [first, second]
+                    .into_iter()
+                    .map(|property| PropertyValue {
+                        property,
+                        source: PropertyValueSource::Expression(Rvalue::Class(
+                            ClassExpression::Call {
+                                class: ClassId(1),
+                                function: FunctionId(1),
+                                args: vec![Rvalue::Class(ClassExpression::Local {
+                                    class: ClassId(1),
+                                    local: LocalId(1),
+                                    transfer: true,
+                                })],
+                            },
+                        )),
+                    })
+                    .collect(),
+                constructor: None,
+                args: vec![],
+            }),
+        });
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "relay".to_string(),
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Value(Type::Class(ClassId(1))),
+        locals: vec![class_local(0, ClassId(1))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::Return(Rvalue::Class(ClassExpression::Local {
+                class: ClassId(1),
+                local: LocalId(0),
+                transfer: true,
+            })),
+        }],
+        entry_block: BlockId(0),
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("nested property initializers cannot transfer one owner twice");
+    assert!(error
+        .message
+        .contains("transfers class local local1 more than once"));
+}
+
+#[test]
+fn shared_validator_rejects_a_promoted_class_owner_also_owned_by_the_constructor_parameter() {
     let mut program = class_program();
     let child = PropertyId {
         class: ClassId(0),
@@ -496,6 +1045,7 @@ fn shared_validator_rejects_passing_a_promoted_class_owner_to_the_constructor() 
                 args: vec![Rvalue::Class(ClassExpression::Local {
                     class: ClassId(1),
                     local: LocalId(1),
+                    transfer: true,
                 })],
             }),
         });
@@ -504,7 +1054,10 @@ fn shared_validator_rejects_passing_a_promoted_class_owner_to_the_constructor() 
         name: "Parent::__construct".to_string(),
         params: vec![LocalId(0), LocalId(1)],
         return_type: ReturnType::Void,
-        locals: vec![class_local(0, ClassId(0)), class_local(1, ClassId(1))],
+        locals: vec![
+            borrowed_class_local(0, ClassId(0)),
+            class_local(1, ClassId(1)),
+        ],
         blocks: vec![BasicBlock {
             id: BlockId(0),
             statements: vec![],
@@ -514,10 +1067,72 @@ fn shared_validator_rejects_passing_a_promoted_class_owner_to_the_constructor() 
     });
 
     let error = doriac::mir_validation::validate_program(&program)
-        .expect_err("a promoted class owner cannot also enter the constructor body");
+        .expect_err("a promoted class owner cannot also be owned by the constructor parameter");
     assert!(error.message.contains(
-        "gives constructor argument 0 to a property and also passes it to Parent::__construct"
+        "gives constructor argument 0 to a property and an owning constructor parameter"
     ));
+}
+
+#[test]
+fn shared_validator_invalidates_promoted_class_aliases_after_property_replacement() {
+    let (mut program, child) = promoted_class_alias_program();
+    program.functions[1].blocks[0].statements = vec![
+        Statement::AssignProperty {
+            object: LocalId(0),
+            property: child,
+            value: Rvalue::Class(ClassExpression::New {
+                class: ClassId(1),
+                properties: vec![],
+                constructor: None,
+                args: vec![],
+            }),
+        },
+        Statement::CallVoid {
+            function: FunctionId(2),
+            args: vec![Rvalue::Class(ClassExpression::Local {
+                class: ClassId(1),
+                local: LocalId(1),
+                transfer: false,
+            })],
+        },
+    ];
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("replacing a promoted class property must invalidate its parameter alias");
+    assert!(error
+        .message
+        .contains("uses class local local1 after its ownership ended"));
+}
+
+#[test]
+fn shared_validator_rejects_construction_borrows_after_transfers() {
+    let (mut program, _) = promoted_class_alias_program();
+    program.classes[0].properties[0].promoted = false;
+    let Statement::AssignLocal {
+        value: Rvalue::Class(ClassExpression::New {
+            properties, args, ..
+        }),
+        ..
+    } = &mut program.functions[0].blocks[0].statements[0]
+    else {
+        panic!("class new fixture");
+    };
+    properties[0].source = PropertyValueSource::Expression(Rvalue::Class(ClassExpression::Local {
+        class: ClassId(1),
+        local: LocalId(1),
+        transfer: true,
+    }));
+    args[0] = Rvalue::Class(ClassExpression::Local {
+        class: ClassId(1),
+        local: LocalId(1),
+        transfer: false,
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("construction cannot borrow an owner after an earlier initializer moved it");
+    assert!(error
+        .message
+        .contains("uses class local local1 after transferring it"));
 }
 
 #[test]
@@ -558,6 +1173,7 @@ fn shared_validator_requires_class_properties_in_construction_order() {
         ty: Type::String,
         writable: false,
         synthetic: false,
+        owned: false,
     });
     let Statement::AssignLocal {
         value: Rvalue::Class(ClassExpression::New {
@@ -585,6 +1201,197 @@ fn shared_validator_requires_class_properties_in_construction_order() {
     let error = doriac::mir_validation::validate_program(&program)
         .expect_err("property initializers must retain canonical construction order");
     assert!(error.message.contains("out of construction order"));
+}
+
+#[test]
+fn shared_validator_requires_constructor_body_initializers_on_every_return_path() {
+    let mut program = class_program();
+    let property = PropertyId {
+        class: ClassId(0),
+        index: 0,
+    };
+    program.classes[0].properties.push(Property {
+        id: property,
+        name: "text".to_string(),
+        ty: Type::String,
+        writable: false,
+        promoted: false,
+    });
+    program.classes[0].layout = compute_class_layout(
+        ClassId(0),
+        [(property, FieldType::String)],
+        std::mem::size_of::<usize>() as u32,
+    );
+    program.classes[0].constructor = Some(FunctionId(1));
+    program.functions[0].locals.push(class_local(0, ClassId(0)));
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::AssignLocal {
+            target: LocalId(0),
+            value: Rvalue::Class(ClassExpression::New {
+                class: ClassId(0),
+                properties: vec![PropertyValue {
+                    property,
+                    source: PropertyValueSource::ConstructorBody,
+                }],
+                constructor: Some(FunctionId(1)),
+                args: vec![],
+            }),
+        });
+    let mut receiver = class_local(0, ClassId(0));
+    receiver.owned = false;
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "Message::__construct".to_string(),
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Void,
+        locals: vec![receiver],
+        blocks: vec![
+            BasicBlock {
+                id: BlockId(0),
+                statements: vec![],
+                terminator: Terminator::Branch {
+                    condition: doriac::mir::BoolExpression::Use {
+                        operand: Operand::Scalar(ScalarValue::Bool(true)),
+                    },
+                    then_block: BlockId(1),
+                    else_block: BlockId(2),
+                },
+            },
+            BasicBlock {
+                id: BlockId(1),
+                statements: vec![Statement::AssignProperty {
+                    object: LocalId(0),
+                    property,
+                    value: Rvalue::String(StringExpression::Literal("ready".to_string())),
+                }],
+                terminator: Terminator::Jump(BlockId(3)),
+            },
+            BasicBlock {
+                id: BlockId(2),
+                statements: vec![],
+                terminator: Terminator::Jump(BlockId(3)),
+            },
+            BasicBlock {
+                id: BlockId(3),
+                statements: vec![],
+                terminator: Terminator::ReturnVoid,
+            },
+        ],
+        entry_block: BlockId(0),
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("constructor-body initialization must dominate every normal return");
+    assert!(error
+        .message
+        .contains("can return without initializing property0"));
+}
+
+#[test]
+fn shared_validator_rejects_property_assignments_that_transfer_the_receiver() {
+    let mut program = class_program();
+    let property = PropertyId {
+        class: ClassId(0),
+        index: 0,
+    };
+    program.classes[0].properties.push(Property {
+        id: property,
+        name: "child".to_string(),
+        ty: Type::Class(ClassId(0)),
+        writable: true,
+        promoted: false,
+    });
+    program.classes[0].layout = compute_class_layout(
+        ClassId(0),
+        [(property, FieldType::Class(ClassId(0)))],
+        std::mem::size_of::<usize>() as u32,
+    );
+    program.functions[0].locals.push(class_local(0, ClassId(0)));
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::AssignProperty {
+            object: LocalId(0),
+            property,
+            value: Rvalue::Class(ClassExpression::Local {
+                class: ClassId(0),
+                local: LocalId(0),
+                transfer: true,
+            }),
+        });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("a property assignment cannot consume its receiver before the store");
+    assert!(error
+        .message
+        .contains("assignment to property0 consumes its receiver local0"));
+}
+
+#[test]
+fn shared_validator_enforces_property_and_receiver_mutability() {
+    for (property_writable, receiver_writable, expected) in [
+        (false, true, "mutates readonly property0"),
+        (true, false, "uses readonly receiver local0"),
+    ] {
+        let mut program = class_program();
+        let property = PropertyId {
+            class: ClassId(0),
+            index: 0,
+        };
+        program.classes[0].properties.push(Property {
+            id: property,
+            name: "text".to_string(),
+            ty: Type::String,
+            writable: property_writable,
+            promoted: false,
+        });
+        program.classes[0].layout =
+            compute_class_layout(ClassId(0), [(property, FieldType::String)], 8);
+        let mut receiver = class_local(0, ClassId(0));
+        receiver.writable = receiver_writable;
+        program.functions[0].locals.push(receiver);
+        program.functions[0].blocks[0]
+            .statements
+            .push(Statement::AssignProperty {
+                object: LocalId(0),
+                property,
+                value: Rvalue::String(StringExpression::Literal("changed".to_string())),
+            });
+
+        let error = doriac::mir_validation::validate_program(&program)
+            .expect_err("property mutation requires both mutable property and receiver");
+        assert!(
+            error.message.contains(expected),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    let mut program = class_new_program();
+    let property = program.classes[0].properties[0].id;
+    let Statement::AssignLocal {
+        value: Rvalue::Class(ClassExpression::New { properties, .. }),
+        ..
+    } = &mut program.functions[0].blocks[0].statements[0]
+    else {
+        panic!("class new fixture");
+    };
+    properties.push(PropertyValue {
+        property,
+        source: PropertyValueSource::ConstructorArgument(0),
+    });
+    program.functions[1].blocks[0]
+        .statements
+        .push(Statement::AssignProperty {
+            object: LocalId(0),
+            property,
+            value: Rvalue::String(StringExpression::Local(LocalId(1))),
+        });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("a readonly promoted property cannot be reassigned by its constructor");
+    assert!(error
+        .message
+        .contains("readonly property0 is initialized before its constructor assigns it"));
 }
 
 #[test]
@@ -691,12 +1498,14 @@ fn shared_validator_rejects_unknown_classes_in_function_types() {
 fn shared_validator_checks_lifecycle_metadata_even_when_unused() {
     let mut valid = class_program();
     valid.classes[0].destructor = Some(FunctionId(1));
+    let mut receiver = class_local(0, ClassId(0));
+    receiver.owned = false;
     valid.functions.push(Function {
         id: FunctionId(1),
         name: "Class0::__destruct".to_string(),
         params: vec![LocalId(0)],
         return_type: ReturnType::Void,
-        locals: vec![class_local(0, ClassId(0))],
+        locals: vec![receiver],
         blocks: vec![BasicBlock {
             id: BlockId(0),
             statements: vec![],
@@ -718,11 +1527,275 @@ fn shared_validator_checks_lifecycle_metadata_even_when_unused() {
         .expect_err("lifecycle receivers must use the owning class");
     assert!(error.message.contains("incompatible implicit receiver"));
 
+    let mut owned_receiver = valid.clone();
+    owned_receiver.functions[1].locals[0].owned = true;
+    let error = doriac::mir_validation::validate_program(&owned_receiver)
+        .expect_err("lifecycle receivers must remain borrowed");
+    assert!(error.message.contains("implicit receiver as owned"));
+
     let mut wrong_return = valid;
     wrong_return.functions[1].return_type = ReturnType::Value(Type::String);
     let error = doriac::mir_validation::validate_program(&wrong_return)
         .expect_err("lifecycle functions must return void");
     assert!(error.message.contains("does not return void"));
+}
+
+#[test]
+fn shared_validator_rejects_transfers_into_borrowed_class_parameters() {
+    let mut program = class_program();
+    program.functions[0].locals.push(class_local(0, ClassId(0)));
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::CallVoid {
+            function: FunctionId(1),
+            args: vec![Rvalue::Class(ClassExpression::Local {
+                class: ClassId(0),
+                local: LocalId(0),
+                transfer: true,
+            })],
+        });
+    let mut borrowed = class_local(0, ClassId(0));
+    borrowed.owned = false;
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "inspect".to_string(),
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Void,
+        locals: vec![borrowed],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("a transfer cannot masquerade as a borrowed call argument");
+    assert!(error
+        .message
+        .contains("transfers argument 1 into a borrowed parameter"));
+}
+
+#[test]
+fn shared_validator_rejects_borrows_into_owned_class_parameters() {
+    let mut program = class_program();
+    program.functions[0].locals.push(class_local(0, ClassId(0)));
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::CallVoid {
+            function: FunctionId(1),
+            args: vec![Rvalue::Class(ClassExpression::Local {
+                class: ClassId(0),
+                local: LocalId(0),
+                transfer: false,
+            })],
+        });
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "consume".to_string(),
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Void,
+        locals: vec![class_local(0, ClassId(0))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("an owned call parameter cannot receive a borrowed class value");
+    assert!(error
+        .message
+        .contains("borrows argument 1 for an owned parameter"));
+}
+
+#[test]
+fn shared_validator_rejects_duplicate_class_local_transfers_in_one_call() {
+    let mut program = class_program();
+    program.functions[0].locals.push(class_local(0, ClassId(0)));
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::CallVoid {
+            function: FunctionId(1),
+            args: vec![
+                Rvalue::Class(ClassExpression::Local {
+                    class: ClassId(0),
+                    local: LocalId(0),
+                    transfer: true,
+                }),
+                Rvalue::Class(ClassExpression::Local {
+                    class: ClassId(0),
+                    local: LocalId(0),
+                    transfer: true,
+                }),
+            ],
+        });
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "consumeBoth".to_string(),
+        params: vec![LocalId(0), LocalId(1)],
+        return_type: ReturnType::Void,
+        locals: vec![class_local(0, ClassId(0)), class_local(1, ClassId(0))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("one class local cannot satisfy two ownership-taking arguments");
+    assert!(error
+        .message
+        .contains("transfers class local local0 more than once"));
+}
+
+#[test]
+fn shared_validator_rejects_class_use_after_a_transfer_on_any_reachable_path() {
+    let mut program = class_program();
+    let property = PropertyId {
+        class: ClassId(0),
+        index: 0,
+    };
+    program.classes[0].properties.push(Property {
+        id: property,
+        name: "label".to_string(),
+        ty: Type::String,
+        writable: false,
+        promoted: false,
+    });
+    program.classes[0].layout =
+        compute_class_layout(ClassId(0), [(property, FieldType::String)], 8);
+    program.functions[0].locals = vec![class_local(0, ClassId(0)), class_local(1, ClassId(0))];
+    program.functions[0].blocks = vec![
+        BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::Branch {
+                condition: doriac::mir::BoolExpression::Use {
+                    operand: Operand::Scalar(ScalarValue::Bool(true)),
+                },
+                then_block: BlockId(1),
+                else_block: BlockId(2),
+            },
+        },
+        BasicBlock {
+            id: BlockId(1),
+            statements: vec![Statement::AssignLocal {
+                target: LocalId(1),
+                value: Rvalue::Class(ClassExpression::Local {
+                    class: ClassId(0),
+                    local: LocalId(0),
+                    transfer: true,
+                }),
+            }],
+            terminator: Terminator::Jump(BlockId(3)),
+        },
+        BasicBlock {
+            id: BlockId(2),
+            statements: vec![],
+            terminator: Terminator::Jump(BlockId(3)),
+        },
+        BasicBlock {
+            id: BlockId(3),
+            statements: vec![Statement::EchoString(StringExpression::Property {
+                object: LocalId(0),
+                property,
+            })],
+            terminator: Terminator::ReturnVoid,
+        },
+    ];
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("a class local moved on one predecessor is unavailable at the join");
+    assert!(error
+        .message
+        .contains("uses class local local0 after its ownership ended"));
+}
+
+#[test]
+fn shared_validator_rejects_borrowed_class_rvalues_in_owning_slots() {
+    let mut assignment = class_program();
+    assignment.functions[0].locals = vec![class_local(0, ClassId(0)), class_local(1, ClassId(0))];
+    assignment.functions[0].blocks[0]
+        .statements
+        .push(Statement::AssignLocal {
+            target: LocalId(0),
+            value: Rvalue::Class(ClassExpression::Local {
+                class: ClassId(0),
+                local: LocalId(1),
+                transfer: false,
+            }),
+        });
+    let error = doriac::mir_validation::validate_program(&assignment)
+        .expect_err("an owned class local cannot receive a borrowed class rvalue");
+    assert!(error
+        .message
+        .contains("class assignment to local0 receives borrowed class local local1"));
+
+    let mut returned = class_program();
+    returned.functions.push(Function {
+        id: FunctionId(1),
+        name: "borrowedReturn".to_string(),
+        params: vec![],
+        return_type: ReturnType::Value(Type::Class(ClassId(0))),
+        locals: vec![class_local(0, ClassId(0))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::Return(Rvalue::Class(ClassExpression::Local {
+                class: ClassId(0),
+                local: LocalId(0),
+                transfer: false,
+            })),
+        }],
+        entry_block: BlockId(0),
+    });
+    let error = doriac::mir_validation::validate_program(&returned)
+        .expect_err("a class return must transfer ownership");
+    assert!(error
+        .message
+        .contains("return from borrowedReturn receives borrowed class local local0"));
+}
+
+#[test]
+fn shared_validator_rejects_cleanup_and_assignment_of_borrowed_class_locals() {
+    let mut drop_program = class_program();
+    let mut borrowed = class_local(0, ClassId(0));
+    borrowed.owned = false;
+    drop_program.functions[0].locals.push(borrowed.clone());
+    drop_program.functions[0].blocks[0]
+        .statements
+        .push(Statement::DropClass {
+            local: LocalId(0),
+            class: ClassId(0),
+        });
+    let error = doriac::mir_validation::validate_program(&drop_program)
+        .expect_err("borrowed locals have no cleanup obligation");
+    assert!(error.message.contains("references borrowed local0"));
+
+    let mut assign_program = class_program();
+    assign_program.functions[0].locals.push(borrowed);
+    assign_program.functions[0].blocks[0]
+        .statements
+        .push(Statement::AssignLocal {
+            target: LocalId(0),
+            value: Rvalue::Class(ClassExpression::New {
+                class: ClassId(0),
+                properties: vec![],
+                constructor: None,
+                args: vec![],
+            }),
+        });
+    let error = doriac::mir_validation::validate_program(&assign_program)
+        .expect_err("borrowed class slots cannot become owners through assignment");
+    assert!(error
+        .message
+        .contains("assignment targets borrowed local local0"));
 }
 
 fn decimal_spec() -> FormatSpec {
@@ -778,7 +1851,14 @@ fn class_local(index: usize, class: ClassId) -> Local {
         ty: Type::Class(class),
         writable: false,
         synthetic: false,
+        owned: true,
     }
+}
+
+fn borrowed_class_local(index: usize, class: ClassId) -> Local {
+    let mut local = class_local(index, class);
+    local.owned = false;
+    local
 }
 
 fn class_new_program() -> Program {
@@ -817,13 +1897,14 @@ fn class_new_program() -> Program {
         params: vec![LocalId(0), LocalId(1)],
         return_type: ReturnType::Void,
         locals: vec![
-            class_local(0, ClassId(0)),
+            borrowed_class_local(0, ClassId(0)),
             Local {
                 id: LocalId(1),
                 name: "text".to_string(),
                 ty: Type::String,
                 writable: false,
                 synthetic: false,
+                owned: false,
             },
         ],
         blocks: vec![BasicBlock {
@@ -834,4 +1915,71 @@ fn class_new_program() -> Program {
         entry_block: BlockId(0),
     });
     program
+}
+
+fn promoted_class_alias_program() -> (Program, PropertyId) {
+    let mut program = class_program();
+    let child = PropertyId {
+        class: ClassId(0),
+        index: 0,
+    };
+    program.classes[0].properties.push(Property {
+        id: child,
+        name: "child".to_string(),
+        ty: Type::Class(ClassId(1)),
+        writable: true,
+        promoted: true,
+    });
+    program.classes[0].layout =
+        compute_class_layout(ClassId(0), [(child, FieldType::Class(ClassId(1)))], 8);
+    program.classes[0].constructor = Some(FunctionId(1));
+    program.functions[0].locals = vec![class_local(0, ClassId(0)), class_local(1, ClassId(1))];
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::AssignLocal {
+            target: LocalId(0),
+            value: Rvalue::Class(ClassExpression::New {
+                class: ClassId(0),
+                properties: vec![PropertyValue {
+                    property: child,
+                    source: PropertyValueSource::ConstructorArgument(0),
+                }],
+                constructor: Some(FunctionId(1)),
+                args: vec![Rvalue::Class(ClassExpression::Local {
+                    class: ClassId(1),
+                    local: LocalId(1),
+                    transfer: true,
+                })],
+            }),
+        });
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "Parent::__construct".to_string(),
+        params: vec![LocalId(0), LocalId(1)],
+        return_type: ReturnType::Void,
+        locals: vec![
+            borrowed_class_local(0, ClassId(0)),
+            borrowed_class_local(1, ClassId(1)),
+        ],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+    program.functions.push(Function {
+        id: FunctionId(2),
+        name: "inspect".to_string(),
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Void,
+        locals: vec![borrowed_class_local(0, ClassId(1))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+    (program, child)
 }

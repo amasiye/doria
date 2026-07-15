@@ -92,6 +92,7 @@ pub struct Local {
     pub name: String,
     pub ty: Type,
     pub writable: bool,
+    pub owned: bool,
     pub synthetic: bool,
 }
 
@@ -120,6 +121,10 @@ pub struct BasicBlock {
 pub enum Operand {
     Scalar(ScalarValue),
     Local(LocalId),
+    Property {
+        object: LocalId,
+        property: PropertyId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +151,12 @@ pub enum ClassExpression {
     Local {
         class: ClassId,
         local: LocalId,
+        transfer: bool,
+    },
+    Property {
+        class: ClassId,
+        object: LocalId,
+        property: PropertyId,
     },
     Call {
         class: ClassId,
@@ -163,9 +174,10 @@ pub enum ClassExpression {
 impl ClassExpression {
     pub const fn class(&self) -> ClassId {
         match self {
-            Self::Local { class, .. } | Self::Call { class, .. } | Self::New { class, .. } => {
-                *class
-            }
+            Self::Local { class, .. }
+            | Self::Property { class, .. }
+            | Self::Call { class, .. }
+            | Self::New { class, .. } => *class,
         }
     }
 }
@@ -180,6 +192,7 @@ pub struct PropertyValue {
 pub enum PropertyValueSource {
     Expression(Rvalue),
     ConstructorArgument(usize),
+    ConstructorBody,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -332,6 +345,10 @@ pub enum StringExpression {
     Literal(String),
     Local(LocalId),
     NullableLocalAssumeNonNull(LocalId),
+    Property {
+        object: LocalId,
+        property: PropertyId,
+    },
     Concat(Vec<StringExpression>),
     Display(ValueExpression),
     Call {
@@ -347,6 +364,10 @@ pub enum NullableStringExpression {
     Null,
     String(StringExpression),
     Local(LocalId),
+    Property {
+        object: LocalId,
+        property: PropertyId,
+    },
     ReadLine,
     Call {
         function: FunctionId,
@@ -458,6 +479,186 @@ pub enum Terminator {
     },
 }
 
+pub(crate) fn class_temporary_capacity(function: &Function) -> usize {
+    function
+        .blocks
+        .iter()
+        .map(|block| {
+            block
+                .statements
+                .iter()
+                .map(statement_class_temporary_capacity)
+                .sum::<usize>()
+                + terminator_class_temporary_capacity(&block.terminator)
+        })
+        .sum()
+}
+
+fn statement_class_temporary_capacity(statement: &Statement) -> usize {
+    match statement {
+        Statement::AssignLocal { value, .. } | Statement::AssignProperty { value, .. } => {
+            rvalue_class_temporary_capacity(value)
+        }
+        Statement::EchoStringLiteral(_) | Statement::DropClass { .. } => 0,
+        Statement::EchoString(value) | Statement::WriteStderr(value) => {
+            string_class_temporary_capacity(value)
+        }
+        Statement::CallVoid { args, .. } => args.iter().map(rvalue_class_temporary_capacity).sum(),
+        Statement::Printf(format) => format_class_temporary_capacity(format),
+        Statement::WriteFile { path, contents } => {
+            string_class_temporary_capacity(path) + string_class_temporary_capacity(contents)
+        }
+    }
+}
+
+fn terminator_class_temporary_capacity(terminator: &Terminator) -> usize {
+    match terminator {
+        Terminator::Return(value) => rvalue_class_temporary_capacity(value),
+        Terminator::Panic(value) => string_class_temporary_capacity(value),
+        Terminator::Branch { condition, .. } => bool_class_temporary_capacity(condition),
+        Terminator::ReturnVoid | Terminator::Unreachable | Terminator::Jump(_) => 0,
+    }
+}
+
+fn rvalue_class_temporary_capacity(value: &Rvalue) -> usize {
+    match value {
+        Rvalue::Value(value) => value_class_temporary_capacity(value),
+        Rvalue::String(value) => string_class_temporary_capacity(value),
+        Rvalue::NullableString(value) => nullable_string_class_temporary_capacity(value),
+        Rvalue::Class(value) => class_expression_temporary_capacity(value),
+    }
+}
+
+fn value_class_temporary_capacity(value: &ValueExpression) -> usize {
+    match value {
+        ValueExpression::Integer(value) => integer_class_temporary_capacity(value),
+        ValueExpression::Float(value) => float_class_temporary_capacity(value),
+        ValueExpression::Bool(value) => bool_class_temporary_capacity(value),
+    }
+}
+
+fn integer_class_temporary_capacity(value: &IntegerExpression) -> usize {
+    match value {
+        IntegerExpression::Use { .. } => 0,
+        IntegerExpression::Unary { operand, .. }
+        | IntegerExpression::Convert { value: operand, .. } => {
+            integer_class_temporary_capacity(operand)
+        }
+        IntegerExpression::Binary { left, right, .. } => {
+            integer_class_temporary_capacity(left) + integer_class_temporary_capacity(right)
+        }
+        IntegerExpression::FloatToInt { value } => float_class_temporary_capacity(value),
+        IntegerExpression::Call { args, .. } => {
+            args.iter().map(rvalue_class_temporary_capacity).sum()
+        }
+    }
+}
+
+fn float_class_temporary_capacity(value: &FloatExpression) -> usize {
+    match value {
+        FloatExpression::Use { .. } => 0,
+        FloatExpression::Negate { operand, .. } => float_class_temporary_capacity(operand),
+        FloatExpression::Binary { left, right, .. } => {
+            float_class_temporary_capacity(left) + float_class_temporary_capacity(right)
+        }
+        FloatExpression::IntToFloat { value } => integer_class_temporary_capacity(value),
+        FloatExpression::Call { args, .. } => {
+            args.iter().map(rvalue_class_temporary_capacity).sum()
+        }
+    }
+}
+
+fn string_class_temporary_capacity(value: &StringExpression) -> usize {
+    match value {
+        StringExpression::Concat(parts) => parts.iter().map(string_class_temporary_capacity).sum(),
+        StringExpression::Display(value) => value_class_temporary_capacity(value),
+        StringExpression::Call { args, .. } => {
+            args.iter().map(rvalue_class_temporary_capacity).sum()
+        }
+        StringExpression::ReadFile(path) => string_class_temporary_capacity(path),
+        StringExpression::Format(format) => format_class_temporary_capacity(format),
+        StringExpression::Literal(_)
+        | StringExpression::Local(_)
+        | StringExpression::NullableLocalAssumeNonNull(_)
+        | StringExpression::Property { .. } => 0,
+    }
+}
+
+fn nullable_string_class_temporary_capacity(value: &NullableStringExpression) -> usize {
+    match value {
+        NullableStringExpression::String(value) => string_class_temporary_capacity(value),
+        NullableStringExpression::Call { args, .. } => {
+            args.iter().map(rvalue_class_temporary_capacity).sum()
+        }
+        NullableStringExpression::Null
+        | NullableStringExpression::Local(_)
+        | NullableStringExpression::Property { .. }
+        | NullableStringExpression::ReadLine => 0,
+    }
+}
+
+fn class_expression_temporary_capacity(value: &ClassExpression) -> usize {
+    match value {
+        ClassExpression::Local { .. } | ClassExpression::Property { .. } => 0,
+        ClassExpression::Call { args, .. } => {
+            1 + args
+                .iter()
+                .map(rvalue_class_temporary_capacity)
+                .sum::<usize>()
+        }
+        ClassExpression::New {
+            properties, args, ..
+        } => {
+            1 + properties
+                .iter()
+                .filter_map(|property| match &property.source {
+                    PropertyValueSource::Expression(value) => {
+                        Some(rvalue_class_temporary_capacity(value))
+                    }
+                    PropertyValueSource::ConstructorArgument(_)
+                    | PropertyValueSource::ConstructorBody => None,
+                })
+                .sum::<usize>()
+                + args
+                    .iter()
+                    .map(rvalue_class_temporary_capacity)
+                    .sum::<usize>()
+        }
+    }
+}
+
+pub(crate) fn bool_class_temporary_capacity(value: &BoolExpression) -> usize {
+    match value {
+        BoolExpression::Use { .. } => 0,
+        BoolExpression::Compare { left, right, .. } => {
+            value_class_temporary_capacity(left) + value_class_temporary_capacity(right)
+        }
+        BoolExpression::StringCompare { left, right, .. } => {
+            string_class_temporary_capacity(left) + string_class_temporary_capacity(right)
+        }
+        BoolExpression::NullableStringCompare { left, right, .. } => {
+            nullable_string_class_temporary_capacity(left)
+                + nullable_string_class_temporary_capacity(right)
+        }
+        BoolExpression::Not(value) => bool_class_temporary_capacity(value),
+        BoolExpression::Binary { left, right, .. } => {
+            bool_class_temporary_capacity(left) + bool_class_temporary_capacity(right)
+        }
+        BoolExpression::Call { args, .. } => args.iter().map(rvalue_class_temporary_capacity).sum(),
+    }
+}
+
+fn format_class_temporary_capacity(format: &FormatExpression) -> usize {
+    format
+        .arguments
+        .iter()
+        .map(|argument| match argument {
+            FormatArgument::Value(value) => value_class_temporary_capacity(value),
+            FormatArgument::String(value) => string_class_temporary_capacity(value),
+        })
+        .sum()
+}
+
 impl fmt::Display for Program {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (index, function) in self.functions.iter().enumerate() {
@@ -558,6 +759,13 @@ impl fmt::Display for Operand {
         match self {
             Operand::Scalar(value) => write!(formatter, "{value}"),
             Operand::Local(id) => write!(formatter, "local{}", id.0),
+            Operand::Property { object, property } => {
+                write!(
+                    formatter,
+                    "local{}->property#{}:{}",
+                    object.0, property.class.0, property.index
+                )
+            }
         }
     }
 }
@@ -576,7 +784,23 @@ impl fmt::Display for Rvalue {
 impl fmt::Display for ClassExpression {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Local { local, .. } => write!(formatter, "move local{}", local.0),
+            Self::Local {
+                local,
+                transfer: true,
+                ..
+            } => write!(formatter, "move local{}", local.0),
+            Self::Local {
+                local,
+                transfer: false,
+                ..
+            } => write!(formatter, "borrow local{}", local.0),
+            Self::Property {
+                object, property, ..
+            } => write!(
+                formatter,
+                "borrow local{}->property#{}:{}",
+                object.0, property.class.0, property.index
+            ),
             Self::Call {
                 class, function, ..
             } => {
@@ -652,6 +876,11 @@ impl fmt::Display for IntegerExpression {
             IntegerExpression::Use { ty, operand } => match operand {
                 Operand::Scalar(ScalarValue::Integer(value)) => write!(formatter, "{value}: {ty}"),
                 Operand::Local(id) => write!(formatter, "local{}: {ty}", id.0),
+                Operand::Property { object, property } => write!(
+                    formatter,
+                    "local{}->property{}: {ty}",
+                    object.0, property.index
+                ),
                 Operand::Scalar(_) => write!(formatter, "<malformed scalar>: {ty}"),
             },
             IntegerExpression::Unary { ty, op, operand } => {
@@ -694,6 +923,11 @@ impl fmt::Display for FloatExpression {
             Self::Use { ty, operand } => match operand {
                 Operand::Scalar(ScalarValue::Float(value)) => write!(formatter, "{value}: {ty}"),
                 Operand::Local(id) => write!(formatter, "local{}: {ty}", id.0),
+                Operand::Property { object, property } => write!(
+                    formatter,
+                    "local{}->property{}: {ty}",
+                    object.0, property.index
+                ),
                 Operand::Scalar(_) => write!(formatter, "<malformed scalar>: {ty}"),
             },
             Self::Negate { ty, operand } => write!(formatter, "(-{operand}): {ty}"),
@@ -722,6 +956,9 @@ impl fmt::Display for StringExpression {
             StringExpression::NullableLocalAssumeNonNull(id) => {
                 write!(formatter, "nonnull(local{})", id.0)
             }
+            StringExpression::Property { object, property } => {
+                write!(formatter, "local{}->property{}", object.0, property.index)
+            }
             StringExpression::Concat(parts) => {
                 write!(formatter, "(")?;
                 for (index, part) in parts.iter().enumerate() {
@@ -746,6 +983,9 @@ impl fmt::Display for NullableStringExpression {
             Self::Null => formatter.write_str("null"),
             Self::String(value) => write!(formatter, "some({value})"),
             Self::Local(local) => write!(formatter, "local{}", local.0),
+            Self::Property { object, property } => {
+                write!(formatter, "local{}->property{}", object.0, property.index)
+            }
             Self::ReadLine => formatter.write_str("read_line()"),
             Self::Call { function, args } => write_call(formatter, *function, args),
         }
@@ -781,6 +1021,13 @@ impl fmt::Display for BoolExpression {
             Self::Use { operand } => match operand {
                 Operand::Scalar(ScalarValue::Bool(value)) => write!(formatter, "{value}: bool"),
                 Operand::Local(id) => write!(formatter, "local{}: bool", id.0),
+                Operand::Property { object, property } => {
+                    write!(
+                        formatter,
+                        "local{}->property{}: bool",
+                        object.0, property.index
+                    )
+                }
                 Operand::Scalar(_) => formatter.write_str("<malformed scalar>: bool"),
             },
             Self::Compare { op, left, right } => write!(formatter, "{left} {op} {right}"),

@@ -1,0 +1,102 @@
+class Token
+{
+    function __construct(string $name)
+    {
+    }
+
+    function __destruct()
+    {
+        echo "drop token ";
+        echo $this->name;
+        echo "\n";
+    }
+}
+
+class Pair
+{
+    function __construct(take Token $first, take Token $second)
+    {
+    }
+
+    function __destruct()
+    {
+        echo "drop pair\n";
+    }
+}
+
+function consume(take Token $token): void
+{
+}
+
+function inspect(Token $token): void
+{
+}
+
+function inspectPair(Token $first, Token $second): void
+{
+}
+
+function label(Token $token): string
+{
+    return $token->name;
+}
+
+function ready(Token $token): bool
+{
+    return true;
+}
+
+function makeToken(string $name): Token
+{
+    return new Token($name);
+}
+
+function leaveEarly(): void
+{
+    let $early = new Token("early");
+    return;
+}
+
+function scenario(): void
+{
+    let $first = new Token("first");
+    let $second = new Token("second");
+    let $pair = new Pair($first, $second);
+    inspect($pair->first);
+    let writable $slot = new Token("old");
+    $slot = makeToken("replacement");
+    consume(new Token("temporary"));
+    echo label(new Token("borrowed temporary")) . " output\n";
+    inspectPair(new Token("borrowed first"), new Token("borrowed second"));
+    if (false || ready(new Token("condition temporary"))) {
+        echo "condition ready\n";
+    }
+
+    foreach (0..<2 as $index) {
+        let $foreach = new Token("foreach");
+        if ($index == 0) {
+            continue;
+        }
+    }
+
+    while (true) {
+        let $inner = new Token("inner");
+        break;
+    }
+
+    let writable $iterations = 0;
+    while ($iterations < 2) {
+        let $continued = new Token("continued");
+        $iterations++;
+        continue;
+    }
+
+    leaveEarly();
+    echo "leaving scenario\n";
+    return;
+}
+
+function main(): void
+{
+    scenario();
+}
