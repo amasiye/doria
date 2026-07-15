@@ -811,7 +811,12 @@ fn lower_terminator(
             builder.ins().return_(&[]);
         }
         mir::Terminator::Panic(message) => {
+            debug_assert!(resources.deferred_class_temporary_drops.is_empty());
+            resources.defer_class_temporary_drops = true;
             let string = lower_string_expression(builder, message, resources)?;
+            resources.defer_class_temporary_drops = false;
+            // Abort-only panic never reaches statement-end destruction.
+            resources.deferred_class_temporary_drops.clear();
             let pointer_type = resources.module.target_config().pointer_type();
             let data_id =
                 resources.declare_runtime(STRING_DATA, &[pointer_type], Some(pointer_type))?;

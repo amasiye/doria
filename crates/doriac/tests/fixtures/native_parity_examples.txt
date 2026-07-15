@@ -80,6 +80,7 @@ examples/native/main_sprintf_matrix.doria
 examples/native/main_stage17_io_stress.doria
 examples/native/main_stage19_destructor_order.doria
 examples/native/main_stage19_initialization_order.doria
+examples/native/main_stage19_panic_skips_temporary_drops.doria
 examples/native/main_stage19_playground_message.doria
 examples/native/main_stage19_raii_guard.doria
 examples/native/main_string_concat_hello.doria

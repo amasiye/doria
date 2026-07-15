@@ -540,7 +540,12 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 build(self.builder.build_return(None))?;
             }
             mir::Terminator::Panic(message) => {
+                debug_assert!(self.deferred_class_temporary_drops.is_empty());
+                self.defer_class_temporary_drops = true;
                 let string = self.lower_string_expression(message)?;
+                self.defer_class_temporary_drops = false;
+                // Abort-only panic never reaches statement-end destruction.
+                self.deferred_class_temporary_drops.clear();
                 let pointer = self.context.ptr_type(AddressSpace::default());
                 let data = self
                     .call_runtime(
