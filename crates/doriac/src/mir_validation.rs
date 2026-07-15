@@ -524,6 +524,43 @@ fn require_owned_class_expression(
     }
 }
 
+fn require_writable_class_expression(
+    program: &mir::Program,
+    function: &mir::Function,
+    expression: &mir::ClassExpression,
+    destination: &str,
+) -> Result<(), BackendError> {
+    let writable = match expression {
+        mir::ClassExpression::Local {
+            local,
+            transfer: false,
+            ..
+        } => local_in(function, *local)?.writable,
+        mir::ClassExpression::Property {
+            object, property, ..
+        } => {
+            let object = local_in(function, *object)?;
+            let mir::Type::Class(class) = object.ty else {
+                return Err(malformed_mir(format!(
+                    "{destination} uses a property on non-class local local{}",
+                    object.id.0
+                )));
+            };
+            object.writable && property_in(program, class, *property)?.writable
+        }
+        mir::ClassExpression::Local { transfer: true, .. }
+        | mir::ClassExpression::Call { .. }
+        | mir::ClassExpression::New { .. } => false,
+    };
+    if writable {
+        Ok(())
+    } else {
+        Err(malformed_mir(format!(
+            "{destination} requires a writable class value"
+        )))
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ClassLocalAccess {
     Borrow(mir::LocalId),
@@ -769,9 +806,14 @@ fn collect_bool_class_local_accesses(
         mir::BoolExpression::Not(value) => {
             collect_bool_class_local_accesses(value, accesses);
         }
-        mir::BoolExpression::Binary { left, right, .. } => {
+        mir::BoolExpression::Binary { op, left, right } => {
             collect_bool_class_local_accesses(left, accesses);
-            collect_bool_class_local_accesses(right, accesses);
+            if !matches!(
+                (op, constant_bool_expression(left)),
+                (mir::BoolBinaryOp::And, Some(false)) | (mir::BoolBinaryOp::Or, Some(true))
+            ) {
+                collect_bool_class_local_accesses(right, accesses);
+            }
         }
         mir::BoolExpression::Call { args, .. } => {
             collect_rvalue_args_class_local_accesses(args, accesses);
@@ -842,6 +884,7 @@ fn collect_terminator_class_local_accesses(terminator: &mir::Terminator) -> Clas
 
 fn reachable_blocks_and_predecessors(
     function: &mir::Function,
+    fold_constant_branches: bool,
 ) -> Result<(Vec<bool>, Vec<Vec<mir::BlockId>>), BackendError> {
     let mut reachable = vec![false; function.blocks.len()];
     let mut pending = vec![function.entry_block];
@@ -850,12 +893,15 @@ fn reachable_blocks_and_predecessors(
         if std::mem::replace(&mut reachable[block_id.0], true) {
             continue;
         }
-        pending.extend(terminator_targets(&block.terminator));
+        pending.extend(analysis_terminator_targets(
+            &block.terminator,
+            fold_constant_branches,
+        ));
     }
 
     let mut predecessors = vec![Vec::new(); function.blocks.len()];
     for block in function.blocks.iter().filter(|block| reachable[block.id.0]) {
-        for target in terminator_targets(&block.terminator) {
+        for target in analysis_terminator_targets(&block.terminator, fold_constant_branches) {
             block_in(function, target)?;
             predecessors[target.0].push(block.id);
         }
@@ -941,7 +987,7 @@ fn validate_class_local_lifetimes_with_aliases(
     function: &mir::Function,
     alias_invalidations: &[PropertyAliasInvalidation],
 ) -> Result<(), BackendError> {
-    let (reachable, predecessors) = reachable_blocks_and_predecessors(function)?;
+    let (reachable, predecessors) = reachable_blocks_and_predecessors(function, true)?;
     let mut moved_on_entry = vec![HashSet::new(); function.blocks.len()];
     let mut moved_on_exit = vec![HashSet::new(); function.blocks.len()];
 
@@ -1321,7 +1367,7 @@ fn validate_constructor_body_initializer(
     receiver: mir::LocalId,
     property: crate::class_layout::PropertyId,
 ) -> Result<(), BackendError> {
-    let (reachable, predecessors) = reachable_blocks_and_predecessors(constructor)?;
+    let (reachable, predecessors) = reachable_blocks_and_predecessors(constructor, false)?;
 
     let assigns_property = constructor
         .blocks
@@ -1451,6 +1497,54 @@ fn terminator_targets(terminator: &mir::Terminator) -> Vec<mir::BlockId> {
         | mir::Terminator::ReturnVoid
         | mir::Terminator::Panic(_)
         | mir::Terminator::Unreachable => Vec::new(),
+    }
+}
+
+fn analysis_terminator_targets(
+    terminator: &mir::Terminator,
+    fold_constant_branches: bool,
+) -> Vec<mir::BlockId> {
+    if !fold_constant_branches {
+        return terminator_targets(terminator);
+    }
+    match terminator {
+        mir::Terminator::Branch {
+            condition,
+            then_block,
+            else_block,
+        } => match constant_bool_expression(condition) {
+            Some(true) => vec![*then_block],
+            Some(false) => vec![*else_block],
+            None => vec![*then_block, *else_block],
+        },
+        _ => terminator_targets(terminator),
+    }
+}
+
+fn constant_bool_expression(expression: &mir::BoolExpression) -> Option<bool> {
+    match expression {
+        mir::BoolExpression::Use {
+            operand: mir::Operand::Scalar(mir::ScalarValue::Bool(value)),
+        } => Some(*value),
+        mir::BoolExpression::Not(value) => constant_bool_expression(value).map(|value| !value),
+        mir::BoolExpression::Binary { op, left, right } => match op {
+            mir::BoolBinaryOp::And => match constant_bool_expression(left) {
+                Some(false) => Some(false),
+                Some(true) => constant_bool_expression(right),
+                None if constant_bool_expression(right) == Some(false) => Some(false),
+                None => None,
+            },
+            mir::BoolBinaryOp::Or => match constant_bool_expression(left) {
+                Some(true) => Some(true),
+                Some(false) => constant_bool_expression(right),
+                None if constant_bool_expression(right) == Some(true) => Some(true),
+                None => None,
+            },
+            mir::BoolBinaryOp::Xor => {
+                Some(constant_bool_expression(left)? ^ constant_bool_expression(right)?)
+            }
+        },
+        _ => None,
     }
 }
 
@@ -1845,7 +1939,6 @@ fn validate_call_args_for_params(
                     callee.name, local.0
                 )));
             }
-            borrowed_class_locals.insert(local);
         }
         for local in accesses.transferred() {
             if borrowed_class_locals.contains(&local) {
@@ -1860,6 +1953,15 @@ fn validate_call_args_for_params(
                     callee.name, local.0
                 )));
             }
+        }
+        if let Some(local) = escaping_class_local_borrow(argument) {
+            if transferred_class_locals.contains(&local) {
+                return Err(malformed_mir(format!(
+                    "call to {} both borrows and transfers class local local{}",
+                    callee.name, local.0
+                )));
+            }
+            borrowed_class_locals.insert(local);
         }
         if matches!(parameter_type, mir::Type::Class(_)) {
             let promoted_transfer =
@@ -1896,9 +1998,29 @@ fn validate_call_args_for_params(
                     index + 1
                 )));
             }
+            if parameter_definition.writable {
+                require_writable_class_expression(
+                    program,
+                    caller,
+                    expression,
+                    &format!("call to {} argument {}", callee.name, index + 1),
+                )?;
+            }
         }
     }
     Ok(())
+}
+
+fn escaping_class_local_borrow(argument: &mir::Rvalue) -> Option<mir::LocalId> {
+    match argument {
+        mir::Rvalue::Class(mir::ClassExpression::Local {
+            local,
+            transfer: false,
+            ..
+        })
+        | mir::Rvalue::Class(mir::ClassExpression::Property { object: local, .. }) => Some(*local),
+        _ => None,
+    }
 }
 
 fn validate_condition(

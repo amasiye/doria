@@ -2894,6 +2894,60 @@ class Renamer
 }
 
 #[test]
+fn writable_class_parameters_require_writable_argument_paths() {
+    let diagnostics = doriac::check_source(
+        "test.doria",
+        r#"
+class Box
+{
+    writable int $value = 0;
+}
+
+function update(writable Box $box): void
+{
+    $box->value = 1;
+}
+
+function main(): void
+{
+    let $box = new Box();
+    update($box);
+}
+"#,
+    )
+    .expect_err("readonly class arguments cannot be passed for mutation");
+
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "E0204"
+            && diagnostic
+                .message
+                .contains("must be a writable class value")
+    }));
+
+    doriac::check_source(
+        "test.doria",
+        r#"
+class Box
+{
+    writable int $value = 0;
+}
+
+function update(writable Box $box): void
+{
+    $box->value = 1;
+}
+
+function main(): void
+{
+    let writable $box = new Box();
+    update($box);
+}
+"#,
+    )
+    .expect("writable class arguments should remain valid");
+}
+
+#[test]
 fn rejects_invalid_constructor_init_access() {
     for (source, code) in [
         (

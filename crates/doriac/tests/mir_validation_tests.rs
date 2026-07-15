@@ -360,6 +360,217 @@ fn shared_validator_rejects_borrowing_and_transferring_one_class_local_in_a_call
 }
 
 #[test]
+fn shared_validator_requires_writable_class_arguments_for_writable_parameters() {
+    let mut program = class_program();
+    program.functions[0].locals.push(class_local(0, ClassId(0)));
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::CallVoid {
+            function: FunctionId(1),
+            args: vec![Rvalue::Class(ClassExpression::Local {
+                class: ClassId(0),
+                local: LocalId(0),
+                transfer: false,
+            })],
+        });
+    let mut parameter = borrowed_class_local(0, ClassId(0));
+    parameter.writable = true;
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "mutate".to_string(),
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Void,
+        locals: vec![parameter],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("readonly class arguments cannot satisfy writable parameters");
+    assert!(error.message.contains("requires a writable class value"));
+
+    program.functions[0].locals[0].writable = true;
+    doriac::mir_validation::validate_program(&program)
+        .expect("a writable class argument should satisfy a writable parameter");
+}
+
+#[test]
+fn shared_validator_does_not_keep_nested_argument_borrows_alive() {
+    let mut program = class_program();
+    program.functions[0].locals.push(class_local(0, ClassId(0)));
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::CallVoid {
+            function: FunctionId(2),
+            args: vec![
+                Rvalue::String(StringExpression::Call {
+                    function: FunctionId(1),
+                    args: vec![Rvalue::Class(ClassExpression::Local {
+                        class: ClassId(0),
+                        local: LocalId(0),
+                        transfer: false,
+                    })],
+                }),
+                Rvalue::Class(ClassExpression::Local {
+                    class: ClassId(0),
+                    local: LocalId(0),
+                    transfer: true,
+                }),
+            ],
+        });
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "label".to_string(),
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Value(Type::String),
+        locals: vec![borrowed_class_local(0, ClassId(0))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::Return(Rvalue::String(StringExpression::Literal(
+                "box".to_string(),
+            ))),
+        }],
+        entry_block: BlockId(0),
+    });
+    program.functions.push(Function {
+        id: FunctionId(2),
+        name: "sink".to_string(),
+        params: vec![LocalId(0), LocalId(1)],
+        return_type: ReturnType::Void,
+        locals: vec![
+            Local {
+                id: LocalId(0),
+                name: "label".to_string(),
+                ty: Type::String,
+                writable: false,
+                owned: false,
+                synthetic: false,
+            },
+            class_local(1, ClassId(0)),
+        ],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+
+    doriac::mir_validation::validate_program(&program)
+        .expect("a nested borrow should end before the next outer argument");
+}
+
+#[test]
+fn shared_validator_preserves_constant_boolean_move_reachability() {
+    let mut program = class_program();
+    program.functions[0].locals.push(class_local(0, ClassId(0)));
+    program.functions[0].blocks = vec![
+        BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::Branch {
+                condition: doriac::mir::BoolExpression::Binary {
+                    op: doriac::mir::BoolBinaryOp::And,
+                    left: Box::new(doriac::mir::BoolExpression::Use {
+                        operand: Operand::Scalar(ScalarValue::Bool(false)),
+                    }),
+                    right: Box::new(doriac::mir::BoolExpression::Call {
+                        function: FunctionId(1),
+                        args: vec![Rvalue::Class(ClassExpression::Local {
+                            class: ClassId(0),
+                            local: LocalId(0),
+                            transfer: true,
+                        })],
+                    }),
+                },
+                then_block: BlockId(1),
+                else_block: BlockId(2),
+            },
+        },
+        BasicBlock {
+            id: BlockId(1),
+            statements: vec![Statement::CallVoid {
+                function: FunctionId(2),
+                args: vec![Rvalue::Class(ClassExpression::Local {
+                    class: ClassId(0),
+                    local: LocalId(0),
+                    transfer: true,
+                })],
+            }],
+            terminator: Terminator::Jump(BlockId(3)),
+        },
+        BasicBlock {
+            id: BlockId(2),
+            statements: vec![],
+            terminator: Terminator::Jump(BlockId(3)),
+        },
+        BasicBlock {
+            id: BlockId(3),
+            statements: vec![Statement::CallVoid {
+                function: FunctionId(3),
+                args: vec![Rvalue::Class(ClassExpression::Local {
+                    class: ClassId(0),
+                    local: LocalId(0),
+                    transfer: false,
+                })],
+            }],
+            terminator: Terminator::ReturnVoid,
+        },
+    ];
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "probe".to_string(),
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Value(Type::Scalar(ScalarType::Bool)),
+        locals: vec![class_local(0, ClassId(0))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::Return(Rvalue::Value(ValueExpression::Bool(
+                doriac::mir::BoolExpression::Use {
+                    operand: Operand::Scalar(ScalarValue::Bool(true)),
+                },
+            ))),
+        }],
+        entry_block: BlockId(0),
+    });
+    program.functions.push(Function {
+        id: FunctionId(2),
+        name: "consume".to_string(),
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Void,
+        locals: vec![class_local(0, ClassId(0))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+    program.functions.push(Function {
+        id: FunctionId(3),
+        name: "inspect".to_string(),
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Void,
+        locals: vec![borrowed_class_local(0, ClassId(0))],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        }],
+        entry_block: BlockId(0),
+    });
+
+    doriac::mir_validation::validate_program(&program)
+        .expect("short-circuited and unreachable transfers must not move the class local");
+}
+
+#[test]
 fn shared_validator_tracks_nested_transfers_across_outer_call_arguments() {
     let mut program = class_program();
     program.functions[0].locals.push(class_local(0, ClassId(0)));
