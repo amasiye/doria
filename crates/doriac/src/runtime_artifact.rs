@@ -79,11 +79,11 @@ fn resolve(
     );
     let preferred_profile_runtime = target_root.join(profile).join(filename);
     let mut candidates = Vec::new();
-    if profile == "release" {
-        candidates.push(preferred_profile_runtime.clone());
-    }
     if let Some(compiler_built_runtime) = compiler_built_runtime {
         candidates.push(compiler_built_runtime.to_path_buf());
+    }
+    if profile == "release" {
+        candidates.push(preferred_profile_runtime.clone());
     }
     if let Some(parent) = current_executable.parent() {
         candidates.push(parent.join(filename));
@@ -262,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn release_profile_prefers_release_runtime_over_compiler_built_fallback() {
+    fn compiler_built_archive_precedes_release_profile_fallback() {
         let directory = temp_directory("release-preference");
         let compiler_built = directory.join("build/libdoria_rt.a");
         let release = directory.join("target/release/libdoria_rt.a");
@@ -280,8 +280,8 @@ mod tests {
             ArchiveFormat::Gnu,
             "release",
         )
-        .expect("release runtime should resolve");
-        assert_eq!(resolved, release);
+        .expect("compiler-built runtime should resolve");
+        assert_eq!(resolved, compiler_built);
         let _ = fs::remove_dir_all(directory);
     }
 }

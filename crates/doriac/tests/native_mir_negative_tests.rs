@@ -16,48 +16,22 @@ fn native_compilation_does_not_execute_an_infinite_program() {
 }
 
 #[test]
-fn native_and_debug_share_remaining_post_stage16_mir_coverage_diagnostics() {
-    for (name, source, expected) in [
-        (
-            "collection foreach",
-            r#"function main(): void
+fn native_and_debug_share_remaining_mir_coverage_diagnostics() {
+    let source = r#"function main(): void
 {
     foreach ([1, 2] as int $item) {
     }
 }
-"#,
-            "supports `foreach` only over integer ranges",
-        ),
-        (
-            "general instance method call",
-            r#"class Person
-{
-    function greet(): void
-    {
-    }
-}
+"#;
+    let native = compile_error(source, BackendTarget::Native);
+    let debug = compile_error(source, BackendTarget::Debug);
 
-function main(): void
-{
-    let $person = new Person();
-    $person->greet();
-}
-"#,
-            "only calls to void free functions can be used as expression statements",
-        ),
-    ] {
-        let native = compile_error(source, BackendTarget::Native);
-        let debug = compile_error(source, BackendTarget::Debug);
-
-        assert_eq!(native[0].code, "M1101", "{name}");
-        assert_eq!(debug[0].code, native[0].code, "{name}");
-        assert_eq!(debug[0].message, native[0].message, "{name}");
-        assert!(
-            native[0].message.contains(expected),
-            "{name}: expected `{expected}` in `{}`",
-            native[0].message
-        );
-    }
+    assert_eq!(native[0].code, "M1101");
+    assert_eq!(debug[0].code, native[0].code);
+    assert_eq!(debug[0].message, native[0].message);
+    assert!(native[0]
+        .message
+        .contains("supports `foreach` only over integer ranges"));
 }
 
 fn compile_error(source: &str, target: BackendTarget) -> Vec<Diagnostic> {

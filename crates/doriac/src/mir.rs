@@ -19,11 +19,32 @@ pub struct BlockId(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LocalId(pub usize);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StaticId(pub usize);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
     pub classes: Vec<Class>,
+    pub statics: Vec<StaticProperty>,
     pub functions: Vec<Function>,
     pub entry: FunctionId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticProperty {
+    pub id: StaticId,
+    pub class: ClassId,
+    pub name: String,
+    pub ty: Type,
+    pub writable: bool,
+    pub initializer: StaticValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaticValue {
+    Scalar(ScalarValue),
+    String(String),
+    Null,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,11 +70,27 @@ pub struct Property {
 pub struct Function {
     pub id: FunctionId,
     pub name: String,
+    pub method: Option<MethodIdentity>,
+    pub receiver_mode: Option<ReceiverMode>,
     pub params: Vec<LocalId>,
     pub return_type: ReturnType,
     pub locals: Vec<Local>,
     pub blocks: Vec<BasicBlock>,
     pub entry_block: BlockId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MethodIdentity {
+    pub class: ClassId,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiverMode {
+    Readonly,
+    Writable,
+    /// Reserved for a future accepted consuming-receiver design.
+    UnsupportedConsuming,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +158,7 @@ pub struct BasicBlock {
 pub enum Operand {
     Scalar(ScalarValue),
     Local(LocalId),
+    Static(StaticId),
     Property {
         object: LocalId,
         property: PropertyId,
@@ -349,6 +387,7 @@ pub enum StringExpression {
         object: LocalId,
         property: PropertyId,
     },
+    Static(StaticId),
     Concat(Vec<StringExpression>),
     Display(ValueExpression),
     Call {
@@ -368,6 +407,7 @@ pub enum NullableStringExpression {
         object: LocalId,
         property: PropertyId,
     },
+    Static(StaticId),
     ReadLine,
     Call {
         function: FunctionId,
@@ -459,6 +499,10 @@ pub enum Statement {
         property: PropertyId,
         value: Rvalue,
     },
+    AssignStatic {
+        target: StaticId,
+        value: Rvalue,
+    },
     DropClass {
         local: LocalId,
         class: ClassId,
@@ -496,9 +540,9 @@ pub(crate) fn class_temporary_capacity(function: &Function) -> usize {
 
 fn statement_class_temporary_capacity(statement: &Statement) -> usize {
     match statement {
-        Statement::AssignLocal { value, .. } | Statement::AssignProperty { value, .. } => {
-            rvalue_class_temporary_capacity(value)
-        }
+        Statement::AssignLocal { value, .. }
+        | Statement::AssignProperty { value, .. }
+        | Statement::AssignStatic { value, .. } => rvalue_class_temporary_capacity(value),
         Statement::EchoStringLiteral(_) | Statement::DropClass { .. } => 0,
         Statement::EchoString(value) | Statement::WriteStderr(value) => {
             string_class_temporary_capacity(value)
@@ -580,6 +624,7 @@ fn string_class_temporary_capacity(value: &StringExpression) -> usize {
         StringExpression::Literal(_)
         | StringExpression::Local(_)
         | StringExpression::NullableLocalAssumeNonNull(_)
+        | StringExpression::Static(_)
         | StringExpression::Property { .. } => 0,
     }
 }
@@ -592,6 +637,7 @@ fn nullable_string_class_temporary_capacity(value: &NullableStringExpression) ->
         }
         NullableStringExpression::Null
         | NullableStringExpression::Local(_)
+        | NullableStringExpression::Static(_)
         | NullableStringExpression::Property { .. }
         | NullableStringExpression::ReadLine => 0,
     }
@@ -759,6 +805,7 @@ impl fmt::Display for Operand {
         match self {
             Operand::Scalar(value) => write!(formatter, "{value}"),
             Operand::Local(id) => write!(formatter, "local{}", id.0),
+            Operand::Static(id) => write!(formatter, "static{}", id.0),
             Operand::Property { object, property } => {
                 write!(
                     formatter,
@@ -876,6 +923,7 @@ impl fmt::Display for IntegerExpression {
             IntegerExpression::Use { ty, operand } => match operand {
                 Operand::Scalar(ScalarValue::Integer(value)) => write!(formatter, "{value}: {ty}"),
                 Operand::Local(id) => write!(formatter, "local{}: {ty}", id.0),
+                Operand::Static(id) => write!(formatter, "static{}: {ty}", id.0),
                 Operand::Property { object, property } => write!(
                     formatter,
                     "local{}->property{}: {ty}",
@@ -923,6 +971,7 @@ impl fmt::Display for FloatExpression {
             Self::Use { ty, operand } => match operand {
                 Operand::Scalar(ScalarValue::Float(value)) => write!(formatter, "{value}: {ty}"),
                 Operand::Local(id) => write!(formatter, "local{}: {ty}", id.0),
+                Operand::Static(id) => write!(formatter, "static{}: {ty}", id.0),
                 Operand::Property { object, property } => write!(
                     formatter,
                     "local{}->property{}: {ty}",
@@ -959,6 +1008,7 @@ impl fmt::Display for StringExpression {
             StringExpression::Property { object, property } => {
                 write!(formatter, "local{}->property{}", object.0, property.index)
             }
+            StringExpression::Static(id) => write!(formatter, "static{}", id.0),
             StringExpression::Concat(parts) => {
                 write!(formatter, "(")?;
                 for (index, part) in parts.iter().enumerate() {
@@ -986,6 +1036,7 @@ impl fmt::Display for NullableStringExpression {
             Self::Property { object, property } => {
                 write!(formatter, "local{}->property{}", object.0, property.index)
             }
+            Self::Static(id) => write!(formatter, "static{}", id.0),
             Self::ReadLine => formatter.write_str("read_line()"),
             Self::Call { function, args } => write_call(formatter, *function, args),
         }
@@ -1021,6 +1072,7 @@ impl fmt::Display for BoolExpression {
             Self::Use { operand } => match operand {
                 Operand::Scalar(ScalarValue::Bool(value)) => write!(formatter, "{value}: bool"),
                 Operand::Local(id) => write!(formatter, "local{}: bool", id.0),
+                Operand::Static(id) => write!(formatter, "static{}: bool", id.0),
                 Operand::Property { object, property } => {
                     write!(
                         formatter,
@@ -1092,6 +1144,9 @@ impl fmt::Display for Statement {
                 "local{}->property{} = {value}",
                 object.0, property.index
             ),
+            Statement::AssignStatic { target, value } => {
+                write!(formatter, "static{} = {value}", target.0)
+            }
             Statement::DropClass { local, class } => {
                 write!(formatter, "drop class#{} local{}", class.0, local.0)
             }

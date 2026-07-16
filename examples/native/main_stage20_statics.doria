@@ -1,0 +1,45 @@
+const int BASE_VALUE = 40;
+
+class Counter
+{
+    const STEP = BASE_VALUE / 20;
+
+    static int $initial = BASE_VALUE;
+    static writable int $value = Counter::initial;
+    static string $label = "S";
+    static writable string $current = Counter::label;
+
+    internal static function step(): int
+    {
+        return Counter::STEP;
+    }
+
+    static function next(): int
+    {
+        Counter::value += Counter::step();
+        return Counter::value;
+    }
+
+    function currentValue(): int
+    {
+        return Counter::value;
+    }
+}
+
+function main(): void
+{
+    echo Counter::initial;
+    echo ":";
+    echo Counter::next();
+    let $counter = new Counter();
+    echo ":";
+    echo $counter->currentValue();
+    echo ":";
+    echo Counter::next();
+    echo ":";
+    echo Counter::label;
+    Counter::current = "ready";
+    echo ":";
+    echo Counter::current;
+    echo "\n";
+}

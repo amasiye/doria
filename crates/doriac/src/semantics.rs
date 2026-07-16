@@ -8,8 +8,8 @@ use crate::format_string::{self, FormatConversion, FormatPiece};
 use crate::numeric::{parse_decimal_magnitude, FloatType, FloatValue, IntegerType, IntegerValue};
 use crate::source::Span;
 use crate::symbols::{
-    Binding, ClassInfo, FunctionInfo, MethodInfo, ParamInfo, PropertyInfo, PropertyInitState,
-    ScopeStack,
+    Binding, ClassInfo, ConstantInfo, FunctionInfo, MemberDeclaration, MemberKind, MethodInfo,
+    ParamInfo, PropertyInfo, PropertyInitState, ReceiverMode, ScopeStack, StaticPropertyInfo,
 };
 use crate::types::{TypeId, TypeKind, TypeRef, TypeRegistry};
 
@@ -25,12 +25,15 @@ pub struct SemanticInfo {
     pub float_expression_types: HashMap<(usize, usize), FloatType>,
     /// Stable nominal class identities and the total Stage 19 property order.
     pub classes: Vec<ClassSemanticInfo>,
+    /// Values produced by the bounded Stage 20 constant evaluator.
+    pub const_evaluation: crate::const_eval::Evaluation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassSemanticInfo {
     pub id: ClassId,
     pub name: String,
+    pub implements_displayable: bool,
     pub properties: Vec<PropertySemanticInfo>,
 }
 
@@ -58,7 +61,12 @@ impl SemanticInfo {
 }
 
 pub fn analyze_program(program: &Program) -> DiagnosticResult<SemanticInfo> {
-    let mut checker = Checker::new(program);
+    let (const_evaluation, const_diagnostics) = match crate::const_eval::evaluate_program(program) {
+        Ok(evaluation) => (evaluation, Vec::new()),
+        Err(diagnostics) => (crate::const_eval::Evaluation::default(), diagnostics),
+    };
+    let mut checker = Checker::new(program, const_evaluation);
+    checker.diagnostics.extend(const_diagnostics);
     checker.check();
     if checker.diagnostics.is_empty() {
         let inferred_move_returns = checker
@@ -82,6 +90,7 @@ pub fn analyze_program(program: &Program) -> DiagnosticResult<SemanticInfo> {
             integer_expression_types: checker.integer_expression_types,
             float_expression_types: checker.float_expression_types,
             classes: collect_ordered_class_semantics(program),
+            const_evaluation: checker.const_evaluation,
         })
     } else {
         Err(checker.diagnostics)
@@ -100,13 +109,15 @@ fn collect_ordered_class_semantics(program: &Program) -> Vec<ClassSemanticInfo> 
         .map(|(class_index, class)| {
             let id = ClassId(class_index);
             let explicit = class.members.iter().filter_map(|member| match member {
-                ClassMember::Property(property) => Some((
+                ClassMember::Property(property) if !property.is_static => Some((
                     property.name.clone(),
                     property.ty.clone(),
                     property.writable,
                     false,
                 )),
-                _ => None,
+                ClassMember::Property(_) | ClassMember::Method(_) | ClassMember::Constant(_) => {
+                    None
+                }
             });
             let promoted = class.members.iter().find_map(|member| match member {
                 ClassMember::Method(method) if method.name == "__construct" => {
@@ -126,6 +137,10 @@ fn collect_ordered_class_semantics(program: &Program) -> Vec<ClassSemanticInfo> 
             ClassSemanticInfo {
                 id,
                 name: class.name.clone(),
+                implements_displayable: class
+                    .implements
+                    .iter()
+                    .any(|interface| interface == "Displayable"),
                 properties: properties
                     .into_iter()
                     .enumerate()
@@ -166,6 +181,17 @@ pub(crate) fn interface_declaration_diagnostic(interface_decl: &InterfaceDecl) -
     Diagnostic::new(code, message, interface_decl.span)
 }
 
+pub(crate) fn trait_declaration_diagnostic(trait_decl: &TraitDecl) -> Diagnostic {
+    Diagnostic::unsupported_stage(
+        "E0493",
+        format!(
+            "trait declaration `{}` is accepted syntax; trait composition semantics land in Stage 35",
+            trait_decl.name
+        ),
+        trait_decl.span,
+    )
+}
+
 struct Checker<'program> {
     program: &'program Program,
     classes: HashMap<String, ClassInfo>,
@@ -178,12 +204,13 @@ struct Checker<'program> {
     integer_literals: HashMap<(usize, usize), u128>,
     negative_integer_literals: HashMap<(usize, usize), u128>,
     negated_integer_literal_operands: HashSet<(usize, usize)>,
+    const_evaluation: crate::const_eval::Evaluation,
 }
 
 #[derive(Debug, Clone)]
 struct MethodContext {
     class_name: String,
-    writable_this: bool,
+    receiver_mode: Option<ReceiverMode>,
     this_available: bool,
 }
 
@@ -278,6 +305,15 @@ struct AssignmentTarget {
     destination: AssignmentDestination,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct StaticAccess<'a> {
+    qualifier: &'a StaticQualifier,
+    qualifier_span: Span,
+    member_sigil_span: Option<Span>,
+    member: &'a str,
+    span: Span,
+}
+
 #[derive(Debug, Clone)]
 enum AssignmentDestination {
     Type,
@@ -302,7 +338,7 @@ enum DisplayConversionKind {
 }
 
 impl<'program> Checker<'program> {
-    fn new(program: &'program Program) -> Self {
+    fn new(program: &'program Program, const_evaluation: crate::const_eval::Evaluation) -> Self {
         Self {
             program,
             classes: HashMap::new(),
@@ -315,6 +351,7 @@ impl<'program> Checker<'program> {
             integer_literals: HashMap::new(),
             negative_integer_literals: HashMap::new(),
             negated_integer_literal_operands: HashSet::new(),
+            const_evaluation,
         }
     }
 
@@ -337,10 +374,15 @@ impl<'program> Checker<'program> {
                     self.check_statement(statement, &mut scopes, None, None, None, 0);
                 }
                 Item::Function(function) => self.check_function(function, None),
+                Item::Constant(_) => {}
                 Item::Class(class_decl) => self.check_class(class_decl),
                 Item::Interface(interface_decl) => {
                     self.diagnostics
                         .push(interface_declaration_diagnostic(interface_decl));
+                }
+                Item::Trait(trait_decl) => {
+                    self.diagnostics
+                        .push(trait_declaration_diagnostic(trait_decl));
                 }
             }
         }
@@ -375,7 +417,10 @@ impl<'program> Checker<'program> {
                 ClassInfo {
                     implements_displayable: false,
                     properties: HashMap::new(),
+                    static_properties: HashMap::new(),
+                    constants: HashMap::new(),
                     methods: HashMap::new(),
+                    members: HashMap::new(),
                 },
             );
             declared_classes.push(class_decl);
@@ -388,13 +433,23 @@ impl<'program> Checker<'program> {
                     .iter()
                     .any(|name| name == "Displayable"),
                 properties: HashMap::new(),
+                static_properties: HashMap::new(),
+                constants: HashMap::new(),
                 methods: HashMap::new(),
+                members: HashMap::new(),
             };
 
             for member in &class_decl.members {
                 match member {
                     ClassMember::Property(property) => {
-                        self.declare_property(&mut info, &class_decl.name, property);
+                        if property.is_static {
+                            self.declare_static_property(&mut info, &class_decl.name, property);
+                        } else {
+                            self.declare_property(&mut info, &class_decl.name, property);
+                        }
+                    }
+                    ClassMember::Constant(constant) => {
+                        self.declare_class_constant(&mut info, &class_decl.name, constant);
                     }
                     ClassMember::Method(method) => {
                         if let Some(message) = Self::reserved_callable_name_message(&method.name) {
@@ -403,7 +458,8 @@ impl<'program> Checker<'program> {
                             continue;
                         }
 
-                        let signature = self.resolve_function_signature(method);
+                        let signature =
+                            self.resolve_function_signature(method, Some(&class_decl.name));
                         self.function_signatures
                             .insert(method.span.start, signature.clone());
 
@@ -417,23 +473,32 @@ impl<'program> Checker<'program> {
                             ));
                         }
 
-                        if info.methods.contains_key(&method.name) {
-                            self.diagnostics.push(Diagnostic::new(
-                                "E0302",
-                                format!(
-                                    "class `{}` already has a method `{}`",
-                                    class_decl.name, method.name
-                                ),
-                                method.span,
-                            ));
+                        let kind = if method.is_static {
+                            MemberKind::StaticMethod
                         } else {
+                            MemberKind::InstanceMethod
+                        };
+                        if self.declare_member_name(
+                            &mut info,
+                            &class_decl.name,
+                            &method.name,
+                            kind,
+                            method.span,
+                        ) {
                             info.methods.insert(
                                 method.name.clone(),
                                 MethodInfo {
                                     access: method.access.clone(),
-                                    writable_this: method.writable_this
-                                        && LifecycleMethod::from_method_name(&method.name)
-                                            .is_none(),
+                                    receiver_mode: (!method.is_static).then_some(
+                                        if method.writable_this
+                                            && LifecycleMethod::from_method_name(&method.name)
+                                                .is_none()
+                                        {
+                                            ReceiverMode::Writable
+                                        } else {
+                                            ReceiverMode::Readonly
+                                        },
+                                    ),
                                     is_static: method.is_static,
                                     params: signature.params,
                                     return_ty: signature.return_ty,
@@ -514,7 +579,7 @@ impl<'program> Checker<'program> {
         };
 
         let valid = method.access == MemberAccess::External
-            && !method.writable_this
+            && method.receiver_mode == Some(ReceiverMode::Readonly)
             && !method.is_static
             && method.params.is_empty()
             && matches!(self.types.kind(method.return_ty), TypeKind::String);
@@ -592,6 +657,10 @@ impl<'program> Checker<'program> {
             );
         }
         match name {
+            "self" => Some(
+                "`self` is reserved for the declaring or composing class context and cannot be used as a class name"
+                    .to_string(),
+            ),
             "Displayable" => Some(
                 "`Displayable` is a compiler-known interface and cannot be redeclared"
                     .to_string(),
@@ -692,7 +761,7 @@ impl<'program> Checker<'program> {
                 continue;
             }
 
-            let signature = self.resolve_function_signature(function);
+            let signature = self.resolve_function_signature(function, None);
             self.function_signatures
                 .insert(function.span.start, signature.clone());
             if self.functions.contains_key(&function.name) {
@@ -708,19 +777,27 @@ impl<'program> Checker<'program> {
         }
     }
 
-    fn resolve_function_signature(&mut self, function: &FunctionDecl) -> FunctionInfo {
-        let params = self.resolve_param_infos(function);
-        let return_ty = self.resolve_function_return_type(function);
+    fn resolve_function_signature(
+        &mut self,
+        function: &FunctionDecl,
+        declaring_class: Option<&str>,
+    ) -> FunctionInfo {
+        let params = self.resolve_param_infos(function, declaring_class);
+        let return_ty = self.resolve_function_return_type(function, declaring_class);
 
         FunctionInfo { params, return_ty }
     }
 
-    fn resolve_param_infos(&mut self, function: &FunctionDecl) -> Vec<ParamInfo> {
+    fn resolve_param_infos(
+        &mut self,
+        function: &FunctionDecl,
+        declaring_class: Option<&str>,
+    ) -> Vec<ParamInfo> {
         let mut params = Vec::new();
         let mut saw_optional = false;
 
         for param in &function.params {
-            let ty = self.resolve_type_ref(&param.ty, param.span);
+            let ty = self.resolve_type_ref_with_class(&param.ty, param.span, declaring_class);
             let has_default = param.default.is_some();
 
             if param.take && param.writable {
@@ -793,12 +870,21 @@ impl<'program> Checker<'program> {
         params
     }
 
-    fn resolve_function_return_type(&mut self, function: &FunctionDecl) -> TypeId {
+    fn resolve_function_return_type(
+        &mut self,
+        function: &FunctionDecl,
+        declaring_class: Option<&str>,
+    ) -> TypeId {
         function
             .return_type
             .as_ref()
             .map(|return_type| {
-                self.resolve_type_ref_in_position(return_type, function.span, TypePosition::Return)
+                self.resolve_type_ref_in_position(
+                    return_type,
+                    function.span,
+                    TypePosition::Return,
+                    declaring_class,
+                )
             })
             .unwrap_or_else(|| self.types.unknown())
     }
@@ -823,7 +909,10 @@ impl<'program> Checker<'program> {
                                 self.update_method_move_return_signature(&class_decl.name, method);
                         }
                     }
-                    Item::Interface(_) | Item::Statement(_) => {}
+                    Item::Interface(_)
+                    | Item::Trait(_)
+                    | Item::Constant(_)
+                    | Item::Statement(_) => {}
                 }
             }
 
@@ -847,7 +936,7 @@ impl<'program> Checker<'program> {
                             method.return_type.is_none()
                                 && LifecycleMethod::from_method_name(&method.name).is_none()
                         }
-                        ClassMember::Property(_) => false,
+                        ClassMember::Property(_) | ClassMember::Constant(_) => false,
                     })
                     .count(),
                 _ => 0,
@@ -894,7 +983,11 @@ impl<'program> Checker<'program> {
         };
         let method_context = MethodContext {
             class_name: class_name.to_string(),
-            writable_this: method.writable_this,
+            receiver_mode: Some(if method.writable_this {
+                ReceiverMode::Writable
+            } else {
+                ReceiverMode::Readonly
+            }),
             this_available: true,
         };
         let inferred = self.infer_unannotated_move_return_type(
@@ -1372,15 +1465,24 @@ impl<'program> Checker<'program> {
         for member in &class_decl.members {
             match member {
                 ClassMember::Property(property) => {
-                    self.check_property_initializer(&class_decl.name, property);
+                    if !property.is_static {
+                        self.check_property_initializer(&class_decl.name, property);
+                    }
                 }
+                ClassMember::Constant(_) => {}
                 ClassMember::Method(method) => {
                     let lifecycle = LifecycleMethod::from_method_name(&method.name);
                     self.check_function(
                         method,
                         Some(MethodContext {
                             class_name: class_decl.name.clone(),
-                            writable_this: method.writable_this && lifecycle.is_none(),
+                            receiver_mode: (!method.is_static).then_some(
+                                if method.writable_this && lifecycle.is_none() {
+                                    ReceiverMode::Writable
+                                } else {
+                                    ReceiverMode::Readonly
+                                },
+                            ),
                             this_available: !method.is_static,
                         }),
                     );
@@ -1397,7 +1499,7 @@ impl<'program> Checker<'program> {
         let scopes = ScopeStack::new();
         let initializer_context = MethodContext {
             class_name: class_name.to_string(),
-            writable_this: false,
+            receiver_mode: None,
             this_available: false,
         };
         self.check_expr(initializer, &scopes, Some(&initializer_context));
@@ -1406,7 +1508,9 @@ impl<'program> Checker<'program> {
             .get(class_name)
             .and_then(|class_info| class_info.properties.get(&property.name))
             .map(|property| property.ty)
-            .unwrap_or_else(|| self.resolve_type_ref(&property.ty, property.span));
+            .unwrap_or_else(|| {
+                self.resolve_type_ref_with_class(&property.ty, property.span, Some(class_name))
+            });
         self.check_expr_assignable(
             target_ty,
             initializer,
@@ -1425,19 +1529,17 @@ impl<'program> Checker<'program> {
         class_name: &str,
         property: &PropertyDecl,
     ) {
-        if info.properties.contains_key(&property.name) {
-            self.diagnostics.push(Diagnostic::new(
-                "E0301",
-                format!(
-                    "class `{class_name}` already has a property `${}`",
-                    property.name
-                ),
-                property.span,
-            ));
+        if !self.declare_member_name(
+            info,
+            class_name,
+            &property.name,
+            MemberKind::InstanceProperty,
+            property.span,
+        ) {
             return;
         }
 
-        let ty = self.resolve_type_ref(&property.ty, property.span);
+        let ty = self.resolve_type_ref_with_class(&property.ty, property.span, Some(class_name));
         info.properties.insert(
             property.name.clone(),
             PropertyInfo {
@@ -1453,20 +1555,96 @@ impl<'program> Checker<'program> {
         );
     }
 
-    fn declare_promoted_property(&mut self, info: &mut ClassInfo, class_name: &str, param: &Param) {
-        if info.properties.contains_key(&param.name) {
-            self.diagnostics.push(Diagnostic::new(
-                "E0301",
-                format!(
-                    "class `{class_name}` already has a property `${}`",
-                    param.name
+    fn declare_static_property(
+        &mut self,
+        info: &mut ClassInfo,
+        class_name: &str,
+        property: &PropertyDecl,
+    ) {
+        if !self.declare_member_name(
+            info,
+            class_name,
+            &property.name,
+            MemberKind::StaticProperty,
+            property.span,
+        ) {
+            return;
+        }
+        let ty = self.resolve_type_ref_with_class(&property.ty, property.span, Some(class_name));
+        if self.type_is_move_type(ty) {
+            self.diagnostics.push(
+                Diagnostic::new(
+                    "E0486",
+                    format!(
+                        "static property `{class_name}::{}` cannot use owned type `{}`",
+                        property.name,
+                        self.types.display(ty)
+                    ),
+                    property.span,
+                )
+                .with_help(
+                    "owned-static lifetime and concurrency rules are deferred pending Sendable/Shareable design",
                 ),
-                param.span,
-            ));
+            );
+        }
+        info.static_properties.insert(
+            property.name.clone(),
+            StaticPropertyInfo {
+                access: property.access.clone(),
+                writable: property.writable,
+                ty,
+            },
+        );
+    }
+
+    fn declare_class_constant(
+        &mut self,
+        info: &mut ClassInfo,
+        class_name: &str,
+        constant: &ConstDecl,
+    ) {
+        if !self.declare_member_name(
+            info,
+            class_name,
+            &constant.name,
+            MemberKind::Constant,
+            constant.span,
+        ) {
+            return;
+        }
+        let key = crate::const_eval::ConstKey::Class {
+            class_name: class_name.to_string(),
+            name: constant.name.clone(),
+        };
+        let ty_ref = self
+            .const_evaluation
+            .values
+            .get(&key)
+            .map(|value| value.ty.clone())
+            .or_else(|| constant.ty.clone())
+            .unwrap_or_else(TypeRef::unknown);
+        let ty = self.resolve_type_ref_with_class(&ty_ref, constant.span, Some(class_name));
+        info.constants.insert(
+            constant.name.clone(),
+            ConstantInfo {
+                access: constant.access.clone(),
+                ty,
+            },
+        );
+    }
+
+    fn declare_promoted_property(&mut self, info: &mut ClassInfo, class_name: &str, param: &Param) {
+        if !self.declare_member_name(
+            info,
+            class_name,
+            &param.name,
+            MemberKind::PromotedProperty,
+            param.span,
+        ) {
             return;
         }
 
-        let ty = self.resolve_type_ref(&param.ty, param.span);
+        let ty = self.resolve_type_ref_with_class(&param.ty, param.span, Some(class_name));
         info.properties.insert(
             param.name.clone(),
             PropertyInfo {
@@ -1479,6 +1657,38 @@ impl<'program> Checker<'program> {
                 init_state: PropertyInitState::PromotedParameter,
             },
         );
+    }
+
+    fn declare_member_name(
+        &mut self,
+        info: &mut ClassInfo,
+        class_name: &str,
+        name: &str,
+        kind: MemberKind,
+        span: Span,
+    ) -> bool {
+        if let Some(original) = info.members.get(name) {
+            self.diagnostics.push(
+                Diagnostic::new(
+                    "E0481",
+                    format!(
+                        "class `{class_name}` cannot declare {} `{name}` because that name is already used by a previous {}",
+                        kind.description(),
+                        original.kind.description()
+                    ),
+                    span,
+                )
+                .with_related(
+                    original.span,
+                    format!("original {} `{name}` is declared here", original.kind.description()),
+                ),
+            );
+            return false;
+        }
+
+        info.members
+            .insert(name.to_string(), MemberDeclaration { kind, span });
+        true
     }
 
     fn declare_binding(
@@ -1525,7 +1735,7 @@ impl<'program> Checker<'program> {
             if let Some(default) = &param.default {
                 let default_context = method_context.as_ref().map(|context| MethodContext {
                     class_name: context.class_name.clone(),
-                    writable_this: context.writable_this,
+                    receiver_mode: context.receiver_mode,
                     this_available: false,
                 });
                 let default_context = default_context.as_ref();
@@ -1642,7 +1852,7 @@ impl<'program> Checker<'program> {
         self.function_signatures
             .get(&function.span.start)
             .cloned()
-            .unwrap_or_else(|| self.resolve_function_signature(function))
+            .unwrap_or_else(|| self.resolve_function_signature(function, None))
     }
 
     fn check_block(
@@ -2551,15 +2761,46 @@ impl<'program> Checker<'program> {
                 self.check_function_call(name, args, *span, scopes, method_context);
             }
             Expr::StaticCall {
-                class_name,
+                qualifier,
+                qualifier_span,
                 method,
+                member_sigil_span,
                 args,
                 span,
             } => {
                 for arg in args {
                     self.check_expr(arg, scopes, method_context);
                 }
-                self.check_static_call(class_name, method, args, *span, scopes, method_context);
+                self.check_static_call(
+                    StaticAccess {
+                        qualifier,
+                        qualifier_span: *qualifier_span,
+                        member_sigil_span: *member_sigil_span,
+                        member: method,
+                        span: *span,
+                    },
+                    args,
+                    scopes,
+                    method_context,
+                );
+            }
+            Expr::StaticMember {
+                qualifier,
+                qualifier_span,
+                member,
+                member_sigil_span,
+                span,
+            } => {
+                self.check_static_member(
+                    StaticAccess {
+                        qualifier,
+                        qualifier_span: *qualifier_span,
+                        member_sigil_span: *member_sigil_span,
+                        member,
+                        span: *span,
+                    },
+                    method_context,
+                );
             }
             Expr::New {
                 class_name,
@@ -2631,6 +2872,16 @@ impl<'program> Checker<'program> {
             Expr::Identifier { name, span } => {
                 if name.contains('\\') {
                     self.report_deferred_qualified_name(name, *span);
+                } else if !self
+                    .const_evaluation
+                    .values
+                    .contains_key(&crate::const_eval::ConstKey::TopLevel(name.clone()))
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        "E0491",
+                        format!("unknown constant `{name}`"),
+                        *span,
+                    ));
                 }
             }
             Expr::String { .. } | Expr::Bool { .. } | Expr::Null { .. } => {}
@@ -3641,7 +3892,7 @@ impl<'program> Checker<'program> {
                                 Diagnostic::new(
                                     "E0202",
                                     format!(
-                                        "cannot assign to readonly property `{class_name}::${property}`"
+                                        "cannot assign to readonly property `{class_name}::{property}`"
                                     ),
                                     *span,
                                 )
@@ -3663,6 +3914,22 @@ impl<'program> Checker<'program> {
                     None
                 }
             }
+            Expr::StaticMember {
+                qualifier,
+                qualifier_span,
+                member,
+                member_sigil_span,
+                span,
+            } => self.check_static_assignment_target(
+                StaticAccess {
+                    qualifier,
+                    qualifier_span: *qualifier_span,
+                    member_sigil_span: *member_sigil_span,
+                    member,
+                    span: *span,
+                },
+                method_context,
+            ),
             _ => {
                 self.diagnostics.push(Diagnostic::new(
                     "E0204",
@@ -3752,7 +4019,7 @@ impl<'program> Checker<'program> {
     ) {
         self.diagnostics.push(Diagnostic::new(
             "E0412",
-            format!("readonly property `{class_name}::${property}` {reason}"),
+            format!("readonly property `{class_name}::{property}` {reason}"),
             span,
         ));
     }
@@ -4039,6 +4306,15 @@ impl<'program> Checker<'program> {
             return;
         };
 
+        if method_info.is_static {
+            self.diagnostics.push(Diagnostic::new(
+                "E0487",
+                format!("static method `{class_name}::{method}` must be called with `::`"),
+                span,
+            ));
+            return;
+        }
+
         if self.check_direct_lifecycle_method_call(&class_name, method, span) {
             return;
         }
@@ -4053,7 +4329,9 @@ impl<'program> Checker<'program> {
             ));
         }
 
-        if method_info.writable_this
+        if method_info
+            .receiver_mode
+            .is_some_and(ReceiverMode::is_writable)
             && !self.is_writable_object_path(object, scopes, method_context)
         {
             self.diagnostics.push(Diagnostic::new(
@@ -4077,34 +4355,36 @@ impl<'program> Checker<'program> {
 
     fn check_static_call(
         &mut self,
-        class_name: &str,
-        method: &str,
+        access: StaticAccess<'_>,
         args: &[Expr],
-        span: Span,
         scopes: &ScopeStack,
         method_context: Option<&MethodContext>,
     ) {
+        let Some(class_name) = self.resolve_static_qualifier(access, method_context) else {
+            return;
+        };
+        let class_name = class_name.as_str();
         if class_name.contains('\\') {
-            self.report_deferred_qualified_name(class_name, span);
+            self.report_deferred_qualified_name(class_name, access.span);
             return;
         }
-        if class_name == "Int" && method == "toFloat" {
+        if class_name == "Int" && access.member == "toFloat" {
             self.check_cross_kind_intrinsic_argument(
                 "Int::toFloat",
                 args,
                 TypeKind::Integer(IntegerType::Int64),
-                span,
+                access.span,
                 scopes,
                 method_context,
             );
             return;
         }
-        if class_name == "Float" && method == "toInt" {
+        if class_name == "Float" && access.member == "toInt" {
             self.check_cross_kind_intrinsic_argument(
                 "Float::toInt",
                 args,
                 TypeKind::Float(FloatType::Float64),
-                span,
+                access.span,
                 scopes,
                 method_context,
             );
@@ -4112,13 +4392,14 @@ impl<'program> Checker<'program> {
         }
 
         if let Some(target) = IntegerType::from_companion_name(class_name) {
-            if method != "from" {
+            if access.member != "from" {
                 self.diagnostics.push(Diagnostic::new(
                     "E0304",
                     format!(
-                        "unknown integer companion intrinsic `{class_name}::{method}`; only `{class_name}::from(...)` is available"
+                        "unknown integer companion intrinsic `{class_name}::{}`; only `{class_name}::from(...)` is available",
+                        access.member
                     ),
-                    span,
+                    access.span,
                 ));
                 return;
             }
@@ -4130,7 +4411,7 @@ impl<'program> Checker<'program> {
                         target.companion_name(),
                         args.len()
                     ),
-                    span,
+                    access.span,
                 ));
                 return;
             }
@@ -4159,20 +4440,32 @@ impl<'program> Checker<'program> {
             self.diagnostics.push(Diagnostic::new(
                 "E0305",
                 format!("unknown class `{class_name}`"),
-                span,
+                access.span,
             ));
             return;
         };
-        let Some(method_info) = class_info.methods.get(method) else {
+        let Some(method_info) = class_info.methods.get(access.member) else {
             self.diagnostics.push(Diagnostic::new(
                 "E0304",
-                format!("unknown method `{class_name}::{method}`"),
-                span,
+                format!("unknown method `{class_name}::{}`", access.member),
+                access.span,
             ));
             return;
         };
 
-        if self.check_direct_lifecycle_method_call(class_name, method, span) {
+        if self.check_direct_lifecycle_method_call(class_name, access.member, access.span) {
+            return;
+        }
+
+        if !method_info.is_static {
+            self.diagnostics.push(Diagnostic::new(
+                "E0487",
+                format!(
+                    "instance method `{class_name}::{}` requires an object receiver",
+                    access.member
+                ),
+                access.span,
+            ));
             return;
         }
 
@@ -4181,19 +4474,211 @@ impl<'program> Checker<'program> {
         {
             self.diagnostics.push(Diagnostic::new(
                 "E0307",
-                format!("method `{class_name}::{method}` is internal"),
-                span,
+                format!("method `{class_name}::{}` is internal", access.member),
+                access.span,
             ));
         }
 
         self.check_call_arguments(
-            &format!("method `{class_name}::{method}`"),
+            &format!("method `{class_name}::{}`", access.member),
             &method_info.params,
             args,
-            span,
+            access.span,
             scopes,
             method_context,
         );
+    }
+
+    fn check_static_member(
+        &mut self,
+        access: StaticAccess<'_>,
+        method_context: Option<&MethodContext>,
+    ) {
+        let Some(class_name) = self.resolve_static_qualifier(access, method_context) else {
+            return;
+        };
+        let class_name = class_name.as_str();
+        if class_name.contains('\\') {
+            self.report_deferred_qualified_name(class_name, access.span);
+            return;
+        }
+        let Some(class_info) = self.classes.get(class_name) else {
+            self.diagnostics.push(Diagnostic::new(
+                "E0305",
+                format!("unknown class `{class_name}`"),
+                access.span,
+            ));
+            return;
+        };
+        let member_access = class_info
+            .constants
+            .get(access.member)
+            .map(|constant| constant.access.clone())
+            .or_else(|| {
+                class_info
+                    .static_properties
+                    .get(access.member)
+                    .map(|property| property.access.clone())
+            });
+        let Some(member_access) = member_access else {
+            self.diagnostics.push(Diagnostic::new(
+                "E0488",
+                format!("unknown static member `{class_name}::{}`", access.member),
+                access.span,
+            ));
+            return;
+        };
+        if member_access == MemberAccess::Internal
+            && !self.can_access_internal_member(class_name, method_context)
+        {
+            self.diagnostics.push(Diagnostic::new(
+                "E0307",
+                format!(
+                    "static member `{class_name}::{}` is internal",
+                    access.member
+                ),
+                access.span,
+            ));
+        }
+    }
+
+    fn check_static_assignment_target(
+        &mut self,
+        access: StaticAccess<'_>,
+        method_context: Option<&MethodContext>,
+    ) -> Option<AssignmentTarget> {
+        let class_name = self.resolve_static_qualifier(access, method_context)?;
+        self.check_resolved_static_member(&class_name, access.member, access.span, method_context);
+        let class_info = self.classes.get(&class_name)?;
+        if class_info.constants.contains_key(access.member) {
+            self.diagnostics.push(Diagnostic::new(
+                "E0489",
+                format!(
+                    "cannot assign to constant `{class_name}::{}`",
+                    access.member
+                ),
+                access.span,
+            ));
+            return None;
+        }
+        let property = class_info.static_properties.get(access.member)?.clone();
+        if !property.writable {
+            self.diagnostics.push(Diagnostic::new(
+                "E0202",
+                format!(
+                    "cannot assign to readonly static property `{class_name}::{}`",
+                    access.member
+                ),
+                access.span,
+            ));
+        }
+        Some(AssignmentTarget {
+            ty: property.ty,
+            destination: AssignmentDestination::Type,
+        })
+    }
+
+    fn resolve_static_qualifier(
+        &mut self,
+        access: StaticAccess<'_>,
+        method_context: Option<&MethodContext>,
+    ) -> Option<String> {
+        if let Some(sigil_span) = access.member_sigil_span {
+            self.diagnostics.push(
+                Diagnostic::new(
+                    "E0494",
+                    "Doria static member access is sigil-free; remove `$`",
+                    sigil_span,
+                )
+                .with_help("declarations carry `$`; member accesses do not")
+                .with_fix(sigil_span, ""),
+            );
+            return None;
+        }
+
+        match access.qualifier {
+            StaticQualifier::Class(name) => Some(name.clone()),
+            StaticQualifier::SelfType => method_context
+                .map(|context| context.class_name.clone())
+                .or_else(|| {
+                    self.diagnostics.push(Diagnostic::new(
+                        "E0492",
+                        "`self` is only available in a declaring or composing class context",
+                        access.qualifier_span,
+                    ));
+                    None
+                }),
+            StaticQualifier::Parent => {
+                self.diagnostics.push(Diagnostic::unsupported_stage(
+                    "E0496",
+                    "generalized `parent::member()` syntax is accepted; parent implementation semantics land in Stage 34",
+                    access.span,
+                ));
+                None
+            }
+            StaticQualifier::InvalidStatic => {
+                self.diagnostics.push(
+                    Diagnostic::new(
+                        "E0495",
+                        "Doria does not support late static binding; use `self::`",
+                        access.qualifier_span,
+                    )
+                    .with_help(
+                        "replace the qualifier with `self` and keep the member access unchanged",
+                    )
+                    .with_fix(access.qualifier_span, "self"),
+                );
+                None
+            }
+        }
+    }
+
+    fn check_resolved_static_member(
+        &mut self,
+        class_name: &str,
+        member: &str,
+        span: Span,
+        method_context: Option<&MethodContext>,
+    ) {
+        if class_name.contains('\\') {
+            self.report_deferred_qualified_name(class_name, span);
+            return;
+        }
+        let Some(class_info) = self.classes.get(class_name) else {
+            self.diagnostics.push(Diagnostic::new(
+                "E0305",
+                format!("unknown class `{class_name}`"),
+                span,
+            ));
+            return;
+        };
+        let access = class_info
+            .constants
+            .get(member)
+            .map(|constant| constant.access.clone())
+            .or_else(|| {
+                class_info
+                    .static_properties
+                    .get(member)
+                    .map(|property| property.access.clone())
+            });
+        let Some(access) = access else {
+            self.diagnostics.push(Diagnostic::new(
+                "E0488",
+                format!("unknown static member `{class_name}::{member}`"),
+                span,
+            ));
+            return;
+        };
+        if access == MemberAccess::Internal
+            && !self.can_access_internal_member(class_name, method_context)
+        {
+            self.diagnostics.push(Diagnostic::new(
+                "E0307",
+                format!("static member `{class_name}::{member}` is internal"),
+                span,
+            ));
+        }
     }
 
     fn check_cross_kind_intrinsic_argument(
@@ -4407,7 +4892,10 @@ impl<'program> Checker<'program> {
                 .map(|binding| binding.writable)
                 .unwrap_or(false),
             Expr::This { .. } => method_context
-                .map(|context| context.this_available && context.writable_this)
+                .map(|context| {
+                    context.this_available
+                        && context.receiver_mode.is_some_and(ReceiverMode::is_writable)
+                })
                 .unwrap_or(false),
             Expr::PropertyAccess {
                 object, property, ..
@@ -4456,7 +4944,7 @@ impl<'program> Checker<'program> {
         let Some(property_info) = class_info.properties.get(property) else {
             self.diagnostics.push(Diagnostic::new(
                 "E0303",
-                format!("unknown property `{class_name}::${property}`"),
+                format!("unknown property `{class_name}::{property}`"),
                 span,
             ));
             return None;
@@ -4468,7 +4956,7 @@ impl<'program> Checker<'program> {
         {
             self.diagnostics.push(Diagnostic::new(
                 "E0306",
-                format!("property `{class_name}::${property}` is internal"),
+                format!("property `{class_name}::{property}` is internal"),
                 span,
             ));
         }
@@ -4497,7 +4985,16 @@ impl<'program> Checker<'program> {
     }
 
     fn resolve_type_ref(&mut self, ty: &TypeRef, span: Span) -> TypeId {
-        self.resolve_type_ref_in_position(ty, span, TypePosition::Value)
+        self.resolve_type_ref_in_position(ty, span, TypePosition::Value, None)
+    }
+
+    fn resolve_type_ref_with_class(
+        &mut self,
+        ty: &TypeRef,
+        span: Span,
+        declaring_class: Option<&str>,
+    ) -> TypeId {
+        self.resolve_type_ref_in_position(ty, span, TypePosition::Value, declaring_class)
     }
 
     fn resolve_type_ref_in_position(
@@ -4505,10 +5002,11 @@ impl<'program> Checker<'program> {
         ty: &TypeRef,
         span: Span,
         position: TypePosition,
+        declaring_class: Option<&str>,
     ) -> TypeId {
         if ty.name.contains('\\') {
             for arg in &ty.args {
-                self.resolve_type_ref_in_position(arg, span, TypePosition::Value);
+                self.resolve_type_ref_in_position(arg, span, TypePosition::Value, declaring_class);
             }
             self.report_deferred_qualified_name(&ty.name, span);
             return self.types.unknown();
@@ -4534,6 +5032,15 @@ impl<'program> Checker<'program> {
         }
 
         match ty.name.as_str() {
+            "self" if ty.args.is_empty() => match declaring_class {
+                Some(class_name) => self.types.intern(TypeKind::Class(class_name.to_string())),
+                None => self.reject_type_ref(
+                    ty,
+                    span,
+                    "E0492",
+                    "`self` is reserved for the declaring or composing class context",
+                ),
+            },
             "void" if position == TypePosition::Return => {
                 self.resolve_zero_arg_type(ty, span, TypeKind::Void)
             }
@@ -4600,59 +5107,59 @@ impl<'program> Checker<'program> {
             "[]" => {
                 if !self.expect_type_arg_count(ty, 1, span) {
                     for arg in &ty.args {
-                        self.resolve_type_ref_in_position(arg, span, TypePosition::Value);
+                        self.resolve_type_ref_in_position(arg, span, TypePosition::Value, declaring_class);
                     }
                     return self.types.unknown();
                 }
                 let element =
-                    self.resolve_type_ref_in_position(&ty.args[0], span, TypePosition::Value);
+                    self.resolve_type_ref_in_position(&ty.args[0], span, TypePosition::Value, declaring_class);
                 self.types.intern(TypeKind::TypedArray(element))
             }
             "List" => {
                 if !self.expect_type_arg_count(ty, 1, span) {
                     for arg in &ty.args {
-                        self.resolve_type_ref_in_position(arg, span, TypePosition::Value);
+                        self.resolve_type_ref_in_position(arg, span, TypePosition::Value, declaring_class);
                     }
                     return self.types.unknown();
                 }
                 let element =
-                    self.resolve_type_ref_in_position(&ty.args[0], span, TypePosition::Value);
+                    self.resolve_type_ref_in_position(&ty.args[0], span, TypePosition::Value, declaring_class);
                 self.types.intern(TypeKind::List(element))
             }
             "Dictionary" => {
                 if !self.expect_type_arg_count(ty, 2, span) {
                     for arg in &ty.args {
-                        self.resolve_type_ref_in_position(arg, span, TypePosition::Value);
+                        self.resolve_type_ref_in_position(arg, span, TypePosition::Value, declaring_class);
                     }
                     return self.types.unknown();
                 }
-                let key = self.resolve_type_ref_in_position(&ty.args[0], span, TypePosition::Value);
+                let key = self.resolve_type_ref_in_position(&ty.args[0], span, TypePosition::Value, declaring_class);
                 let value =
-                    self.resolve_type_ref_in_position(&ty.args[1], span, TypePosition::Value);
+                    self.resolve_type_ref_in_position(&ty.args[1], span, TypePosition::Value, declaring_class);
                 self.types.intern(TypeKind::Dictionary(key, value))
             }
             "Set" => {
                 if !self.expect_type_arg_count(ty, 1, span) {
                     for arg in &ty.args {
-                        self.resolve_type_ref_in_position(arg, span, TypePosition::Value);
+                        self.resolve_type_ref_in_position(arg, span, TypePosition::Value, declaring_class);
                     }
                     return self.types.unknown();
                 }
                 let element =
-                    self.resolve_type_ref_in_position(&ty.args[0], span, TypePosition::Value);
+                    self.resolve_type_ref_in_position(&ty.args[0], span, TypePosition::Value, declaring_class);
                 self.types.intern(TypeKind::Set(element))
             }
             name if self.classes.contains_key(name) => {
                 if !self.expect_type_arg_count(ty, 0, span) {
                     for arg in &ty.args {
-                        self.resolve_type_ref_in_position(arg, span, TypePosition::Value);
+                        self.resolve_type_ref_in_position(arg, span, TypePosition::Value, declaring_class);
                     }
                 }
                 self.types.intern(TypeKind::Class(name.to_string()))
             }
             name => {
                 for arg in &ty.args {
-                    self.resolve_type_ref_in_position(arg, span, TypePosition::Value);
+                    self.resolve_type_ref_in_position(arg, span, TypePosition::Value, declaring_class);
                 }
                 self.diagnostics.push(Diagnostic::new(
                     "E0401",
@@ -4672,7 +5179,7 @@ impl<'program> Checker<'program> {
         message: impl Into<String>,
     ) -> TypeId {
         for arg in &ty.args {
-            self.resolve_type_ref_in_position(arg, span, TypePosition::Value);
+            self.resolve_type_ref_in_position(arg, span, TypePosition::Value, None);
         }
         self.diagnostics.push(Diagnostic::new(code, message, span));
         self.types.unknown()
@@ -4687,7 +5194,7 @@ impl<'program> Checker<'program> {
         help: impl Into<String>,
     ) -> TypeId {
         for arg in &ty.args {
-            self.resolve_type_ref_in_position(arg, span, TypePosition::Value);
+            self.resolve_type_ref_in_position(arg, span, TypePosition::Value, None);
         }
         self.diagnostics
             .push(Diagnostic::new(code, message, span).with_help(help));
@@ -4739,7 +5246,7 @@ impl<'program> Checker<'program> {
                 "cannot assign default value of type `{value_name}` to parameter `${name}` of type `{target_name}`"
             ),
             AssignmentDestination::Property { class_name, name } => format!(
-                "cannot assign value of type `{value_name}` to property `{class_name}::${name}` of type `{target_name}`"
+                "cannot assign value of type `{value_name}` to property `{class_name}::{name}` of type `{target_name}`"
             ),
         };
 
@@ -5036,6 +5543,16 @@ impl<'program> Checker<'program> {
                 .lookup(name)
                 .map(|binding| binding.ty)
                 .unwrap_or_else(|| self.types.unknown()),
+            Expr::Identifier { name, span } => {
+                let key = crate::const_eval::ConstKey::TopLevel(name.clone());
+                let ty = self
+                    .const_evaluation
+                    .values
+                    .get(&key)
+                    .map(|value| value.ty.clone());
+                ty.map(|ty| self.resolve_type_ref(&ty, *span))
+                    .unwrap_or_else(|| self.types.unknown())
+            }
             Expr::This { .. } => method_context
                 .filter(|context| context.this_available)
                 .map(|context| {
@@ -5083,8 +5600,12 @@ impl<'program> Checker<'program> {
                 }
             }
             Expr::StaticCall {
-                class_name, method, ..
+                qualifier, method, ..
             } => {
+                let Some(class_name) = Self::static_qualifier_class_name(qualifier, method_context)
+                else {
+                    return self.types.unknown();
+                };
                 if class_name == "Int" && method == "toFloat" {
                     return self.types.intern(TypeKind::Float(FloatType::Float64));
                 }
@@ -5092,15 +5613,51 @@ impl<'program> Checker<'program> {
                     return self.types.intern(TypeKind::Integer(IntegerType::Int64));
                 }
                 if method == "from" {
-                    if let Some(integer) = IntegerType::from_companion_name(class_name) {
+                    if let Some(integer) = IntegerType::from_companion_name(&class_name) {
                         return self.types.intern(TypeKind::Integer(integer));
                     }
                 }
                 self.classes
-                    .get(class_name)
+                    .get(&class_name)
                     .and_then(|class_info| class_info.methods.get(method))
                     .map(|method| method.return_ty)
                     .unwrap_or_else(|| self.types.unknown())
+            }
+            Expr::StaticMember {
+                qualifier,
+                member,
+                span,
+                ..
+            } => {
+                let Some(class_name) = Self::static_qualifier_class_name(qualifier, method_context)
+                else {
+                    return self.types.unknown();
+                };
+                let ty = self.classes.get(&class_name).and_then(|class_info| {
+                    class_info
+                        .constants
+                        .get(member)
+                        .map(|constant| constant.ty)
+                        .or_else(|| {
+                            class_info
+                                .static_properties
+                                .get(member)
+                                .map(|property| property.ty)
+                        })
+                });
+                ty.unwrap_or_else(|| {
+                    let key = crate::const_eval::ConstKey::Class {
+                        class_name,
+                        name: member.clone(),
+                    };
+                    let ty = self
+                        .const_evaluation
+                        .values
+                        .get(&key)
+                        .map(|value| value.ty.clone());
+                    ty.map(|ty| self.resolve_type_ref(&ty, *span))
+                        .unwrap_or_else(|| self.types.unknown())
+                })
             }
             Expr::Grouped { expr, .. } => self.infer_expr_type(expr, scopes, method_context),
             Expr::Unary { op, expr, span } => {
@@ -5110,7 +5667,17 @@ impl<'program> Checker<'program> {
                 left, op, right, ..
             } => self.infer_binary_type(left, op, right, scopes, method_context),
             Expr::Range { .. } => self.types.unknown(),
-            _ => self.types.unknown(),
+        }
+    }
+
+    fn static_qualifier_class_name(
+        qualifier: &StaticQualifier,
+        method_context: Option<&MethodContext>,
+    ) -> Option<String> {
+        match qualifier {
+            StaticQualifier::Class(name) => Some(name.clone()),
+            StaticQualifier::SelfType => method_context.map(|context| context.class_name.clone()),
+            StaticQualifier::Parent | StaticQualifier::InvalidStatic => None,
         }
     }
 

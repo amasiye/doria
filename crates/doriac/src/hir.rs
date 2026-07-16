@@ -25,6 +25,7 @@ pub struct NamespaceDecl {
 pub enum Item {
     Class(ClassDecl),
     Function(FunctionDecl),
+    Constant(ConstDecl),
     Statement(Stmt),
 }
 
@@ -42,15 +43,26 @@ pub struct ClassDecl {
 pub enum ClassMember {
     Property(PropertyDecl),
     Method(FunctionDecl),
+    Constant(ConstDecl),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertyDecl {
     pub access: MemberAccess,
+    pub is_static: bool,
     pub writable: bool,
     pub ty: TypeRef,
     pub name: String,
     pub initializer: Option<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConstDecl {
+    pub access: MemberAccess,
+    pub ty: Option<TypeRef>,
+    pub name: String,
+    pub initializer: Expr,
     pub span: Span,
 }
 
@@ -243,6 +255,11 @@ pub enum Expr {
         args: Vec<Expr>,
         span: Span,
     },
+    StaticMember {
+        class_name: String,
+        member: String,
+        span: Span,
+    },
     New {
         class_name: String,
         args: Vec<Expr>,
@@ -300,6 +317,7 @@ impl Expr {
             | Expr::MethodCall { span, .. }
             | Expr::FunctionCall { span, .. }
             | Expr::StaticCall { span, .. }
+            | Expr::StaticMember { span, .. }
             | Expr::New { span, .. }
             | Expr::Grouped { span, .. }
             | Expr::Unary { span, .. }

@@ -1,0 +1,14 @@
+const int BASE_VALUE = 20;
+const ANSWER = DOUBLE_VALUE + 2;
+const DOUBLE_VALUE = BASE_VALUE * 2;
+
+class Limits
+{
+    const RESULT = ANSWER;
+}
+
+function main(): void
+{
+    echo Limits::RESULT;
+    echo "\n";
+}

@@ -50,10 +50,13 @@ fn lowers_complete_stage_14_mir_shapes_to_verified_objects() {
 fn rejects_malformed_mixed_width_float_mir_before_llvm_emission() {
     let program = Program {
         classes: vec![],
+        statics: vec![],
         functions: vec![
             Function {
                 id: FunctionId(0),
                 name: "main".to_string(),
+                method: None,
+                receiver_mode: None,
                 params: Vec::new(),
                 return_type: ReturnType::Void,
                 locals: Vec::new(),
@@ -67,6 +70,8 @@ fn rejects_malformed_mixed_width_float_mir_before_llvm_emission() {
             Function {
                 id: FunctionId(1),
                 name: "mixedWidth".to_string(),
+                method: None,
+                receiver_mode: None,
                 params: Vec::new(),
                 return_type: ReturnType::Value(Type::Scalar(ScalarType::Float(FloatType::Float64))),
                 locals: Vec::new(),

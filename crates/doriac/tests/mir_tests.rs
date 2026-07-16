@@ -111,9 +111,12 @@ fn debug_contents(source: &str) -> String {
 fn conditional_program(condition: Condition, then_status: i64, else_status: i64) -> Program {
     Program {
         classes: vec![],
+        statics: vec![],
         functions: vec![Function {
             id: FunctionId(0),
             name: "main".to_string(),
+            method: None,
+            receiver_mode: None,
             params: Vec::new(),
             return_type: ReturnType::Value(Type::Scalar(ScalarType::Integer(DEFAULT_INT))),
             locals: vec![Local {
@@ -773,9 +776,12 @@ fn interprets_multiple_echoes_without_newline() {
 fn interpreter_reports_arithmetic_overflow_as_runtime_panic() {
     let program = Program {
         classes: vec![],
+        statics: vec![],
         functions: vec![Function {
             id: FunctionId(0),
             name: "main".to_string(),
+            method: None,
+            receiver_mode: None,
             params: Vec::new(),
             return_type: ReturnType::Value(Type::Scalar(ScalarType::Integer(DEFAULT_INT))),
             locals: vec![Local {
@@ -1412,9 +1418,12 @@ fn interpreter_preserves_void_fallthrough_after_final_else_if() {
 fn explicitly_limited_interpreter_stops_repeated_mir_state_cycles() {
     let program = Program {
         classes: vec![],
+        statics: vec![],
         functions: vec![Function {
             id: FunctionId(0),
             name: "main".to_string(),
+            method: None,
+            receiver_mode: None,
             params: Vec::new(),
             return_type: ReturnType::Void,
             locals: Vec::new(),
@@ -2883,9 +2892,12 @@ fn stage_11f_debug_target_handles_all_examples() {
 fn explicitly_limited_interpreter_can_bound_call_frames() {
     let program = Program {
         classes: vec![],
+        statics: vec![],
         functions: vec![Function {
             id: FunctionId(0),
             name: "main".to_string(),
+            method: None,
+            receiver_mode: None,
             params: Vec::new(),
             return_type: ReturnType::Value(Type::Scalar(ScalarType::Integer(DEFAULT_INT))),
             locals: vec![Local {

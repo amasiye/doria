@@ -1,0 +1,53 @@
+class Ast
+{
+    string $kind;
+
+    function __construct(internal string $givenKind): void
+    {
+        $this->kind = $givenKind;
+    }
+}
+
+class Parser
+{
+    const DEFAULT_SLUG = "parser";
+
+    string $name;
+    internal string $slug;
+    internal writable int $position = 0;
+
+    function __construct(internal string $givenName, internal string $givenSlug): void
+    {
+        $this->name = $givenName;
+        $this->slug = $givenSlug;
+    }
+
+    static function create(string $name): Parser
+    {
+        return new Parser($name, Parser::DEFAULT_SLUG);
+    }
+
+    writable function parse(): Ast
+    {
+        $this->advance();
+        return $this->parseProgram();
+    }
+
+    internal function parseProgram(): Ast
+    {
+        return new Ast($this->name . ":" . $this->slug);
+    }
+
+    internal writable function advance(): void
+    {
+        $this->position = $this->position + 1;
+    }
+}
+
+function main(): void
+{
+    let writable $parser = Parser::create("Doria");
+    let $ast = $parser->parse();
+    echo $ast->kind;
+    echo "\n";
+}

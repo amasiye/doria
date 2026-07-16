@@ -1507,3 +1507,42 @@ fn php_backend_reserves_display_helper_class_name_case_insensitively() {
         }));
     }
 }
+
+#[test]
+fn php_backend_distinguishes_stage20_constants_and_static_properties() {
+    let php = doriac::compile_source_to_php(
+        "statics.doria",
+        r#"
+const TOP_LIMIT = 42;
+
+class Counter
+{
+    const LABEL = "ready";
+    static int $initial = TOP_LIMIT;
+    static writable string $current = Counter::LABEL;
+
+    static function read(): string
+    {
+        return Counter::current;
+    }
+}
+
+function main(): void
+{
+    Counter::current = "done";
+    echo Counter::LABEL;
+    echo Counter::read();
+}
+"#,
+    )
+    .expect("Stage 20 statics should lower to the PHP compatibility backend");
+
+    assert!(php.contains("const TOP_LIMIT = 42;"));
+    assert!(php.contains("public const LABEL = \"ready\";"));
+    assert!(php.contains("public static int $initial = TOP_LIMIT;"));
+    assert!(php.contains("public static string $current = Counter::LABEL;"));
+    assert!(php.contains("public static function read(): string"));
+    assert!(php.contains("return Counter::$current;"));
+    assert!(php.contains("Counter::$current = \"done\";"));
+    assert!(php.contains("Counter::LABEL"));
+}

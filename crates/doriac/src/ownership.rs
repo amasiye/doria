@@ -154,7 +154,7 @@ pub(crate) fn check_program_with_inferred_move_returns(
             Item::Class(class) => {
                 for member in &class.members {
                     match member {
-                        ClassMember::Property(property) => {
+                        ClassMember::Property(property) if !property.is_static => {
                             let property_class = classes
                                 .contains(&property.ty.name)
                                 .then(|| property.ty.name.clone());
@@ -169,6 +169,7 @@ pub(crate) fn check_program_with_inferred_move_returns(
                                 );
                             }
                         }
+                        ClassMember::Property(_) | ClassMember::Constant(_) => {}
                         ClassMember::Method(method) => {
                             let method_signature =
                                 signature(method, &classes, inferred_move_returns);
@@ -198,7 +199,7 @@ pub(crate) fn check_program_with_inferred_move_returns(
                     }
                 }
             }
-            Item::Interface(_) | Item::Statement(_) => {}
+            Item::Interface(_) | Item::Trait(_) | Item::Constant(_) | Item::Statement(_) => {}
         }
     }
 
@@ -230,10 +231,11 @@ pub(crate) fn check_program_with_inferred_move_returns(
                         ClassMember::Method(method) => {
                             checker.check_function(method, Some(&class.name))
                         }
+                        ClassMember::Constant(_) => {}
                     }
                 }
             }
-            Item::Interface(_) => {}
+            Item::Interface(_) | Item::Trait(_) | Item::Constant(_) => {}
             Item::Statement(statement) => {
                 if top_level_falls_through {
                     top_level_falls_through = checker
@@ -965,14 +967,14 @@ impl Checker {
                 self.use_call_args(Some(object), args, &signature, scopes);
             }
             Expr::StaticCall {
-                class_name,
+                qualifier,
                 method,
                 args,
                 ..
             } => {
                 let signature = self
-                    .methods
-                    .get(&(class_name.clone(), method.clone()))
+                    .qualifier_class(qualifier)
+                    .and_then(|class_name| self.methods.get(&(class_name, method.clone())))
                     .cloned()
                     .unwrap_or_default();
                 self.use_call_args(None, args, &signature, scopes);
@@ -1033,6 +1035,7 @@ impl Checker {
                 }
             }
             Expr::Identifier { .. }
+            | Expr::StaticMember { .. }
             | Expr::String { .. }
             | Expr::Int { .. }
             | Expr::Float { .. }
@@ -1115,10 +1118,10 @@ impl Checker {
                     .is_some_and(|signature| signature.returns_move_type)
             }
             Expr::StaticCall {
-                class_name, method, ..
+                qualifier, method, ..
             } => self
-                .methods
-                .get(&(class_name.clone(), method.clone()))
+                .qualifier_class(qualifier)
+                .and_then(|class_name| self.methods.get(&(class_name, method.clone())))
                 .is_some_and(|signature| signature.returns_move_type),
             Expr::PropertyAccess {
                 object, property, ..
@@ -1162,14 +1165,22 @@ impl Checker {
                     .and_then(|signature| signature.returns.clone())
             }
             Expr::StaticCall {
-                class_name, method, ..
+                qualifier, method, ..
             } => self
-                .methods
-                .get(&(class_name.clone(), method.clone()))
+                .qualifier_class(qualifier)
+                .and_then(|class_name| self.methods.get(&(class_name, method.clone())))
                 .and_then(|signature| signature.returns.clone()),
             Expr::This { .. } => self.receiver_class.clone(),
             Expr::Grouped { expr, .. } => self.expr_class(expr, scopes),
             _ => None,
+        }
+    }
+
+    fn qualifier_class(&self, qualifier: &ast::StaticQualifier) -> Option<String> {
+        match qualifier {
+            ast::StaticQualifier::Class(name) => Some(name.clone()),
+            ast::StaticQualifier::SelfType => self.receiver_class.clone(),
+            ast::StaticQualifier::Parent | ast::StaticQualifier::InvalidStatic => None,
         }
     }
 }

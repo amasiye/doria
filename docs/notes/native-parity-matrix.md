@@ -63,8 +63,17 @@ Source of truth for sequencing remains `docs/doria-end-to-end-plan.md`. The dura
 | Structured-exit cleanup | Covered | Covered | Covered | Covered | Fallthrough, return, break, and continue drop still-owned locals; panic intentionally does not unwind. |
 | Statement class temporaries | Covered | Covered | Covered | Covered | Borrowed and transferred temporaries are released exactly once at their accepted ownership boundary. |
 | Replacement-before-drop assignment | Covered | Covered | Covered | Covered | Replacement is acquired before the previous destination owner is destroyed. |
-| Stage 19 native memory safety | N/A | Linux CI | Linux CI | Covered | Valgrind executes the class acceptance fixtures under both native profiles; ordinary parity remains cross-platform. |
-| `Displayable` native execution | Deferred | Deferred | Deferred | Stage 20 | Class layout exists; general instance-method dispatch remains Stage 20. |
+| Stage 19/20 native memory safety | N/A | Linux CI | Linux CI | Covered | Valgrind executes ownership-bearing class and method fixtures under both native profiles; ordinary parity remains cross-platform. |
+| Instance methods | Covered | Covered | Covered | Covered | Concrete method identities carry explicit readonly/writable receivers through shared MIR. |
+| Static methods | Covered | Covered | Covered | Covered | Qualified calls have no receiver and retain ordinary argument, return, panic, and ownership behavior. |
+| Class and top-level constants | Covered | Covered | Covered | Covered | The bounded evaluator resolves forward dependencies and folds typed values before MIR. |
+| Copy-type static properties | Covered | Covered | Covered | Covered | Plain per-process data symbols support readonly reads and qualified writable reassignment without runtime initialization. |
+| Sigil-free static identity and `self` | Covered | Covered | Covered | Covered | Constants, static properties, and static methods resolve to concrete class-owned identities before MIR; `self` return types resolve before ABI lowering. |
+| Constructor writable-static mutation | Covered | Covered | Covered | Covered | `main_stage20_static_constructor.doria` treats the write as ordinary mutation and preserves exact destructor output. |
+| Stage 20 static identity diagnostics | Frontend | Frontend | Frontend | Covered | `Foo::$prop` and `static::` are rejected before MIR with exact `$` removal and `self` qualifier fixes. |
+| Generalized `parent::` and trait-local `self::` grammar | Frontend | Frontend | Frontend | Covered | Accepted syntax produces Stage 34/35 semantic diagnostics without parser or LSP syntax errors. |
+| `internal` member enforcement | Frontend | Frontend | Frontend | Covered | Rejected access never reaches MIR; same-class access covers instance, static, constant, and lifecycle members. |
+| `Displayable` native execution | Covered | Covered | Covered | Covered | Statically known conforming classes call ordinary `toString()` MIR exactly once and left-to-right. |
 | PHP `Displayable` subset | N/A | N/A | N/A | Covered | Generated private interface invokes Doria `toString` exactly once and never relies on `__toString`. |
 | Parser fuzzing | Frontend | Frontend | Frontend | Covered | Bounded CI fuzzing seeds nested strings, braces, malformed expressions, and UTF-8 offsets. |
 | String equality and ordering | Covered | Covered | Covered | Covered | Equality is exact-byte and ordering is unsigned byte-lexicographic. |
@@ -117,6 +126,6 @@ Source of truth for sequencing remains `docs/doria-end-to-end-plan.md`. The dura
 
 ## Retirement Gate
 
-Status: Passed through Stage 19 after this branch's full validation gates pass.
+Status: Passed through Stage 20 after this branch's full validation gates pass.
 
-All accepted Stage <=19 scalar, string, interpolation, checked-format, text-I/O, ownership, and native-class lowering passes through typed MIR and shared MIR validation. The interpreter, Cranelift fast profile, and LLVM release profile consume that same MIR; every finite native example is required in the executable manifest with deterministic sidecars where needed; Linux CI memory-checks the Stage 19 native fixtures; and the Stage 7-10 native smoke module remains retired and deleted. Stage 20 methods, statics, and `internal` native lowering is next.
+All accepted Stage <=20 scalar, string, interpolation, checked-format, text-I/O, ownership, native-class, method, static, constant, and concrete-display lowering passes through typed MIR and shared MIR validation. The interpreter, Cranelift fast profile, and LLVM release profile consume that same MIR; every finite native example is required in the executable manifest with deterministic sidecars where needed; Linux CI memory-checks the ownership-bearing native fixtures, including the static-constructor and `self` paths; and the Stage 7-10 native smoke module remains retired and deleted. Stage 21 borrowing and full definite initialization are next.
