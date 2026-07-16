@@ -154,7 +154,7 @@ pub(crate) fn check_program_with_inferred_move_returns(
             Item::Class(class) => {
                 for member in &class.members {
                     match member {
-                        ClassMember::Property(property) => {
+                        ClassMember::Property(property) if !property.is_static => {
                             let property_class = classes
                                 .contains(&property.ty.name)
                                 .then(|| property.ty.name.clone());
@@ -169,6 +169,7 @@ pub(crate) fn check_program_with_inferred_move_returns(
                                 );
                             }
                         }
+                        ClassMember::Property(_) | ClassMember::Constant(_) => {}
                         ClassMember::Method(method) => {
                             let method_signature =
                                 signature(method, &classes, inferred_move_returns);
@@ -198,7 +199,7 @@ pub(crate) fn check_program_with_inferred_move_returns(
                     }
                 }
             }
-            Item::Interface(_) | Item::Statement(_) => {}
+            Item::Interface(_) | Item::Constant(_) | Item::Statement(_) => {}
         }
     }
 
@@ -230,10 +231,11 @@ pub(crate) fn check_program_with_inferred_move_returns(
                         ClassMember::Method(method) => {
                             checker.check_function(method, Some(&class.name))
                         }
+                        ClassMember::Constant(_) => {}
                     }
                 }
             }
-            Item::Interface(_) => {}
+            Item::Interface(_) | Item::Constant(_) => {}
             Item::Statement(statement) => {
                 if top_level_falls_through {
                     top_level_falls_through = checker
@@ -1033,6 +1035,7 @@ impl Checker {
                 }
             }
             Expr::Identifier { .. }
+            | Expr::StaticMember { .. }
             | Expr::String { .. }
             | Expr::Int { .. }
             | Expr::Float { .. }

@@ -7,6 +7,7 @@ pub mod codegen_cranelift;
 pub mod codegen_llvm;
 pub mod codegen_native;
 pub mod codegen_php;
+pub mod const_eval;
 pub mod control_flow;
 pub mod dataflow;
 pub mod diagnostics;

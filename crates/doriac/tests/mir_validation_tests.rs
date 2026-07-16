@@ -14,6 +14,8 @@ fn shared_validator_rejects_mixed_width_float_binary_operands() {
     program.functions.push(Function {
         id: FunctionId(1),
         name: "mixedWidth".to_string(),
+        method: None,
+        receiver_mode: None,
         params: Vec::new(),
         return_type: ReturnType::Value(Type::Scalar(ScalarType::Float(FloatType::Float64))),
         locals: Vec::new(),
@@ -185,6 +187,8 @@ fn shared_validator_requires_class_calls_to_return_the_declared_class() {
     program.functions.push(Function {
         id: FunctionId(1),
         name: "makeOther".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![],
         return_type: ReturnType::Value(Type::Class(ClassId(1))),
         locals: vec![class_local(0, ClassId(1))],
@@ -228,6 +232,8 @@ fn shared_validator_skips_the_implicit_constructor_receiver() {
     program.functions.push(Function {
         id: FunctionId(1),
         name: "Message::__construct".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0), LocalId(1)],
         return_type: ReturnType::Void,
         locals: vec![
@@ -297,6 +303,8 @@ fn shared_validator_requires_promoted_class_arguments_to_transfer_ownership() {
     program.functions.push(Function {
         id: FunctionId(1),
         name: "Parent::__construct".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0), LocalId(1)],
         return_type: ReturnType::Void,
         locals: vec![borrowed_class_local(0, ClassId(0)), borrowed_child],
@@ -341,6 +349,8 @@ fn shared_validator_rejects_borrowing_and_transferring_one_class_local_in_a_call
     program.functions.push(Function {
         id: FunctionId(1),
         name: "borrowAndTake".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0), LocalId(1)],
         return_type: ReturnType::Void,
         locals: vec![borrowed, class_local(1, ClassId(0))],
@@ -378,6 +388,8 @@ fn shared_validator_requires_writable_class_arguments_for_writable_parameters() 
     program.functions.push(Function {
         id: FunctionId(1),
         name: "mutate".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0)],
         return_type: ReturnType::Void,
         locals: vec![parameter],
@@ -425,6 +437,8 @@ fn shared_validator_does_not_keep_nested_argument_borrows_alive() {
     program.functions.push(Function {
         id: FunctionId(1),
         name: "label".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0)],
         return_type: ReturnType::Value(Type::String),
         locals: vec![borrowed_class_local(0, ClassId(0))],
@@ -440,6 +454,8 @@ fn shared_validator_does_not_keep_nested_argument_borrows_alive() {
     program.functions.push(Function {
         id: FunctionId(2),
         name: "sink".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0), LocalId(1)],
         return_type: ReturnType::Void,
         locals: vec![
@@ -525,6 +541,8 @@ fn shared_validator_preserves_constant_boolean_move_reachability() {
     program.functions.push(Function {
         id: FunctionId(1),
         name: "probe".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0)],
         return_type: ReturnType::Value(Type::Scalar(ScalarType::Bool)),
         locals: vec![class_local(0, ClassId(0))],
@@ -542,6 +560,8 @@ fn shared_validator_preserves_constant_boolean_move_reachability() {
     program.functions.push(Function {
         id: FunctionId(2),
         name: "consume".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0)],
         return_type: ReturnType::Void,
         locals: vec![class_local(0, ClassId(0))],
@@ -555,6 +575,8 @@ fn shared_validator_preserves_constant_boolean_move_reachability() {
     program.functions.push(Function {
         id: FunctionId(3),
         name: "inspect".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0)],
         return_type: ReturnType::Void,
         locals: vec![borrowed_class_local(0, ClassId(0))],
@@ -600,6 +622,8 @@ fn shared_validator_tracks_nested_transfers_across_outer_call_arguments() {
     program.functions.push(Function {
         id: FunctionId(1),
         name: "inspectWithLabel".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0), LocalId(1)],
         return_type: ReturnType::Void,
         locals: vec![
@@ -623,6 +647,8 @@ fn shared_validator_tracks_nested_transfers_across_outer_call_arguments() {
     program.functions.push(Function {
         id: FunctionId(2),
         name: "consumeAndLabel".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0)],
         return_type: ReturnType::Value(Type::String),
         locals: vec![class_local(0, ClassId(0))],
@@ -676,6 +702,8 @@ fn shared_validator_tracks_property_borrows_across_outer_call_arguments() {
     program.functions.push(Function {
         id: FunctionId(1),
         name: "takeWithLabel".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0), LocalId(1)],
         return_type: ReturnType::Void,
         locals: vec![
@@ -825,6 +853,8 @@ fn shared_validator_rejects_reusing_a_moved_constructor_argument() {
     program.functions.push(Function {
         id: FunctionId(1),
         name: "Pair::__construct".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0), LocalId(1)],
         return_type: ReturnType::Void,
         locals: vec![
@@ -988,6 +1018,8 @@ fn shared_validator_tracks_nested_transfers_across_property_initializers() {
     program.functions.push(Function {
         id: FunctionId(1),
         name: "relay".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0)],
         return_type: ReturnType::Value(Type::Class(ClassId(1))),
         locals: vec![class_local(0, ClassId(1))],
@@ -1052,6 +1084,8 @@ fn shared_validator_rejects_a_promoted_class_owner_also_owned_by_the_constructor
     program.functions.push(Function {
         id: FunctionId(1),
         name: "Parent::__construct".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0), LocalId(1)],
         return_type: ReturnType::Void,
         locals: vec![
@@ -1243,6 +1277,8 @@ fn shared_validator_requires_constructor_body_initializers_on_every_return_path(
     program.functions.push(Function {
         id: FunctionId(1),
         name: "Message::__construct".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0)],
         return_type: ReturnType::Void,
         locals: vec![receiver],
@@ -1461,6 +1497,8 @@ fn shared_validator_rejects_unknown_classes_in_function_types() {
     parameter.functions.push(Function {
         id: FunctionId(1),
         name: "missingClassParameter".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0)],
         return_type: ReturnType::Void,
         locals: vec![class_local(0, ClassId(99))],
@@ -1479,6 +1517,8 @@ fn shared_validator_rejects_unknown_classes_in_function_types() {
     returned.functions.push(Function {
         id: FunctionId(1),
         name: "missingClass".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![],
         return_type: ReturnType::Value(Type::Class(ClassId(99))),
         locals: vec![],
@@ -1503,6 +1543,8 @@ fn shared_validator_checks_lifecycle_metadata_even_when_unused() {
     valid.functions.push(Function {
         id: FunctionId(1),
         name: "Class0::__destruct".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0)],
         return_type: ReturnType::Void,
         locals: vec![receiver],
@@ -1559,6 +1601,8 @@ fn shared_validator_rejects_transfers_into_borrowed_class_parameters() {
     program.functions.push(Function {
         id: FunctionId(1),
         name: "inspect".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0)],
         return_type: ReturnType::Void,
         locals: vec![borrowed],
@@ -1594,6 +1638,8 @@ fn shared_validator_rejects_borrows_into_owned_class_parameters() {
     program.functions.push(Function {
         id: FunctionId(1),
         name: "consume".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0)],
         return_type: ReturnType::Void,
         locals: vec![class_local(0, ClassId(0))],
@@ -1636,6 +1682,8 @@ fn shared_validator_rejects_duplicate_class_local_transfers_in_one_call() {
     program.functions.push(Function {
         id: FunctionId(1),
         name: "consumeBoth".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0), LocalId(1)],
         return_type: ReturnType::Void,
         locals: vec![class_local(0, ClassId(0)), class_local(1, ClassId(0))],
@@ -1741,6 +1789,8 @@ fn shared_validator_rejects_borrowed_class_rvalues_in_owning_slots() {
     returned.functions.push(Function {
         id: FunctionId(1),
         name: "borrowedReturn".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![],
         return_type: ReturnType::Value(Type::Class(ClassId(0))),
         locals: vec![class_local(0, ClassId(0))],
@@ -1811,9 +1861,12 @@ fn decimal_spec() -> FormatSpec {
 fn valid_void_program() -> Program {
     Program {
         classes: vec![],
+        statics: vec![],
         functions: vec![Function {
             id: FunctionId(0),
             name: "main".to_string(),
+            method: None,
+            receiver_mode: None,
             params: Vec::new(),
             return_type: ReturnType::Void,
             locals: Vec::new(),
@@ -1894,6 +1947,8 @@ fn class_new_program() -> Program {
     program.functions.push(Function {
         id: FunctionId(1),
         name: "Message::__construct".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0), LocalId(1)],
         return_type: ReturnType::Void,
         locals: vec![
@@ -1955,6 +2010,8 @@ fn promoted_class_alias_program() -> (Program, PropertyId) {
     program.functions.push(Function {
         id: FunctionId(1),
         name: "Parent::__construct".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0), LocalId(1)],
         return_type: ReturnType::Void,
         locals: vec![
@@ -1971,6 +2028,8 @@ fn promoted_class_alias_program() -> (Program, PropertyId) {
     program.functions.push(Function {
         id: FunctionId(2),
         name: "inspect".to_string(),
+        method: None,
+        receiver_mode: None,
         params: vec![LocalId(0)],
         return_type: ReturnType::Void,
         locals: vec![borrowed_class_local(0, ClassId(1))],

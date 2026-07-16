@@ -30,7 +30,7 @@ class Office
 }
 ```
 
-The `Office::$manager` property should be initialized with a fresh `Person` object for each `Office` instance.
+The `$manager` property should be initialized with a fresh `Person` object for each `Office` instance.
 
 Doria should also allow expressive metadata/decorator-style configuration:
 

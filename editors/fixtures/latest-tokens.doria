@@ -8,6 +8,28 @@ include "support/types.doria";
 
 declare(strict_types: true);
 
+// Stage 20: statics and constant evaluation.
+const DEFAULT_LIMIT = 25;
+const int HARD_LIMIT = 100;
+
+class ParserLimits
+{
+    internal const MAX_DEPTH = DEFAULT_LIMIT * 4;
+    static int $initial = 0;
+    static writable int $next = 1;
+    internal static string $label = "parser";
+
+    static function nextId(): int
+    {
+        ParserLimits::next += 1;
+        return ParserLimits::next;
+    }
+}
+
+let $nextParserId = ParserLimits::nextId();
+echo ParserLimits::MAX_DEPTH;
+echo HARD_LIMIT;
+
 // Attributes and named arguments are editor-highlighted before full compiler support.
 #[Module(host: "localhost", port: 3306)]
 #[App\Routing\Route(path: "/parser", name: "parser.show")]

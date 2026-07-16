@@ -8,7 +8,7 @@ use cranelift_codegen::ir::{
 };
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
-use cranelift_module::{default_libcall_names, DataDescription, FuncId, Linkage, Module};
+use cranelift_module::{default_libcall_names, DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use crate::backend::BackendError;
@@ -51,6 +51,7 @@ pub fn lower_mir_to_object(program: &mir::Program) -> Result<Vec<u8>, BackendErr
             .map_err(|error| backend_failure(error.to_string()))?;
         function_ids.push(function_id);
     }
+    let static_ids = define_static_data(&mut module, program)?;
 
     let mut process_signature = module.make_signature();
     process_signature.returns.push(AbiParam::new(types::I32));
@@ -59,7 +60,7 @@ pub fn lower_mir_to_object(program: &mir::Program) -> Result<Vec<u8>, BackendErr
         .map_err(|error| backend_failure(error.to_string()))?;
 
     for function in &program.functions {
-        define_function(&mut module, program, function, &function_ids)?;
+        define_function(&mut module, program, function, &function_ids, &static_ids)?;
     }
     define_process_main(
         &mut module,
@@ -151,11 +152,90 @@ fn scalar_storage_bytes(ty: mir::ScalarType) -> u32 {
     }
 }
 
+fn define_static_data(
+    module: &mut ObjectModule,
+    program: &mir::Program,
+) -> Result<Vec<DataId>, BackendError> {
+    let pointer_bytes = usize::from(module.target_config().pointer_bytes());
+    let mut ids = Vec::with_capacity(program.statics.len());
+    for property in &program.statics {
+        let symbol = format!(
+            "__doria_static_{}_{}_{}",
+            property.class.0, property.id.0, property.name
+        );
+        let id = module
+            .declare_data(&symbol, Linkage::Local, property.writable, false)
+            .map_err(|error| backend_failure(error.to_string()))?;
+        let mut description = DataDescription::new();
+        description.set_align(pointer_bytes as u64);
+        match &property.initializer {
+            mir::StaticValue::Scalar(value) => {
+                description.define(scalar_data_bytes(*value).into_boxed_slice());
+            }
+            mir::StaticValue::Null => description.define_zeroinit(pointer_bytes),
+            mir::StaticValue::String(value) => {
+                let object_id = module
+                    .declare_data(&format!("{symbol}_string"), Linkage::Local, false, false)
+                    .map_err(|error| backend_failure(error.to_string()))?;
+                let mut object = DataDescription::new();
+                object.set_align(pointer_bytes as u64);
+                let mut bytes = Vec::with_capacity(pointer_bytes * 2 + value.len());
+                append_target_word(&mut bytes, u64::MAX, pointer_bytes);
+                append_target_word(&mut bytes, value.len() as u64, pointer_bytes);
+                bytes.extend_from_slice(value.as_bytes());
+                object.define(bytes.into_boxed_slice());
+                module
+                    .define_data(object_id, &object)
+                    .map_err(|error| backend_failure(error.to_string()))?;
+
+                // A relocated pointer slot is initialized data, even though its
+                // placeholder bytes are zero. Marking it zeroinit places the
+                // relocation in Mach-O __bss, which Apple linkers cannot handle.
+                description.define(vec![0; pointer_bytes].into_boxed_slice());
+                let object_reference = module.declare_data_in_data(object_id, &mut description);
+                description.write_data_addr(0, object_reference, 0);
+            }
+        }
+        module
+            .define_data(id, &description)
+            .map_err(|error| backend_failure(error.to_string()))?;
+        ids.push(id);
+    }
+    Ok(ids)
+}
+
+fn append_target_word(bytes: &mut Vec<u8>, value: u64, width: usize) {
+    let encoded = value.to_ne_bytes();
+    if cfg!(target_endian = "little") {
+        bytes.extend_from_slice(&encoded[..width]);
+    } else {
+        bytes.extend_from_slice(&encoded[encoded.len() - width..]);
+    }
+}
+
+fn scalar_data_bytes(value: mir::ScalarValue) -> Vec<u8> {
+    match value {
+        mir::ScalarValue::Integer(value) => match value.ty.bit_width() {
+            8 => vec![value.bits as u8],
+            16 => (value.bits as u16).to_ne_bytes().to_vec(),
+            32 => (value.bits as u32).to_ne_bytes().to_vec(),
+            64 => value.bits.to_ne_bytes().to_vec(),
+            width => unreachable!("canonical Doria integer has unsupported width {width}"),
+        },
+        mir::ScalarValue::Float(value) => match value.ty {
+            FloatType::Float32 => (value.bits as u32).to_ne_bytes().to_vec(),
+            FloatType::Float64 => value.bits.to_ne_bytes().to_vec(),
+        },
+        mir::ScalarValue::Bool(value) => vec![u8::from(value)],
+    }
+}
+
 fn define_function(
     module: &mut ObjectModule,
     program: &mir::Program,
     function: &mir::Function,
     function_ids: &[FuncId],
+    static_ids: &[DataId],
 ) -> Result<(), BackendError> {
     let function_id = *function_ids
         .get(function.id.0)
@@ -239,15 +319,23 @@ fn define_function(
             .stack_store(function_name_length, frame_slot, (pointer_bytes * 2) as i32);
         let current_frame = builder.ins().stack_addr(pointer_type, frame_slot, 0);
 
-        let mut resources = LoweringResources::new(
+        let mut resources = LoweringResources {
             module,
             program,
             function_ids,
-            &local_slots,
+            static_ids,
+            local_slots: &local_slots,
             deferred_class_temporary_slots,
-            function.id,
+            deferred_class_temporary_slot_cursor: 0,
+            write_stdout_func_id: None,
+            panic_func_id: None,
+            runtime_functions: HashMap::new(),
+            next_data_id: 0,
+            function_id: function.id,
             current_frame,
-        );
+            defer_class_temporary_drops: false,
+            deferred_class_temporary_drops: Vec::new(),
+        };
         retain_string_parameters(&mut builder, function, &mut resources)?;
         lower_block(
             &mut builder,
@@ -487,6 +575,7 @@ struct LoweringResources<'module, 'program> {
     module: &'module mut ObjectModule,
     program: &'program mir::Program,
     function_ids: &'program [FuncId],
+    static_ids: &'program [DataId],
     local_slots: &'program [Option<StackSlot>],
     deferred_class_temporary_slots: Vec<StackSlot>,
     deferred_class_temporary_slot_cursor: usize,
@@ -501,33 +590,6 @@ struct LoweringResources<'module, 'program> {
 }
 
 impl<'module, 'program> LoweringResources<'module, 'program> {
-    fn new(
-        module: &'module mut ObjectModule,
-        program: &'program mir::Program,
-        function_ids: &'program [FuncId],
-        local_slots: &'program [Option<StackSlot>],
-        deferred_class_temporary_slots: Vec<StackSlot>,
-        function_id: mir::FunctionId,
-        current_frame: Value,
-    ) -> Self {
-        Self {
-            module,
-            program,
-            function_ids,
-            local_slots,
-            deferred_class_temporary_slots,
-            deferred_class_temporary_slot_cursor: 0,
-            write_stdout_func_id: None,
-            panic_func_id: None,
-            runtime_functions: HashMap::new(),
-            next_data_id: 0,
-            function_id,
-            current_frame,
-            defer_class_temporary_drops: false,
-            deferred_class_temporary_drops: Vec::new(),
-        }
-    }
-
     fn declare_write_stdout(&mut self) -> Result<FuncId, BackendError> {
         if let Some(id) = self.write_stdout_func_id {
             return Ok(id);
@@ -767,6 +829,30 @@ fn lower_statement(
                 _ => {}
             }
         }
+        mir::Statement::AssignStatic { target, value } => {
+            let property = static_definition(resources.program, *target)?;
+            let new_value = lower_rvalue(builder, value, resources)?;
+            let address = lower_static_address(builder, *target, resources)?;
+            let pointer = resources.module.target_config().pointer_type();
+            let old_value = matches!(property.ty, mir::Type::String | mir::Type::NullableString)
+                .then(|| {
+                    builder.ins().load(
+                        pointer,
+                        cranelift_codegen::ir::MachMemFlags::trusted(),
+                        address,
+                        0,
+                    )
+                });
+            builder.ins().store(
+                cranelift_codegen::ir::MachMemFlags::trusted(),
+                new_value,
+                address,
+                0,
+            );
+            if let Some(old_value) = old_value {
+                release_string(builder, old_value, resources)?;
+            }
+        }
         mir::Statement::DropClass { local, .. } => {
             let pointer_type = resources.module.target_config().pointer_type();
             let slot = local_slot(resources.local_slots, *local)?;
@@ -786,6 +872,21 @@ fn lower_statement(
     }
     resources.defer_class_temporary_drops = false;
     flush_deferred_class_temporary_drops(builder, resources)
+}
+
+fn lower_static_address(
+    builder: &mut FunctionBuilder,
+    id: mir::StaticId,
+    resources: &LoweringResources<'_, '_>,
+) -> Result<Value, BackendError> {
+    let data_id = *resources
+        .static_ids
+        .get(id.0)
+        .ok_or_else(|| malformed_mir(format!("static{} was not declared", id.0)))?;
+    let global = resources.module.declare_data_in_func(data_id, builder.func);
+    Ok(builder
+        .ins()
+        .global_value(resources.module.target_config().pointer_type(), global))
 }
 
 fn lower_terminator(
@@ -1204,6 +1305,16 @@ fn lower_string_expression(
                     .stack_load(pointer, local_slot(resources.local_slots, *local)?, 0);
             retain_string(builder, value, resources)
         }
+        mir::StringExpression::Static(id) => {
+            let address = lower_static_address(builder, *id, resources)?;
+            let value = builder.ins().load(
+                pointer,
+                cranelift_codegen::ir::MachMemFlags::trusted(),
+                address,
+                0,
+            );
+            retain_string(builder, value, resources)
+        }
         mir::StringExpression::NullableLocalAssumeNonNull(local) => {
             let pointer = resources.module.target_config().pointer_type();
             let value =
@@ -1323,6 +1434,16 @@ fn lower_nullable_string_expression(
                 builder
                     .ins()
                     .stack_load(pointer, local_slot(resources.local_slots, *local)?, 0);
+            retain_string(builder, value, resources)
+        }
+        mir::NullableStringExpression::Static(id) => {
+            let address = lower_static_address(builder, *id, resources)?;
+            let value = builder.ins().load(
+                pointer,
+                cranelift_codegen::ir::MachMemFlags::trusted(),
+                address,
+                0,
+            );
             retain_string(builder, value, resources)
         }
         mir::NullableStringExpression::Property { object, property } => {
@@ -1884,6 +2005,15 @@ fn lower_integer_operand(
             let slot = local_slot(resources.local_slots, *id)?;
             Ok(builder.ins().stack_load(clif_integer_type(ty), slot, 0))
         }
+        mir::Operand::Static(id) => {
+            let address = lower_static_address(builder, *id, resources)?;
+            Ok(builder.ins().load(
+                clif_integer_type(ty),
+                cranelift_codegen::ir::MachMemFlags::trusted(),
+                address,
+                0,
+            ))
+        }
         mir::Operand::Property { object, property } => {
             let address = lower_property_address(builder, *object, *property, resources)?;
             Ok(builder.ins().load(
@@ -1928,6 +2058,15 @@ fn lower_float_expression(
                 Ok(builder.ins().stack_load(
                     clif_scalar_type(mir::ScalarType::Float(*ty)),
                     local_slot(resources.local_slots, *id)?,
+                    0,
+                ))
+            }
+            mir::Operand::Static(id) => {
+                let address = lower_static_address(builder, *id, resources)?;
+                Ok(builder.ins().load(
+                    clif_scalar_type(mir::ScalarType::Float(*ty)),
+                    cranelift_codegen::ir::MachMemFlags::trusted(),
+                    address,
                     0,
                 ))
             }
@@ -2300,6 +2439,15 @@ fn lower_bool_operand(
                 .ins()
                 .stack_load(types::I8, local_slot(resources.local_slots, *id)?, 0))
         }
+        mir::Operand::Static(id) => {
+            let address = lower_static_address(builder, *id, resources)?;
+            Ok(builder.ins().load(
+                types::I8,
+                cranelift_codegen::ir::MachMemFlags::trusted(),
+                address,
+                0,
+            ))
+        }
         mir::Operand::Property { object, property } => {
             let address = lower_property_address(builder, *object, *property, resources)?;
             Ok(builder.ins().load(
@@ -2390,6 +2538,9 @@ fn resolve_string_expression_from_definitions(
         mir::StringExpression::NullableLocalAssumeNonNull(_) => {
             Err(malformed_mir("runtime string expression is not a constant"))
         }
+        mir::StringExpression::Static(_) => {
+            Err(malformed_mir("runtime string expression is not a constant"))
+        }
         mir::StringExpression::Property { .. } => {
             Err(malformed_mir("runtime string expression is not a constant"))
         }
@@ -2428,6 +2579,9 @@ fn resolve_string_expression(
             ))
         }),
         mir::StringExpression::NullableLocalAssumeNonNull(_) => {
+            Err(malformed_mir("runtime string expression is not a constant"))
+        }
+        mir::StringExpression::Static(_) => {
             Err(malformed_mir("runtime string expression is not a constant"))
         }
         mir::StringExpression::Property { .. } => {
@@ -2582,6 +2736,17 @@ fn property_definition(
         .get(property.index)
         .filter(|definition| definition.id == property)
         .ok_or_else(|| malformed_mir(format!("property{} does not exist", property.index)))
+}
+
+fn static_definition(
+    program: &mir::Program,
+    id: mir::StaticId,
+) -> Result<&mir::StaticProperty, BackendError> {
+    program
+        .statics
+        .get(id.0)
+        .filter(|property| property.id == id)
+        .ok_or_else(|| malformed_mir(format!("static{} does not exist", id.0)))
 }
 
 fn lower_property_address(

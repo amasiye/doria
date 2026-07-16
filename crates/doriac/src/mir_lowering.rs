@@ -15,11 +15,14 @@ struct FunctionSignature {
     parameter_types: Vec<mir::Type>,
     parameter_transfers: Vec<bool>,
     parameter_owns: Vec<bool>,
+    method_class: Option<ClassId>,
+    receiver_mode: Option<mir::ReceiverMode>,
 }
 
 #[derive(Clone, Copy)]
 struct CallableDecl<'a> {
     function: &'a hir::FunctionDecl,
+    class: Option<ClassId>,
     receiver: Option<ClassId>,
 }
 
@@ -30,6 +33,57 @@ pub fn lower_program(program: &hir::Program) -> DiagnosticResult<mir::Program> {
         .iter()
         .map(|class| (class.name.clone(), class.id))
         .collect::<HashMap<_, _>>();
+    let mut static_ids = HashMap::new();
+    let mut statics = Vec::new();
+    for class in program.items.iter().filter_map(|item| match item {
+        hir::Item::Class(class) => Some(class),
+        _ => None,
+    }) {
+        let class_id = class_ids[&class.name];
+        for property in class.members.iter().filter_map(|member| match member {
+            hir::ClassMember::Property(property) if property.is_static => Some(property),
+            _ => None,
+        }) {
+            let id = mir::StaticId(statics.len());
+            let ty = mir_type_ref(&property.ty, &class_ids).ok_or_else(|| {
+                vec![unsupported(
+                    property.span,
+                    format!(
+                        "static property `{}::{}` has a type not supported by native compilation",
+                        class.name, property.name
+                    ),
+                )]
+            })?;
+            let key = crate::const_eval::ConstKey::Static {
+                class_name: class.name.clone(),
+                name: property.name.clone(),
+            };
+            let evaluated = program
+                .semantic_info
+                .const_evaluation
+                .values
+                .get(&key)
+                .ok_or_else(|| {
+                    vec![unsupported(
+                        property.span,
+                        format!(
+                            "static property `{}::{}` has no evaluated initializer",
+                            class.name, property.name
+                        ),
+                    )]
+                })?;
+            let initializer = lower_static_value(&evaluated.value, ty, property.span)?;
+            static_ids.insert((class_id, property.name.clone()), id);
+            statics.push(mir::StaticProperty {
+                id,
+                class: class_id,
+                name: property.name.clone(),
+                ty,
+                writable: property.writable,
+                initializer,
+            });
+        }
+    }
     let property_initializers = program
         .items
         .iter()
@@ -40,22 +94,26 @@ pub fn lower_program(program: &hir::Program) -> DiagnosticResult<mir::Program> {
         .flat_map(|class| {
             let class_id = class_ids[&class.name];
             class.members.iter().filter_map(move |member| match member {
-                hir::ClassMember::Property(property) => property.initializer.clone().map(|value| {
-                    let property_id = program
-                        .semantic_info
-                        .classes
-                        .iter()
-                        .find(|info| info.id == class_id)
-                        .and_then(|info| {
-                            info.properties
-                                .iter()
-                                .find(|info| info.name == property.name)
-                        })
-                        .expect("checked property has a stable identity")
-                        .id;
-                    (property_id, value)
-                }),
-                _ => None,
+                hir::ClassMember::Property(property) if !property.is_static => {
+                    property.initializer.clone().map(|value| {
+                        let property_id = program
+                            .semantic_info
+                            .classes
+                            .iter()
+                            .find(|info| info.id == class_id)
+                            .and_then(|info| {
+                                info.properties
+                                    .iter()
+                                    .find(|info| info.name == property.name)
+                            })
+                            .expect("checked property has a stable identity")
+                            .id;
+                        (property_id, value)
+                    })
+                }
+                hir::ClassMember::Property(_)
+                | hir::ClassMember::Method(_)
+                | hir::ClassMember::Constant(_) => None,
             })
         })
         .collect::<HashMap<_, _>>();
@@ -117,6 +175,7 @@ pub fn lower_program(program: &hir::Program) -> DiagnosticResult<mir::Program> {
         match item {
             hir::Item::Function(function) => declarations.push(CallableDecl {
                 function,
+                class: None,
                 receiver: None,
             }),
             hir::Item::Class(class_decl) => {
@@ -125,12 +184,11 @@ pub fn lower_program(program: &hir::Program) -> DiagnosticResult<mir::Program> {
                     .expect("checked class has a stable identity");
                 for member in &class_decl.members {
                     if let hir::ClassMember::Method(method) = member {
-                        if matches!(method.name.as_str(), "__construct" | "__destruct") {
-                            declarations.push(CallableDecl {
-                                function: method,
-                                receiver: Some(class),
-                            });
-                        }
+                        declarations.push(CallableDecl {
+                            function: method,
+                            class: Some(class),
+                            receiver: (!method.is_static).then_some(class),
+                        });
                     }
                 }
             }
@@ -140,6 +198,7 @@ pub fn lower_program(program: &hir::Program) -> DiagnosticResult<mir::Program> {
                     "top-level executable statements are not supported by native compilation",
                 )]);
             }
+            hir::Item::Constant(_) => {}
         }
     }
 
@@ -173,19 +232,26 @@ pub fn lower_program(program: &hir::Program) -> DiagnosticResult<mir::Program> {
                 ),
             )]);
         }
-        let signature = collect_function_signature(
+        let mut signature = collect_function_signature(
             function,
             mir::FunctionId(index),
             &class_ids,
-            declaration.receiver.is_some(),
+            matches!(function.name.as_str(), "__construct" | "__destruct"),
         )?;
+        signature.method_class = declaration.class;
+        signature.receiver_mode = declaration.receiver.map(|_| {
+            if function.writable_this {
+                mir::ReceiverMode::Writable
+            } else {
+                mir::ReceiverMode::Readonly
+            }
+        });
         if declaration.receiver.is_none() {
             signatures.insert(function.name.clone(), signature.clone());
         }
         callable_signatures.push(signature);
     }
-    let lifecycle_signatures =
-        callable_signatures_by_lifecycle(&declarations, &callable_signatures);
+    let method_signatures = callable_signatures_by_method(&declarations, &callable_signatures);
 
     let entry = signatures
         .get("main")
@@ -197,15 +263,17 @@ pub fn lower_program(program: &hir::Program) -> DiagnosticResult<mir::Program> {
         .map(|(declaration, signature)| {
             let inputs = FunctionLoweringInputs {
                 signatures: &signatures,
-                lifecycle_signatures: &lifecycle_signatures,
+                method_signatures: &method_signatures,
                 semantic_info: &program.semantic_info,
                 property_initializers: &property_initializers,
                 constructor_body_initializers: &constructor_body_initializers,
+                static_ids: &static_ids,
             };
             lower_function(
                 declaration.function,
                 signature,
                 inputs,
+                declaration.class,
                 declaration.receiver,
             )
         })
@@ -266,9 +334,43 @@ pub fn lower_program(program: &hir::Program) -> DiagnosticResult<mir::Program> {
 
     Ok(mir::Program {
         classes,
+        statics,
         functions,
         entry,
     })
+}
+
+fn lower_static_value(
+    value: &crate::const_eval::ConstValue,
+    ty: mir::Type,
+    span: Span,
+) -> DiagnosticResult<mir::StaticValue> {
+    match (value, ty) {
+        (
+            crate::const_eval::ConstValue::Integer(value),
+            mir::Type::Scalar(mir::ScalarType::Integer(expected)),
+        ) if value.ty == expected => {
+            Ok(mir::StaticValue::Scalar(mir::ScalarValue::Integer(*value)))
+        }
+        (
+            crate::const_eval::ConstValue::Float(value),
+            mir::Type::Scalar(mir::ScalarType::Float(expected)),
+        ) if value.ty == expected => Ok(mir::StaticValue::Scalar(mir::ScalarValue::Float(*value))),
+        (crate::const_eval::ConstValue::Bool(value), mir::Type::Scalar(mir::ScalarType::Bool)) => {
+            Ok(mir::StaticValue::Scalar(mir::ScalarValue::Bool(*value)))
+        }
+        (
+            crate::const_eval::ConstValue::String(value),
+            mir::Type::String | mir::Type::NullableString,
+        ) => Ok(mir::StaticValue::String(value.clone())),
+        (crate::const_eval::ConstValue::Null, mir::Type::NullableString) => {
+            Ok(mir::StaticValue::Null)
+        }
+        _ => Err(vec![unsupported(
+            span,
+            "evaluated static initializer does not match its native type",
+        )]),
+    }
 }
 
 fn collect_function_signature(
@@ -368,10 +470,12 @@ fn collect_function_signature(
         parameter_types,
         parameter_transfers,
         parameter_owns,
+        method_class: None,
+        receiver_mode: None,
     })
 }
 
-fn callable_signatures_by_lifecycle(
+fn callable_signatures_by_method(
     declarations: &[CallableDecl<'_>],
     signatures: &[FunctionSignature],
 ) -> HashMap<(ClassId, String), FunctionSignature> {
@@ -379,7 +483,7 @@ fn callable_signatures_by_lifecycle(
         .iter()
         .zip(signatures.iter())
         .filter_map(|(declaration, signature)| {
-            declaration.receiver.map(|class| {
+            declaration.class.map(|class| {
                 (
                     (class, declaration.function.name.clone()),
                     signature.clone(),
@@ -446,30 +550,34 @@ fn is_nullable_string_type(ty: &crate::types::TypeRef) -> bool {
 
 struct FunctionLoweringInputs<'a> {
     signatures: &'a HashMap<String, FunctionSignature>,
-    lifecycle_signatures: &'a HashMap<(ClassId, String), FunctionSignature>,
+    method_signatures: &'a HashMap<(ClassId, String), FunctionSignature>,
     semantic_info: &'a SemanticInfo,
     property_initializers: &'a HashMap<crate::class_layout::PropertyId, hir::Expr>,
     constructor_body_initializers: &'a HashSet<crate::class_layout::PropertyId>,
+    static_ids: &'a HashMap<(ClassId, String), mir::StaticId>,
 }
 
 fn lower_function(
     function: &hir::FunctionDecl,
     signature: FunctionSignature,
     inputs: FunctionLoweringInputs<'_>,
+    class: Option<ClassId>,
     receiver: Option<ClassId>,
 ) -> DiagnosticResult<mir::Function> {
     let mut context = LoweringContext::new(
         inputs.signatures.clone(),
-        inputs.lifecycle_signatures.clone(),
+        inputs.method_signatures.clone(),
         inputs.semantic_info,
         inputs.property_initializers.clone(),
         inputs.constructor_body_initializers.clone(),
+        inputs.static_ids.clone(),
     );
     let mut params = Vec::new();
     if let Some(class) = receiver {
+        let writable = matches!(signature.receiver_mode, Some(mir::ReceiverMode::Writable));
         params.push(context.declare_user_local_owned(
             "this",
-            false,
+            writable,
             mir::Type::Class(class),
             false,
         ));
@@ -496,16 +604,43 @@ fn lower_function(
 
     Ok(mir::Function {
         id: signature.id,
-        name: receiver.map_or_else(
-            || function.name.clone(),
-            |class| format!("class#{}::{}", class.0, function.name),
-        ),
+        name: inputs_method_name(function, class, inputs.semantic_info),
+        method: class.map(|class| mir::MethodIdentity {
+            class,
+            name: function.name.clone(),
+        }),
+        receiver_mode: receiver.map(|_| {
+            if function.writable_this {
+                mir::ReceiverMode::Writable
+            } else {
+                mir::ReceiverMode::Readonly
+            }
+        }),
         params,
         return_type: signature.return_type,
         locals,
         blocks,
         entry_block: mir::BlockId(0),
     })
+}
+
+fn inputs_method_name(
+    function: &hir::FunctionDecl,
+    class: Option<ClassId>,
+    semantic_info: &crate::semantics::SemanticInfo,
+) -> String {
+    class.map_or_else(
+        || function.name.clone(),
+        |class| {
+            let class_name = semantic_info
+                .classes
+                .iter()
+                .find(|info| info.id == class)
+                .map(|info| info.name.as_str())
+                .expect("checked method class has semantic metadata");
+            format!("{class_name}::{}", function.name)
+        },
+    )
 }
 
 fn lower_function_body(
@@ -571,6 +706,48 @@ fn lower_statement_sequence(
                 lower_loop_control(*span, LoopControl::Continue, context)?;
             }
             hir::Stmt::Expr { expr, span } => {
+                if let hir::Expr::MethodCall {
+                    object,
+                    method,
+                    args,
+                    span: call_span,
+                } = expr
+                {
+                    let (signature, args) =
+                        lower_instance_method_call(object, method, args, *call_span, context)?;
+                    if signature.return_type != mir::ReturnType::Void {
+                        return Err(vec![unsupported(
+                            *span,
+                            "only void method calls can be used as expression statements",
+                        )]);
+                    }
+                    context.push_statement(mir::Statement::CallVoid {
+                        function: signature.id,
+                        args,
+                    });
+                    continue;
+                }
+                if let hir::Expr::StaticCall {
+                    class_name,
+                    method,
+                    args,
+                    span: call_span,
+                } = expr
+                {
+                    let (signature, args) =
+                        lower_static_method_call(class_name, method, args, *call_span, context)?;
+                    if signature.return_type != mir::ReturnType::Void {
+                        return Err(vec![unsupported(
+                            *span,
+                            "only void static calls can be used as expression statements",
+                        )]);
+                    }
+                    context.push_statement(mir::Statement::CallVoid {
+                        function: signature.id,
+                        args,
+                    });
+                    continue;
+                }
                 if let hir::Expr::FunctionCall {
                     name,
                     args,
@@ -1035,6 +1212,7 @@ fn expression_may_observe_this_property(expr: &hir::Expr, property: &str) -> boo
         }
         hir::Expr::Variable { .. }
         | hir::Expr::Identifier { .. }
+        | hir::Expr::StaticMember { .. }
         | hir::Expr::String { .. }
         | hir::Expr::Int { .. }
         | hir::Expr::Float { .. }
@@ -1111,10 +1289,11 @@ struct LoopTargets {
 
 struct LoweringContext<'semantic> {
     signatures: HashMap<String, FunctionSignature>,
-    lifecycle_signatures: HashMap<(ClassId, String), FunctionSignature>,
+    method_signatures: HashMap<(ClassId, String), FunctionSignature>,
     semantic_info: &'semantic SemanticInfo,
     property_initializers: HashMap<crate::class_layout::PropertyId, hir::Expr>,
     constructor_body_initializers: HashSet<crate::class_layout::PropertyId>,
+    static_ids: HashMap<(ClassId, String), mir::StaticId>,
     locals: Vec<mir::Local>,
     local_scopes: Vec<HashMap<String, mir::LocalId>>,
     scope_owned_locals: Vec<Vec<(mir::LocalId, ClassId)>>,
@@ -1128,17 +1307,19 @@ struct LoweringContext<'semantic> {
 impl<'semantic> LoweringContext<'semantic> {
     fn new(
         signatures: HashMap<String, FunctionSignature>,
-        lifecycle_signatures: HashMap<(ClassId, String), FunctionSignature>,
+        method_signatures: HashMap<(ClassId, String), FunctionSignature>,
         semantic_info: &'semantic SemanticInfo,
         property_initializers: HashMap<crate::class_layout::PropertyId, hir::Expr>,
         constructor_body_initializers: HashSet<crate::class_layout::PropertyId>,
+        static_ids: HashMap<(ClassId, String), mir::StaticId>,
     ) -> Self {
         Self {
             signatures,
-            lifecycle_signatures,
+            method_signatures,
             semantic_info,
             property_initializers,
             constructor_body_initializers,
+            static_ids,
             locals: Vec::new(),
             local_scopes: vec![HashMap::new()],
             scope_owned_locals: vec![Vec::new()],
@@ -1405,9 +1586,83 @@ impl<'semantic> LoweringContext<'semantic> {
     }
 
     fn lookup_lifecycle(&self, class: ClassId, name: &str) -> Option<FunctionSignature> {
-        self.lifecycle_signatures
+        self.method_signatures
             .get(&(class, name.to_string()))
             .cloned()
+    }
+
+    fn lookup_method(
+        &self,
+        class: ClassId,
+        name: &str,
+        span: Span,
+    ) -> DiagnosticResult<FunctionSignature> {
+        self.method_signatures
+            .get(&(class, name.to_string()))
+            .cloned()
+            .ok_or_else(|| {
+                vec![unsupported(
+                    span,
+                    format!("call references unknown method `class#{}::{name}`", class.0),
+                )]
+            })
+    }
+
+    fn constant_value(&self, expr: &hir::Expr) -> Option<&crate::const_eval::ConstValue> {
+        let key = match expr {
+            hir::Expr::Identifier { name, .. } => {
+                crate::const_eval::ConstKey::TopLevel(name.clone())
+            }
+            hir::Expr::StaticMember {
+                class_name, member, ..
+            } => crate::const_eval::ConstKey::Class {
+                class_name: class_name.clone(),
+                name: member.clone(),
+            },
+            hir::Expr::Grouped { expr, .. } => return self.constant_value(expr),
+            _ => return None,
+        };
+        self.semantic_info
+            .const_evaluation
+            .values
+            .get(&key)
+            .map(|value| &value.value)
+    }
+
+    fn static_property(
+        &self,
+        class_name: &str,
+        member: &str,
+        span: Span,
+    ) -> DiagnosticResult<(mir::StaticId, mir::Type)> {
+        let class = self
+            .class_id_for_name(class_name)
+            .ok_or_else(|| vec![unsupported(span, format!("unknown class `{class_name}`"))])?;
+        let id = self
+            .static_ids
+            .get(&(class, member.to_string()))
+            .copied()
+            .ok_or_else(|| {
+                vec![unsupported(
+                    span,
+                    format!("unknown static property `{class_name}::{member}`"),
+                )]
+            })?;
+        let key = crate::const_eval::ConstKey::Static {
+            class_name: class_name.to_string(),
+            name: member.to_string(),
+        };
+        let ty_ref = &self
+            .semantic_info
+            .const_evaluation
+            .values
+            .get(&key)
+            .expect("checked static has evaluated metadata")
+            .ty;
+        let ty = self
+            .native_type_ref(ty_ref)
+            .expect("checked static has a native type");
+        Ok((id, ty))
     }
 
     fn native_type_ref(&self, ty: &crate::types::TypeRef) -> Option<mir::Type> {
@@ -1588,6 +1843,14 @@ fn inferred_class_type(expr: &hir::Expr, context: &LoweringContext) -> Option<Cl
             };
             Some(class)
         }
+        hir::Expr::This { span } => {
+            let mir::Type::Class(class) =
+                context.local_type(context.lookup_local("this", *span).ok()?)
+            else {
+                return None;
+            };
+            Some(class)
+        }
         hir::Expr::FunctionCall { name, span, .. } => {
             let mir::ReturnType::Value(mir::Type::Class(class)) =
                 context.lookup_function(name, *span).ok()?.return_type
@@ -1596,6 +1859,45 @@ fn inferred_class_type(expr: &hir::Expr, context: &LoweringContext) -> Option<Cl
             };
             Some(class)
         }
+        hir::Expr::MethodCall {
+            object,
+            method,
+            span,
+            ..
+        } => {
+            let receiver = inferred_class_type(object, context)?;
+            let mir::ReturnType::Value(mir::Type::Class(class)) = context
+                .lookup_method(receiver, method, *span)
+                .ok()?
+                .return_type
+            else {
+                return None;
+            };
+            Some(class)
+        }
+        hir::Expr::StaticCall {
+            class_name,
+            method,
+            span,
+            ..
+        } => {
+            let declaring_class = context.class_id_for_name(class_name)?;
+            let mir::ReturnType::Value(mir::Type::Class(class)) = context
+                .lookup_method(declaring_class, method, *span)
+                .ok()?
+                .return_type
+            else {
+                return None;
+            };
+            Some(class)
+        }
+        hir::Expr::PropertyAccess { .. } => property_access_type(expr, context)
+            .ok()
+            .flatten()
+            .and_then(|ty| match ty {
+                mir::Type::Class(class) => Some(class),
+                _ => None,
+            }),
         _ => None,
     }
 }
@@ -1604,17 +1906,55 @@ fn is_nullable_string_initializer(expr: &hir::Expr, context: &LoweringContext) -
     match expr {
         hir::Expr::Null { .. } => true,
         hir::Expr::Grouped { expr, .. } => is_nullable_string_initializer(expr, context),
+        _ if matches!(
+            context.constant_value(expr),
+            Some(crate::const_eval::ConstValue::String(_) | crate::const_eval::ConstValue::Null)
+        ) =>
+        {
+            true
+        }
         hir::Expr::Variable { name, span } => context
             .lookup_local(name, *span)
             .is_ok_and(|local| context.local_type(local) == mir::Type::NullableString),
         hir::Expr::PropertyAccess { .. } => lower_property_place(expr, context)
             .is_ok_and(|(_, _, ty)| ty == mir::Type::NullableString),
+        hir::Expr::StaticMember {
+            class_name,
+            member,
+            span,
+        } => context
+            .static_property(class_name, member, *span)
+            .is_ok_and(|(_, ty)| ty == mir::Type::NullableString),
         hir::Expr::FunctionCall { name, span, .. } if name == "read_line" => true,
         hir::Expr::FunctionCall { name, span, .. } => {
             context.lookup_function(name, *span).is_ok_and(|signature| {
                 signature.return_type == mir::ReturnType::Value(mir::Type::NullableString)
             })
         }
+        hir::Expr::MethodCall {
+            object,
+            method,
+            span,
+            ..
+        } => inferred_class_type(object, context).is_some_and(|class| {
+            context
+                .lookup_method(class, method, *span)
+                .is_ok_and(|signature| {
+                    signature.return_type == mir::ReturnType::Value(mir::Type::NullableString)
+                })
+        }),
+        hir::Expr::StaticCall {
+            class_name,
+            method,
+            span,
+            ..
+        } => context.class_id_for_name(class_name).is_some_and(|class| {
+            context
+                .lookup_method(class, method, *span)
+                .is_ok_and(|signature| {
+                    signature.return_type == mir::ReturnType::Value(mir::Type::NullableString)
+                })
+        }),
         _ => false,
     }
 }
@@ -1623,6 +1963,13 @@ fn is_string_local_initializer(expr: &hir::Expr, context: &LoweringContext) -> b
     match expr {
         hir::Expr::String { .. } | hir::Expr::InterpolatedString { .. } => true,
         hir::Expr::Grouped { expr, .. } => is_string_local_initializer(expr, context),
+        _ if matches!(
+            context.constant_value(expr),
+            Some(crate::const_eval::ConstValue::String(_))
+        ) =>
+        {
+            true
+        }
         hir::Expr::Binary {
             op: hir::BinaryOp::Concat,
             ..
@@ -1633,6 +1980,13 @@ fn is_string_local_initializer(expr: &hir::Expr, context: &LoweringContext) -> b
         hir::Expr::PropertyAccess { .. } => {
             lower_property_place(expr, context).is_ok_and(|(_, _, ty)| ty == mir::Type::String)
         }
+        hir::Expr::StaticMember {
+            class_name,
+            member,
+            span,
+        } => context
+            .static_property(class_name, member, *span)
+            .is_ok_and(|(_, ty)| ty == mir::Type::String),
         hir::Expr::FunctionCall { name, .. }
             if matches!(name.as_str(), "sprintf" | "read_file") =>
         {
@@ -1643,6 +1997,30 @@ fn is_string_local_initializer(expr: &hir::Expr, context: &LoweringContext) -> b
                 signature.return_type == mir::ReturnType::Value(mir::Type::String)
             })
         }
+        hir::Expr::MethodCall {
+            object,
+            method,
+            span,
+            ..
+        } => inferred_class_type(object, context).is_some_and(|class| {
+            context
+                .lookup_method(class, method, *span)
+                .is_ok_and(|signature| {
+                    signature.return_type == mir::ReturnType::Value(mir::Type::String)
+                })
+        }),
+        hir::Expr::StaticCall {
+            class_name,
+            method,
+            span,
+            ..
+        } => context.class_id_for_name(class_name).is_some_and(|class| {
+            context
+                .lookup_method(class, method, *span)
+                .is_ok_and(|signature| {
+                    signature.return_type == mir::ReturnType::Value(mir::Type::String)
+                })
+        }),
         _ => false,
     }
 }
@@ -1664,6 +2042,32 @@ fn lower_assignment(
     assignment: &hir::Assignment,
     context: &mut LoweringContext,
 ) -> DiagnosticResult<()> {
+    if let hir::Expr::StaticMember {
+        class_name,
+        member,
+        span,
+    } = &assignment.target
+    {
+        let (target, ty) = context.static_property(class_name, member, *span)?;
+        let value = match (assignment.op.clone(), ty) {
+            (hir::AssignOp::Assign, _) => lower_rvalue_as_expected(&assignment.value, ty, context)?,
+            (op, mir::Type::Scalar(scalar)) => mir::Rvalue::Value(lower_static_compound_value(
+                target,
+                scalar,
+                &op,
+                &assignment.value,
+                context,
+            )?),
+            _ => {
+                return Err(vec![unsupported(
+                    assignment.span,
+                    "compound assignment is invalid for this static property type",
+                )])
+            }
+        };
+        context.push_statement(mir::Statement::AssignStatic { target, value });
+        return Ok(());
+    }
     if matches!(
         &assignment.target,
         hir::Expr::PropertyAccess { .. } | hir::Expr::Grouped { .. }
@@ -1851,6 +2255,9 @@ fn lower_string_expression(
     expr: &hir::Expr,
     context: &LoweringContext,
 ) -> DiagnosticResult<mir::StringExpression> {
+    if let Some(crate::const_eval::ConstValue::String(value)) = context.constant_value(expr) {
+        return Ok(mir::StringExpression::Literal(value.clone()));
+    }
     match expr {
         hir::Expr::String { value, .. } => Ok(mir::StringExpression::Literal(value.clone())),
         hir::Expr::Variable { name, span } => {
@@ -1870,6 +2277,17 @@ fn lower_string_expression(
         hir::Expr::PropertyAccess { .. } => {
             let (object, property) = lower_property_operand(expr, mir::Type::String, context)?;
             Ok(mir::StringExpression::Property { object, property })
+        }
+        hir::Expr::StaticMember {
+            class_name,
+            member,
+            span,
+        } => {
+            let (id, ty) = context.static_property(class_name, member, *span)?;
+            if ty != mir::Type::String {
+                return Err(vec![unsupported(*span, "static property is not string")]);
+            }
+            Ok(mir::StringExpression::Static(id))
         }
         hir::Expr::Binary {
             op: hir::BinaryOp::Concat,
@@ -1919,6 +2337,41 @@ fn lower_string_expression(
                 args: lower_call_args(name, args, signature, *span, context)?,
             })
         }
+        hir::Expr::MethodCall {
+            object,
+            method,
+            args,
+            span,
+        } => {
+            let (signature, args) =
+                lower_instance_method_call(object, method, args, *span, context)?;
+            if signature.return_type != mir::ReturnType::Value(mir::Type::String) {
+                return Err(vec![unsupported(*span, "method does not return string")]);
+            }
+            Ok(mir::StringExpression::Call {
+                function: signature.id,
+                args,
+            })
+        }
+        hir::Expr::StaticCall {
+            class_name,
+            method,
+            args,
+            span,
+        } => {
+            let (signature, args) =
+                lower_static_method_call(class_name, method, args, *span, context)?;
+            if signature.return_type != mir::ReturnType::Value(mir::Type::String) {
+                return Err(vec![unsupported(
+                    *span,
+                    "static method does not return string",
+                )]);
+            }
+            Ok(mir::StringExpression::Call {
+                function: signature.id,
+                args,
+            })
+        }
         _ => Err(vec![unsupported(
             expr.span(),
             "this expression cannot be written by `echo` in native compilation",
@@ -1930,6 +2383,20 @@ fn lower_nullable_string_expression(
     expr: &hir::Expr,
     context: &LoweringContext,
 ) -> DiagnosticResult<mir::NullableStringExpression> {
+    if let Some(value) = context.constant_value(expr) {
+        return match value {
+            crate::const_eval::ConstValue::String(value) => {
+                Ok(mir::NullableStringExpression::String(
+                    mir::StringExpression::Literal(value.clone()),
+                ))
+            }
+            crate::const_eval::ConstValue::Null => Ok(mir::NullableStringExpression::Null),
+            _ => Err(vec![unsupported(
+                expr.span(),
+                "constant is not a nullable string",
+            )]),
+        };
+    }
     match expr {
         hir::Expr::Null { .. } => Ok(mir::NullableStringExpression::Null),
         hir::Expr::Grouped { expr, .. } => lower_nullable_string_expression(expr, context),
@@ -1937,6 +2404,17 @@ fn lower_nullable_string_expression(
             let (object, property) =
                 lower_property_operand(expr, mir::Type::NullableString, context)?;
             Ok(mir::NullableStringExpression::Property { object, property })
+        }
+        hir::Expr::StaticMember {
+            class_name,
+            member,
+            span,
+        } => {
+            let (id, ty) = context.static_property(class_name, member, *span)?;
+            if ty != mir::Type::NullableString {
+                return Err(vec![unsupported(*span, "static property is not ?string")]);
+            }
+            Ok(mir::NullableStringExpression::Static(id))
         }
         hir::Expr::Variable { name, span } => {
             let local = context.lookup_local(name, *span)?;
@@ -1968,6 +2446,41 @@ fn lower_nullable_string_expression(
             Ok(mir::NullableStringExpression::Call {
                 function: signature.id,
                 args: lower_call_args(name, args, signature, *span, context)?,
+            })
+        }
+        hir::Expr::MethodCall {
+            object,
+            method,
+            args,
+            span,
+        } => {
+            let (signature, args) =
+                lower_instance_method_call(object, method, args, *span, context)?;
+            if signature.return_type != mir::ReturnType::Value(mir::Type::NullableString) {
+                return Err(vec![unsupported(*span, "method does not return ?string")]);
+            }
+            Ok(mir::NullableStringExpression::Call {
+                function: signature.id,
+                args,
+            })
+        }
+        hir::Expr::StaticCall {
+            class_name,
+            method,
+            args,
+            span,
+        } => {
+            let (signature, args) =
+                lower_static_method_call(class_name, method, args, *span, context)?;
+            if signature.return_type != mir::ReturnType::Value(mir::Type::NullableString) {
+                return Err(vec![unsupported(
+                    *span,
+                    "static method does not return ?string",
+                )]);
+            }
+            Ok(mir::NullableStringExpression::Call {
+                function: signature.id,
+                args,
             })
         }
         _ if is_string_local_initializer(expr, context) => Ok(
@@ -2020,6 +2533,35 @@ fn lower_display_string_expression(
     expr: &hir::Expr,
     context: &LoweringContext,
 ) -> DiagnosticResult<mir::StringExpression> {
+    if let Some(class) = inferred_class_type(expr, context) {
+        let class_info = context.class_info(class).ok_or_else(|| {
+            vec![unsupported(
+                expr.span(),
+                format!("unknown native class#{}", class.0),
+            )]
+        })?;
+        if !class_info.implements_displayable {
+            return Err(vec![unsupported(
+                expr.span(),
+                format!(
+                    "class `{}` does not implement `Displayable`",
+                    class_info.name
+                ),
+            )]);
+        }
+        let (signature, args) =
+            lower_instance_method_call(expr, "toString", &[], expr.span(), context)?;
+        if signature.return_type != mir::ReturnType::Value(mir::Type::String) {
+            return Err(vec![unsupported(
+                expr.span(),
+                "`Displayable::toString` does not return string",
+            )]);
+        }
+        return Ok(mir::StringExpression::Call {
+            function: signature.id,
+            args,
+        });
+    }
     if let Some(property_type) = property_access_type(expr, context)? {
         return match property_type {
             mir::Type::String => lower_string_expression(expr, context),
@@ -2104,9 +2646,7 @@ fn append_string_concat_parts(
             } else if context.local_type(local) == mir::Type::NullableString {
                 parts.push(mir::StringExpression::NullableLocalAssumeNonNull(local));
             } else {
-                parts.push(mir::StringExpression::Display(lower_value_expression(
-                    expr, context,
-                )?));
+                parts.push(lower_display_string_expression(expr, context)?);
             }
             Ok(())
         }
@@ -2215,6 +2755,59 @@ fn lower_call_args_with_ownership(
         .collect()
 }
 
+fn lower_instance_method_call(
+    object: &hir::Expr,
+    method: &str,
+    args: &[hir::Expr],
+    span: Span,
+    context: &LoweringContext,
+) -> DiagnosticResult<(FunctionSignature, Vec<mir::Rvalue>)> {
+    let class = inferred_class_type(object, context).ok_or_else(|| {
+        vec![unsupported(
+            object.span(),
+            "method receiver does not have a concrete native class type",
+        )]
+    })?;
+    let signature = context.lookup_method(class, method, span)?;
+    if signature.receiver_mode.is_none() {
+        return Err(vec![unsupported(
+            span,
+            format!(
+                "static method `class#{}::{method}` has no receiver",
+                class.0
+            ),
+        )]);
+    }
+    let mut lowered =
+        lower_call_args_with_ownership(method, args, signature.clone(), span, context)?;
+    lowered.insert(
+        0,
+        mir::Rvalue::Class(lower_class_expression(object, class, false, context)?),
+    );
+    Ok((signature, lowered))
+}
+
+fn lower_static_method_call(
+    class_name: &str,
+    method: &str,
+    args: &[hir::Expr],
+    span: Span,
+    context: &LoweringContext,
+) -> DiagnosticResult<(FunctionSignature, Vec<mir::Rvalue>)> {
+    let class = context
+        .class_id_for_name(class_name)
+        .ok_or_else(|| vec![unsupported(span, format!("unknown class `{class_name}`"))])?;
+    let signature = context.lookup_method(class, method, span)?;
+    if signature.receiver_mode.is_some() {
+        return Err(vec![unsupported(
+            span,
+            format!("instance method `{class_name}::{method}` requires a receiver"),
+        )]);
+    }
+    let lowered = lower_call_args_with_ownership(method, args, signature.clone(), span, context)?;
+    Ok((signature, lowered))
+}
+
 fn lower_return(
     expr: Option<&hir::Expr>,
     span: Span,
@@ -2290,6 +2883,11 @@ fn lower_condition(
     expr: &hir::Expr,
     context: &LoweringContext,
 ) -> DiagnosticResult<mir::BoolExpression> {
+    if let Some(crate::const_eval::ConstValue::Bool(value)) = context.constant_value(expr) {
+        return Ok(mir::BoolExpression::Use {
+            operand: mir::Operand::Scalar(mir::ScalarValue::Bool(*value)),
+        });
+    }
     match expr {
         hir::Expr::Bool { value, .. } => Ok(mir::BoolExpression::Use {
             operand: mir::Operand::Scalar(mir::ScalarValue::Bool(*value)),
@@ -2312,6 +2910,19 @@ fn lower_condition(
                 lower_property_operand(expr, mir::Type::Scalar(mir::ScalarType::Bool), context)?;
             Ok(mir::BoolExpression::Use {
                 operand: mir::Operand::Property { object, property },
+            })
+        }
+        hir::Expr::StaticMember {
+            class_name,
+            member,
+            span,
+        } => {
+            let (id, ty) = context.static_property(class_name, member, *span)?;
+            if ty != mir::Type::Scalar(mir::ScalarType::Bool) {
+                return Err(vec![unsupported(*span, "static property is not bool")]);
+            }
+            Ok(mir::BoolExpression::Use {
+                operand: mir::Operand::Static(id),
             })
         }
         hir::Expr::Unary {
@@ -2381,10 +2992,45 @@ fn lower_condition(
                 args: lower_call_args(name, args, signature, *span, context)?,
             })
         }
-        hir::Expr::MethodCall { .. } | hir::Expr::StaticCall { .. } => Err(vec![unsupported(
-            expr.span(),
-            "method calls in conditions are not supported by native compilation",
-        )]),
+        hir::Expr::MethodCall {
+            object,
+            method,
+            args,
+            span,
+        } => {
+            let (signature, args) =
+                lower_instance_method_call(object, method, args, *span, context)?;
+            if signature.return_type
+                != mir::ReturnType::Value(mir::Type::Scalar(mir::ScalarType::Bool))
+            {
+                return Err(vec![unsupported(*span, "method does not return bool")]);
+            }
+            Ok(mir::BoolExpression::Call {
+                function: signature.id,
+                args,
+            })
+        }
+        hir::Expr::StaticCall {
+            class_name,
+            method,
+            args,
+            span,
+        } => {
+            let (signature, args) =
+                lower_static_method_call(class_name, method, args, *span, context)?;
+            if signature.return_type
+                != mir::ReturnType::Value(mir::Type::Scalar(mir::ScalarType::Bool))
+            {
+                return Err(vec![unsupported(
+                    *span,
+                    "static method does not return bool",
+                )]);
+            }
+            Ok(mir::BoolExpression::Call {
+                function: signature.id,
+                args,
+            })
+        }
         hir::Expr::Int { .. } => Err(vec![unsupported(
             expr.span(),
             "integer truthiness is not supported; conditions require a `bool` value",
@@ -2485,6 +3131,23 @@ fn lower_class_expression(
                 transfer,
             })
         }
+        hir::Expr::This { span } => {
+            if transfer {
+                return Err(vec![unsupported(*span, "`$this` cannot be given away")]);
+            }
+            let local = context.lookup_local("this", *span)?;
+            if context.local_type(local) != mir::Type::Class(expected) {
+                return Err(vec![unsupported(
+                    *span,
+                    "`$this` does not have the expected class type",
+                )]);
+            }
+            Ok(mir::ClassExpression::Local {
+                class: expected,
+                local,
+                transfer: false,
+            })
+        }
         hir::Expr::PropertyAccess { span, .. } => {
             if transfer {
                 return Err(vec![unsupported(
@@ -2551,6 +3214,46 @@ fn lower_class_expression(
                 class: expected,
                 function: signature.id,
                 args: lower_call_args_with_ownership(name, args, signature, *span, context)?,
+            })
+        }
+        hir::Expr::MethodCall {
+            object,
+            method,
+            args,
+            span,
+        } => {
+            let (signature, args) =
+                lower_instance_method_call(object, method, args, *span, context)?;
+            if signature.return_type != mir::ReturnType::Value(mir::Type::Class(expected)) {
+                return Err(vec![unsupported(
+                    *span,
+                    "method does not return expected class",
+                )]);
+            }
+            Ok(mir::ClassExpression::Call {
+                class: expected,
+                function: signature.id,
+                args,
+            })
+        }
+        hir::Expr::StaticCall {
+            class_name,
+            method,
+            args,
+            span,
+        } => {
+            let (signature, args) =
+                lower_static_method_call(class_name, method, args, *span, context)?;
+            if signature.return_type != mir::ReturnType::Value(mir::Type::Class(expected)) {
+                return Err(vec![unsupported(
+                    *span,
+                    "static method does not return expected class",
+                )]);
+            }
+            Ok(mir::ClassExpression::Call {
+                class: expected,
+                function: signature.id,
+                args,
             })
         }
         _ => Err(vec![unsupported(
@@ -2718,6 +3421,9 @@ fn lower_float_expression(
     expr: &hir::Expr,
     context: &LoweringContext,
 ) -> DiagnosticResult<mir::FloatExpression> {
+    if let Some(crate::const_eval::ConstValue::Float(value)) = context.constant_value(expr) {
+        return Ok(mir::FloatExpression::constant(*value));
+    }
     let ty = context.float_type(expr)?;
     match expr {
         hir::Expr::Float { value, .. } => FloatValue::parse_decimal(ty, value)
@@ -2750,6 +3456,23 @@ fn lower_float_expression(
             Ok(mir::FloatExpression::Use {
                 ty,
                 operand: mir::Operand::Property { object, property },
+            })
+        }
+        hir::Expr::StaticMember {
+            class_name,
+            member,
+            span,
+        } => {
+            let (id, static_ty) = context.static_property(class_name, member, *span)?;
+            if static_ty != mir::Type::Scalar(mir::ScalarType::Float(ty)) {
+                return Err(vec![unsupported(
+                    *span,
+                    "static property has another float type",
+                )]);
+            }
+            Ok(mir::FloatExpression::Use {
+                ty,
+                operand: mir::Operand::Static(id),
             })
         }
         hir::Expr::Grouped { expr, .. } => lower_float_expression(expr, context),
@@ -2792,6 +3515,28 @@ fn lower_float_expression(
                 args: lower_call_args(name, args, signature, *span, context)?,
             })
         }
+        hir::Expr::MethodCall {
+            object,
+            method,
+            args,
+            span,
+        } => {
+            let (signature, args) =
+                lower_instance_method_call(object, method, args, *span, context)?;
+            if signature.return_type
+                != mir::ReturnType::Value(mir::Type::Scalar(mir::ScalarType::Float(ty)))
+            {
+                return Err(vec![unsupported(
+                    *span,
+                    "method does not return expected float",
+                )]);
+            }
+            Ok(mir::FloatExpression::Call {
+                ty,
+                function: signature.id,
+                args,
+            })
+        }
         hir::Expr::StaticCall {
             class_name,
             method,
@@ -2809,6 +3554,28 @@ fn lower_float_expression(
                 value: Box::new(lower_integer_expression(value, context)?),
             })
         }
+        hir::Expr::StaticCall {
+            class_name,
+            method,
+            args,
+            span,
+        } => {
+            let (signature, args) =
+                lower_static_method_call(class_name, method, args, *span, context)?;
+            if signature.return_type
+                != mir::ReturnType::Value(mir::Type::Scalar(mir::ScalarType::Float(ty)))
+            {
+                return Err(vec![unsupported(
+                    *span,
+                    "static method does not return expected float",
+                )]);
+            }
+            Ok(mir::FloatExpression::Call {
+                ty,
+                function: signature.id,
+                args,
+            })
+        }
         _ => Err(vec![unsupported(
             expr.span(),
             "this float expression is not supported by native compilation",
@@ -2820,6 +3587,9 @@ fn lower_integer_expression(
     expr: &hir::Expr,
     context: &LoweringContext,
 ) -> DiagnosticResult<mir::IntegerExpression> {
+    if let Some(crate::const_eval::ConstValue::Integer(value)) = context.constant_value(expr) {
+        return Ok(mir::IntegerExpression::constant(*value));
+    }
     if let hir::Expr::FunctionCall { name, span, .. } = expr {
         if context.lookup_function(name, *span)?.return_type == mir::ReturnType::Void {
             return Err(vec![unsupported(
@@ -2856,6 +3626,30 @@ fn lower_integer_expression(
         return Ok(mir::IntegerExpression::Call { ty, function, args });
     }
 
+    if let hir::Expr::MethodCall {
+        object,
+        method,
+        args,
+        span,
+    } = expr
+    {
+        let (signature, args) = lower_instance_method_call(object, method, args, *span, context)?;
+        let ty = context.integer_type(expr)?;
+        if signature.return_type
+            != mir::ReturnType::Value(mir::Type::Scalar(mir::ScalarType::Integer(ty)))
+        {
+            return Err(vec![unsupported(
+                *span,
+                "method has a different return type",
+            )]);
+        }
+        return Ok(mir::IntegerExpression::Call {
+            ty,
+            function: signature.id,
+            args,
+        });
+    }
+
     let ty = context.integer_type(expr)?;
     match expr {
         hir::Expr::Variable { name, span } => {
@@ -2881,6 +3675,23 @@ fn lower_integer_expression(
             Ok(mir::IntegerExpression::Use {
                 ty,
                 operand: mir::Operand::Property { object, property },
+            })
+        }
+        hir::Expr::StaticMember {
+            class_name,
+            member,
+            span,
+        } => {
+            let (id, static_ty) = context.static_property(class_name, member, *span)?;
+            if static_ty != mir::Type::Scalar(mir::ScalarType::Integer(ty)) {
+                return Err(vec![unsupported(
+                    *span,
+                    "static property has another integer type",
+                )]);
+            }
+            Ok(mir::IntegerExpression::Use {
+                ty,
+                operand: mir::Operand::Static(id),
             })
         }
         hir::Expr::Grouped { expr, .. } => {
@@ -2962,6 +3773,28 @@ fn lower_integer_expression(
             Ok(mir::IntegerExpression::Convert {
                 ty,
                 value: Box::new(lower_integer_expression(value, context)?),
+            })
+        }
+        hir::Expr::StaticCall {
+            class_name,
+            method,
+            args,
+            span,
+        } => {
+            let (signature, args) =
+                lower_static_method_call(class_name, method, args, *span, context)?;
+            if signature.return_type
+                != mir::ReturnType::Value(mir::Type::Scalar(mir::ScalarType::Integer(ty)))
+            {
+                return Err(vec![unsupported(
+                    *span,
+                    "static method has a different return type",
+                )]);
+            }
+            Ok(mir::IntegerExpression::Call {
+                ty,
+                function: signature.id,
+                args,
             })
         }
         hir::Expr::Int { .. } => unreachable!("integer literal handled before expression match"),
@@ -3073,6 +3906,62 @@ fn lower_compound_value(
     }
 }
 
+fn lower_static_compound_value(
+    target: mir::StaticId,
+    ty: mir::ScalarType,
+    op: &hir::AssignOp,
+    right: &hir::Expr,
+    context: &LoweringContext,
+) -> DiagnosticResult<mir::ValueExpression> {
+    match ty {
+        mir::ScalarType::Integer(integer) => {
+            let right_span = right.span();
+            let right = lower_integer_expression(right, context)?;
+            ensure_expression_type(&right, integer, right_span)?;
+            Ok(mir::ValueExpression::Integer(
+                mir::IntegerExpression::Binary {
+                    ty: integer,
+                    op: lower_compound_assignment_op(op),
+                    left: Box::new(mir::IntegerExpression::use_operand(
+                        integer,
+                        mir::Operand::Static(target),
+                    )),
+                    right: Box::new(right),
+                },
+            ))
+        }
+        mir::ScalarType::Float(float) => {
+            let right_span = right.span();
+            let right = lower_float_expression(right, context)?;
+            let op = match op {
+                hir::AssignOp::AddAssign => mir::FloatBinaryOp::Add,
+                hir::AssignOp::SubAssign => mir::FloatBinaryOp::Subtract,
+                hir::AssignOp::MulAssign => mir::FloatBinaryOp::Multiply,
+                hir::AssignOp::DivAssign => mir::FloatBinaryOp::Divide,
+                _ => {
+                    return Err(vec![unsupported(
+                        right_span,
+                        "invalid float compound assignment",
+                    )])
+                }
+            };
+            Ok(mir::ValueExpression::Float(mir::FloatExpression::Binary {
+                ty: float,
+                op,
+                left: Box::new(mir::FloatExpression::Use {
+                    ty: float,
+                    operand: mir::Operand::Static(target),
+                }),
+                right: Box::new(right),
+            }))
+        }
+        mir::ScalarType::Bool => Err(vec![unsupported(
+            right.span(),
+            "bool compound assignment is invalid",
+        )]),
+    }
+}
+
 fn local_integer_expression(local: mir::LocalId, ty: IntegerType) -> mir::IntegerExpression {
     mir::IntegerExpression::use_operand(ty, mir::Operand::Local(local))
 }
@@ -3158,6 +4047,7 @@ fn unsupported_int_expr(expr: &hir::Expr) -> Diagnostic {
         hir::Expr::MethodCall { .. } | hir::Expr::StaticCall { .. } => {
             "a method call cannot be used as an integer expression"
         }
+        hir::Expr::StaticMember { .. } => "a static member cannot be used as an integer expression",
         hir::Expr::PropertyAccess { .. } => {
             "class property access cannot be used as an integer expression"
         }

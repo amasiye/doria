@@ -41,6 +41,7 @@ fn lower_item(item: &ast::Item) -> Result<hir::Item, Diagnostic> {
             crate::semantics::interface_declaration_diagnostic(interface_decl),
         ),
         ast::Item::Function(function) => Ok(hir::Item::Function(lower_function(function))),
+        ast::Item::Constant(constant) => Ok(hir::Item::Constant(lower_constant(constant))),
         ast::Item::Statement(statement) => Ok(hir::Item::Statement(lower_stmt(statement))),
     }
 }
@@ -62,17 +63,31 @@ fn lower_class_member(member: &ast::ClassMember) -> hir::ClassMember {
             hir::ClassMember::Property(lower_property(property))
         }
         ast::ClassMember::Method(method) => hir::ClassMember::Method(lower_function(method)),
+        ast::ClassMember::Constant(constant) => {
+            hir::ClassMember::Constant(lower_constant(constant))
+        }
     }
 }
 
 fn lower_property(property: &ast::PropertyDecl) -> hir::PropertyDecl {
     hir::PropertyDecl {
         access: property.access.clone(),
+        is_static: property.is_static,
         writable: property.writable,
         ty: property.ty.clone(),
         name: property.name.clone(),
         initializer: property.initializer.as_ref().map(lower_expr),
         span: property.span,
+    }
+}
+
+fn lower_constant(constant: &ast::ConstDecl) -> hir::ConstDecl {
+    hir::ConstDecl {
+        access: constant.access.clone(),
+        ty: constant.ty.clone(),
+        name: constant.name.clone(),
+        initializer: lower_expr(&constant.initializer),
+        span: constant.span,
     }
 }
 
@@ -300,6 +315,15 @@ fn lower_expr(expr: &ast::Expr) -> hir::Expr {
             class_name: class_name.clone(),
             method: method.clone(),
             args: args.iter().map(lower_expr).collect(),
+            span: *span,
+        },
+        ast::Expr::StaticMember {
+            class_name,
+            member,
+            span,
+        } => hir::Expr::StaticMember {
+            class_name: class_name.clone(),
+            member: member.clone(),
             span: *span,
         },
         ast::Expr::New {

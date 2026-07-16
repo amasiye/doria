@@ -1,0 +1,24 @@
+class Label implements Displayable
+{
+    function __construct(string $text): void
+    {
+    }
+
+    function toString(): string
+    {
+        echo $this->text . "!";
+        return $this->text;
+    }
+}
+
+function main(): void
+{
+    let $left = new Label("L");
+    let $right = new Label("R");
+
+    echo "[{$left}{$right}]";
+    echo "" . $left . $right;
+    echo $left;
+    printf("%s%s", $left, $right);
+    echo "\n";
+}

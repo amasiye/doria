@@ -12,8 +12,8 @@ use inkwell::targets::{
 };
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, IntType};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValueEnum, FloatValue as LlvmFloatValue, FunctionValue, IntValue,
-    PointerValue, UnnamedAddress,
+    BasicMetadataValueEnum, BasicValueEnum, FloatValue as LlvmFloatValue, FunctionValue,
+    GlobalValue, IntValue, PointerValue, UnnamedAddress,
 };
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 
@@ -57,6 +57,7 @@ pub fn lower_mir_to_object(program: &mir::Program) -> Result<Vec<u8>, BackendErr
     module.set_data_layout(&target_data.get_data_layout());
 
     let functions = declare_functions(&context, &module, program)?;
+    let statics = declare_statics(&context, &module, &target_data, program)?;
     for function in &program.functions {
         define_function(
             &context,
@@ -65,6 +66,7 @@ pub fn lower_mir_to_object(program: &mir::Program) -> Result<Vec<u8>, BackendErr
             program,
             function,
             &functions,
+            &statics,
         )?;
     }
     define_process_main(&context, &module, program, &functions)?;
@@ -104,6 +106,66 @@ fn declare_functions<'ctx>(
         functions.push(value);
     }
     Ok(functions)
+}
+
+fn declare_statics<'ctx>(
+    context: &'ctx Context,
+    module: &Module<'ctx>,
+    target_data: &TargetData,
+    program: &mir::Program,
+) -> Result<Vec<GlobalValue<'ctx>>, BackendError> {
+    let pointer = context.ptr_type(AddressSpace::default());
+    let usize_type = context.ptr_sized_int_type(target_data, None);
+    let mut globals = Vec::with_capacity(program.statics.len());
+    for property in &program.statics {
+        let symbol = format!(
+            "__doria_static_{}_{}_{}",
+            property.class.0, property.id.0, property.name
+        );
+        let global = match &property.initializer {
+            mir::StaticValue::Scalar(value) => {
+                let initializer = scalar_constant(context, *value);
+                let global = module.add_global(initializer.get_type(), None, &symbol);
+                global.set_initializer(&initializer);
+                global
+            }
+            mir::StaticValue::Null => {
+                let global = module.add_global(pointer, None, &symbol);
+                global.set_initializer(&pointer.const_null());
+                global
+            }
+            mir::StaticValue::String(value) => {
+                let bytes = context.const_string(value.as_bytes(), false);
+                let object_type = context.struct_type(
+                    &[
+                        usize_type.into(),
+                        usize_type.into(),
+                        bytes.get_type().into(),
+                    ],
+                    false,
+                );
+                let object = object_type.const_named_struct(&[
+                    usize_type.const_all_ones().into(),
+                    usize_type.const_int(value.len() as u64, false).into(),
+                    bytes.into(),
+                ]);
+                let object_global =
+                    module.add_global(object_type, None, &format!("{symbol}_string"));
+                object_global.set_initializer(&object);
+                object_global.set_constant(true);
+                object_global.set_linkage(Linkage::Private);
+                object_global.set_unnamed_address(UnnamedAddress::Global);
+
+                let global = module.add_global(pointer, None, &symbol);
+                global.set_initializer(&object_global.as_pointer_value());
+                global
+            }
+        };
+        global.set_constant(!property.writable);
+        global.set_linkage(Linkage::Internal);
+        globals.push(global);
+    }
+    Ok(globals)
 }
 
 fn function_type<'ctx>(
@@ -166,6 +228,7 @@ fn define_function<'ctx>(
     program: &mir::Program,
     function: &mir::Function,
     functions: &[FunctionValue<'ctx>],
+    statics: &[GlobalValue<'ctx>],
 ) -> Result<(), BackendError> {
     let llvm_function = *functions
         .get(function.id.0)
@@ -253,6 +316,7 @@ fn define_function<'ctx>(
         program,
         function,
         functions,
+        statics,
         local_slots,
         blocks,
         current_frame: frame,
@@ -332,6 +396,7 @@ struct FunctionLowerer<'ctx, 'program> {
     program: &'program mir::Program,
     function: &'program mir::Function,
     functions: &'program [FunctionValue<'ctx>],
+    statics: &'program [GlobalValue<'ctx>],
     local_slots: Vec<Option<PointerValue<'ctx>>>,
     blocks: Vec<BasicBlock<'ctx>>,
     current_frame: PointerValue<'ctx>,
@@ -501,6 +566,25 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                         self.drop_class_value_checked(value, class)?;
                     }
                     _ => {}
+                }
+            }
+            mir::Statement::AssignStatic { target, value } => {
+                let property = static_definition(self.program, *target)?;
+                let value = self.lower_rvalue(value)?;
+                let address = self.static_address(*target)?;
+                let old = matches!(property.ty, mir::Type::String | mir::Type::NullableString)
+                    .then(|| {
+                        build(self.builder.build_load(
+                            self.context.ptr_type(AddressSpace::default()),
+                            address,
+                            "static.old",
+                        ))
+                        .map(BasicValueEnum::into_pointer_value)
+                    })
+                    .transpose()?;
+                build(self.builder.build_store(address, value))?;
+                if let Some(old) = old {
+                    self.release_string(old)?;
                 }
             }
             mir::Statement::DropClass { local, .. } => {
@@ -860,6 +944,14 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
         }
     }
 
+    fn static_address(&self, id: mir::StaticId) -> Result<PointerValue<'ctx>, BackendError> {
+        static_definition(self.program, id)?;
+        self.statics
+            .get(id.0)
+            .map(|global| global.as_pointer_value())
+            .ok_or_else(|| malformed_mir(format!("static{} was not declared", id.0)))
+    }
+
     fn lower_nullable_string_expression(
         &mut self,
         expression: &mir::NullableStringExpression,
@@ -873,6 +965,15 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                     pointer,
                     local_slot(&self.local_slots, *local)?,
                     "nullable-string.local",
+                ))?
+                .into_pointer_value();
+                self.retain_string(value)
+            }
+            mir::NullableStringExpression::Static(id) => {
+                let value = build(self.builder.build_load(
+                    pointer,
+                    self.static_address(*id)?,
+                    "nullable-string.static",
                 ))?
                 .into_pointer_value();
                 self.retain_string(value)
@@ -1145,6 +1246,15 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                     pointer,
                     local_slot(&self.local_slots, *local)?,
                     "string.local",
+                ))?
+                .into_pointer_value();
+                self.retain_string(value)
+            }
+            mir::StringExpression::Static(id) => {
+                let value = build(self.builder.build_load(
+                    pointer,
+                    self.static_address(*id)?,
+                    "string.static",
                 ))?
                 .into_pointer_value();
                 self.retain_string(value)
@@ -1906,6 +2016,12 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 "integer.local",
             ))?
             .into_int_value()),
+            mir::Operand::Static(id) => Ok(build(self.builder.build_load(
+                integer_type(self.context, ty),
+                self.static_address(*id)?,
+                "integer.static",
+            ))?
+            .into_int_value()),
             mir::Operand::Property { object, property } => Ok(build(self.builder.build_load(
                 integer_type(self.context, ty),
                 self.lower_property_address(*object, *property)?,
@@ -1934,6 +2050,15 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                     },
                     local_slot(&self.local_slots, *local)?,
                     "float.local",
+                ))?
+                .into_float_value()),
+                mir::Operand::Static(id) => Ok(build(self.builder.build_load(
+                    match ty {
+                        FloatType::Float32 => self.context.f32_type(),
+                        FloatType::Float64 => self.context.f64_type(),
+                    },
+                    self.static_address(*id)?,
+                    "float.static",
                 ))?
                 .into_float_value()),
                 mir::Operand::Property { object, property } => Ok(build(self.builder.build_load(
@@ -2355,6 +2480,12 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 "bool.local",
             ))?
             .into_int_value()),
+            mir::Operand::Static(id) => Ok(build(self.builder.build_load(
+                self.context.i8_type(),
+                self.static_address(*id)?,
+                "bool.static",
+            ))?
+            .into_int_value()),
             mir::Operand::Property { object, property } => Ok(build(self.builder.build_load(
                 self.context.i8_type(),
                 self.lower_property_address(*object, *property)?,
@@ -2506,6 +2637,16 @@ fn scalar_zero(context: &Context, ty: mir::ScalarType) -> BasicValueEnum<'_> {
     scalar_type(context, ty).const_zero()
 }
 
+fn scalar_constant(context: &Context, value: mir::ScalarValue) -> BasicValueEnum<'_> {
+    match value {
+        mir::ScalarValue::Integer(value) => integer_constant(context, value).into(),
+        mir::ScalarValue::Float(value) => float_constant(context, value).into(),
+        mir::ScalarValue::Bool(value) => {
+            context.i8_type().const_int(u64::from(value), false).into()
+        }
+    }
+}
+
 fn integer_type(context: &Context, ty: IntegerType) -> IntType<'_> {
     context
         .custom_width_int_type(
@@ -2595,6 +2736,17 @@ fn property_definition(
         .get(property.index)
         .filter(|definition| definition.id == property)
         .ok_or_else(|| malformed_mir(format!("property{} does not exist", property.index)))
+}
+
+fn static_definition(
+    program: &mir::Program,
+    id: mir::StaticId,
+) -> Result<&mir::StaticProperty, BackendError> {
+    program
+        .statics
+        .get(id.0)
+        .filter(|property| property.id == id)
+        .ok_or_else(|| malformed_mir(format!("static{} does not exist", id.0)))
 }
 
 fn local_slot<'ctx>(
@@ -2722,6 +2874,7 @@ fn resolve_string_expression_from_definitions(
         mir::StringExpression::Display(_)
         | mir::StringExpression::Call { .. }
         | mir::StringExpression::Property { .. }
+        | mir::StringExpression::Static(_)
         | mir::StringExpression::NullableLocalAssumeNonNull(_)
         | mir::StringExpression::ReadFile(_)
         | mir::StringExpression::Format(_) => {
@@ -2753,6 +2906,7 @@ fn resolve_string_expression(
         mir::StringExpression::Display(_)
         | mir::StringExpression::Call { .. }
         | mir::StringExpression::Property { .. }
+        | mir::StringExpression::Static(_)
         | mir::StringExpression::NullableLocalAssumeNonNull(_)
         | mir::StringExpression::ReadFile(_)
         | mir::StringExpression::Format(_) => {

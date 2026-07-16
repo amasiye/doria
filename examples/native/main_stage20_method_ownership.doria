@@ -1,0 +1,51 @@
+class Token
+{
+    function __construct(string $name) {}
+
+    function __destruct()
+    {
+        echo "drop " . $this->name . "\n";
+    }
+}
+
+class Worker
+{
+    function sum(int $value): int
+    {
+        if ($value <= 0) {
+            return 0;
+        }
+
+        return $value + $this->sum($value - 1);
+    }
+
+    function make(string $name): Token
+    {
+        return new Token($name);
+    }
+
+    function relay(take Token $token): Token
+    {
+        return $token;
+    }
+
+    function inspect(Token $token): string
+    {
+        return $token->name;
+    }
+
+    function leaveEarly(): void
+    {
+        let $local = new Token("local");
+        return;
+    }
+}
+
+function main(): void
+{
+    let $worker = new Worker();
+    let $token = $worker->relay($worker->make("owned"));
+    echo $worker->sum(6);
+    echo ":" . $worker->inspect($token) . "\n";
+    $worker->leaveEarly();
+}

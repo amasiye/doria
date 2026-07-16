@@ -101,7 +101,23 @@ function __doria_printf(string $format, mixed ...$values): void
 
 "#,
     );
-    let mut scopes = PhpNameScopes::new();
+    let static_properties = program
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Class(class) => Some(class),
+            _ => None,
+        })
+        .flat_map(|class| {
+            class.members.iter().filter_map(move |member| match member {
+                ClassMember::Property(property) if property.is_static => {
+                    Some((class.name.clone(), property.name.clone()))
+                }
+                _ => None,
+            })
+        })
+        .collect();
+    let mut scopes = PhpNameScopes::new(static_properties);
     for item in &program.items {
         emit_item(item, &mut output, 0, &mut scopes);
         if !output.ends_with("\n\n") {
@@ -131,11 +147,23 @@ fn validate_item(item: &Item, semantic_info: &SemanticInfo) -> Result<(), Backen
                         }
                     }
                     ClassMember::Method(method) => validate_function(method, semantic_info, true)?,
+                    ClassMember::Constant(constant) => {
+                        if let Some(ty) = &constant.ty {
+                            validate_type(ty, constant.span)?;
+                        }
+                        validate_expr(&constant.initializer, semantic_info)?;
+                    }
                 }
             }
             Ok(())
         }
         Item::Function(function) => validate_function(function, semantic_info, false),
+        Item::Constant(constant) => {
+            if let Some(ty) = &constant.ty {
+                validate_type(ty, constant.span)?;
+            }
+            validate_expr(&constant.initializer, semantic_info)
+        }
         Item::Statement(statement) => validate_statement(statement, semantic_info),
     }
 }
@@ -417,6 +445,7 @@ fn validate_expr(expr: &Expr, semantic_info: &SemanticInfo) -> Result<(), Backen
             }
             validate_exprs(args, semantic_info)
         }
+        Expr::StaticMember { .. } => Ok(()),
         Expr::Grouped { expr, .. } => validate_expr(expr, semantic_info),
         Expr::Unary { op, expr, span } => {
             if *op == UnaryOp::Negate {
@@ -588,15 +617,26 @@ struct PhpNameScopes {
     scopes: Vec<HashMap<String, String>>,
     used_php_names: HashSet<String>,
     next_mangled_id: usize,
+    static_properties: HashSet<(String, String)>,
 }
 
 impl PhpNameScopes {
-    fn new() -> Self {
+    fn new(static_properties: HashSet<(String, String)>) -> Self {
         Self {
             scopes: vec![HashMap::new()],
             used_php_names: HashSet::new(),
             next_mangled_id: 0,
+            static_properties,
         }
+    }
+
+    fn expression_scope(&self) -> Self {
+        Self::new(self.static_properties.clone())
+    }
+
+    fn is_static_property(&self, class_name: &str, member: &str) -> bool {
+        self.static_properties
+            .contains(&(class_name.to_string(), member.to_string()))
     }
 
     fn push(&mut self) {
@@ -667,13 +707,14 @@ impl PhpNameScopes {
 
 fn emit_item(item: &Item, output: &mut String, indent: usize, scopes: &mut PhpNameScopes) {
     match item {
-        Item::Class(class_decl) => emit_class(class_decl, output, indent),
-        Item::Function(function) => emit_function(function, output, indent, false),
+        Item::Class(class_decl) => emit_class(class_decl, output, indent, scopes),
+        Item::Function(function) => emit_function(function, output, indent, false, scopes),
+        Item::Constant(constant) => emit_constant(constant, output, indent, false, scopes),
         Item::Statement(statement) => emit_statement(statement, output, indent, scopes),
     }
 }
 
-fn emit_class(class_decl: &ClassDecl, output: &mut String, indent: usize) {
+fn emit_class(class_decl: &ClassDecl, output: &mut String, indent: usize, scopes: &PhpNameScopes) {
     let implements = if class_decl
         .implements
         .iter()
@@ -691,33 +732,72 @@ fn emit_class(class_decl: &ClassDecl, output: &mut String, indent: usize) {
     writeln(output, indent, "{");
     for member in &class_decl.members {
         match member {
-            ClassMember::Property(property) => emit_property(property, output, indent + 1),
-            ClassMember::Method(method) => emit_function(method, output, indent + 1, true),
+            ClassMember::Property(property) => emit_property(property, output, indent + 1, scopes),
+            ClassMember::Method(method) => emit_function(method, output, indent + 1, true, scopes),
+            ClassMember::Constant(constant) => {
+                emit_constant(constant, output, indent + 1, true, scopes)
+            }
         }
         output.push('\n');
     }
     writeln(output, indent, "}");
 }
 
-fn emit_property(property: &PropertyDecl, output: &mut String, indent: usize) {
+fn emit_property(
+    property: &PropertyDecl,
+    output: &mut String,
+    indent: usize,
+    shared_scopes: &PhpNameScopes,
+) {
     let visibility = emit_member_access(&property.access);
     let ty = php_type(&property.ty);
     write_indent(output, indent);
     output.push_str(visibility);
     output.push(' ');
+    if property.is_static {
+        output.push_str("static ");
+    }
     output.push_str(&ty);
     output.push_str(" $");
     output.push_str(&property.name);
     if let Some(initializer) = &property.initializer {
-        let scopes = PhpNameScopes::new();
+        let scopes = shared_scopes.expression_scope();
         output.push_str(" = ");
         output.push_str(&emit_expr(initializer, &scopes));
     }
     output.push_str(";\n");
 }
 
-fn emit_function(function: &FunctionDecl, output: &mut String, indent: usize, is_method: bool) {
-    let mut scopes = PhpNameScopes::new();
+fn emit_constant(
+    constant: &ConstDecl,
+    output: &mut String,
+    indent: usize,
+    is_member: bool,
+    shared_scopes: &PhpNameScopes,
+) {
+    write_indent(output, indent);
+    if is_member {
+        output.push_str(emit_member_access(&constant.access));
+        output.push(' ');
+    }
+    output.push_str("const ");
+    output.push_str(&constant.name);
+    output.push_str(" = ");
+    output.push_str(&emit_expr(
+        &constant.initializer,
+        &shared_scopes.expression_scope(),
+    ));
+    output.push_str(";\n");
+}
+
+fn emit_function(
+    function: &FunctionDecl,
+    output: &mut String,
+    indent: usize,
+    is_method: bool,
+    shared_scopes: &PhpNameScopes,
+) {
+    let mut scopes = shared_scopes.expression_scope();
     for param in &function.params {
         scopes.declare_unmangled(&param.name);
     }
@@ -1216,6 +1296,14 @@ fn emit_expr(expr: &Expr, scopes: &PhpNameScopes) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        Expr::StaticMember {
+            class_name, member, ..
+        } if scopes.is_static_property(class_name, member) => {
+            format!("{class_name}::${member}")
+        }
+        Expr::StaticMember {
+            class_name, member, ..
+        } => format!("{class_name}::{member}"),
         Expr::New {
             class_name, args, ..
         } => format!(

@@ -66,7 +66,7 @@ Valid PHP should be easy to migrate to Doria, but Doria-specific syntax does not
 
 Doria does not use `public`, `protected`, or `private` as member visibility modifiers. Class members are externally accessible by default, and `internal` marks implementation details.
 
-The current compiler implementation lowers the accepted native subset through validated typed MIR. The debug interpreter, default Cranelift fast profile, and `--release` LLVM profile consume that same MIR, and the durable executable parity manifest compares exact stdin-driven stdout bytes, stderr bytes, process status, declared file side effects, and class lifetime behavior across all three paths. The supported subset includes top-level free functions; parameterless int/void `main`; structured control flow and recursion; fixed-width numerics and bool; immutable UTF-8 strings; full primitive expression interpolation; the narrow Stage 17 `?string` seed; checked formatting; UTF-8 line/file I/O; exact stdout/stderr; fatal panic; and Stage 19 native class construction, property initialization/access, class-valued locals/arguments/returns, `take` transfer, lifecycle bodies, recursive property destruction, and deterministic cleanup on normal structured exits. Native strings are private non-atomic refcounted buffers and are Copy at the source level. Native classes are pointer-sized move values whose headerless payload layout is compiler-known. `main(): int` crosses the accepted `0..125` process boundary and `main(): void` maps normal completion to status `0`. Release optimization does not change observable semantics. `doria-rt` owns process entry, class allocation/free, runtime strings, raw standard-device I/O, line discipline, text-file I/O, exact output, panic formatting, and Doria stack traces. General methods/statics and `internal` native enforcement, full constructor definite-initialization, collections, general nullable types, and `Bytes` remain unsupported. The compiler-known `Displayable` contract is checked by the frontend and supported by the PHP compatibility backend; native `Displayable` dispatch waits for Stage 20 method lowering. The former Stage 7-10 native smoke module remains retired.
+The current compiler implementation lowers the accepted native subset through validated typed MIR. The debug interpreter, default Cranelift fast profile, and `--release` LLVM profile consume that same MIR, and the durable executable parity manifest compares exact stdin-driven stdout bytes, stderr bytes, process status, declared file side effects, and class lifetime behavior across all three paths. The supported subset includes top-level free functions; parameterless int/void `main`; structured control flow and recursion; fixed-width numerics and bool; immutable UTF-8 strings; expression interpolation; the narrow Stage 17 `?string` seed; checked formatting; UTF-8 line/file I/O; exact stdout/stderr; fatal panic; native class construction, property initialization/access, class-valued locals/arguments/returns, `take` transfer, lifecycle bodies, recursive property destruction, and deterministic normal-exit cleanup; statically resolved instance and static methods; class/top-level constants; Copy-type static properties; complete `internal` checking; and concrete native `Displayable::toString()` calls. Native strings are private non-atomic refcounted buffers and are Copy at the source level. Native classes are pointer-sized move values whose headerless payload layout is compiler-known. `main(): int` crosses the accepted `0..125` process boundary and `main(): void` maps normal completion to status `0`. Release optimization does not change observable semantics. `doria-rt` owns process entry, class allocation/free, runtime strings, raw standard-device I/O, line discipline, text-file I/O, exact output, panic formatting, and Doria stack traces. Full constructor definite initialization and non-lexical borrowing, collections, general nullable types, interface-typed values, and `Bytes` remain unsupported. The former Stage 7-10 native smoke module remains retired.
 
 Doria is not a Rust language. Rust is the current bootstrap implementation language for `doriac`, not the permanent identity of the compiler.
 
@@ -290,13 +290,26 @@ Valid member declarations:
 ```doria
 class Parser
 {
+    const DEFAULT_SLUG = "parser";
+
     string $name;
-    writable string $buffer;
     internal string $slug;
     internal writable int $position = 0;
 
-    function parse(): Ast
+    function __construct(internal string $givenName, internal string $givenSlug): void
     {
+        $this->name = $givenName;
+        $this->slug = $givenSlug;
+    }
+
+    static function create(string $name): Parser
+    {
+        return new Parser($name, Parser::DEFAULT_SLUG);
+    }
+
+    writable function parse(): Ast
+    {
+        $this->advance();
         return $this->parseProgram();
     }
 
@@ -313,6 +326,36 @@ class Parser
 ```
 
 Internal members are accessible only from methods and constructors of the declaring class. They are not accessible from top-level code, free functions, or other classes. Protected is permanently excluded from Doria; inheritance does not add a third access tier.
+
+Instance and static methods have distinct identities. An ordinary method has a readonly `$this`; `writable function` has a writable `$this` and requires a writable receiver path. A static method has no `$this` and is called with `ClassName::method()`. `__construct` and `__destruct` remain compiler-invoked lifecycle methods and cannot be called as ordinary instance or static methods.
+
+Static properties are per-process state and use qualified access:
+
+```doria
+class Counter
+{
+    static int $initial = 0;
+    static writable int $value = Counter::initial;
+}
+
+Counter::value = 42;
+```
+
+Static properties are readonly unless marked `writable`. Their initializers must be accepted by the bounded constant evaluator, and the current implementation admits Copy types only. There is no runtime, lazy, or once static initialization. Owned statics and their lifetime, destruction, and concurrency rules require future accepted design work.
+
+Top-level and class constants use `SCREAMING_SNAKE_CASE` and may infer their type or declare it explicitly:
+
+```doria
+const DEFAULT_LIMIT = 25;
+const int HARD_LIMIT = 100;
+
+class ParserLimits
+{
+    const MAX_DEPTH = DEFAULT_LIMIT * 4;
+}
+```
+
+Constants are immutable and evaluated before MIR. Declaration order does not affect meaning: forward references are resolved through a dependency graph, while cycles report the dependency chain. The bounded evaluator accepts supported primitive literals, other constants, grouping, typed arithmetic/bitwise/comparison/boolean/string operations, and accepted explicit numeric conversions. Overflow and invalid constant operations are compile-time errors. Function or method calls, constructors, runtime/static-property reads from constants, mutation, I/O, environment access, allocation with observable identity, loops, and arbitrary compile-time execution are rejected.
 
 Property hooks are planned later for validation and computed properties, but they are not part of the current implementation.
 
@@ -570,7 +613,7 @@ class Label implements Displayable
 }
 ```
 
-Conformance requires the explicit `implements Displayable` declaration and exactly an externally accessible readonly instance `function toString(): string` with no parameters. Method-name coincidence does not conform, and Doria has no `__toString` magic method. Display conversion is limited to interpolation, `echo`, `.`, and `%s`; it does not permit implicit class-to-string assignment. The PHP compatibility backend can execute this exact subset. Native class values and method dispatch remain Stages 19 and 20, while general interfaces remain Stage 35.
+Conformance requires the explicit `implements Displayable` declaration and exactly an externally accessible readonly instance `function toString(): string` with no parameters. Method-name coincidence does not conform, and Doria has no `__toString` magic method. Display conversion is limited to interpolation, `echo`, `.`, and `%s`; it does not permit implicit class-to-string assignment. For a statically known concrete class, the interpreter, Cranelift, LLVM, and PHP compatibility backend execute conversion through the ordinary `toString()` method machinery exactly once and left-to-right. Interface-typed values, vtables, and general interface dispatch remain Stage 35.
 
 The `.` operator is runtime string concatenation. Each operand may be a display-convertible primitive, but at least one operand of that binary operation must already be statically `string`; therefore `"x=" . 1` is valid while `1 . 2` is rejected. The result is `string`, evaluation is left-to-right, and no conversion is implied outside display contexts. `echo`, `.`, and current interpolation parts use decimal integers, shortest-round-trip locale-independent binary32/binary64 floats, lowercase `true`/`false`, and strings unchanged.
 
@@ -982,9 +1025,9 @@ Doria IR is the checked compiler-owned representation of a Doria program. After 
 
 As native code generation matures, Doria IR may lower into a simpler native-oriented IR for control flow, memory layout, runtime calls, and backend code generation.
 
-MIR is Doria's native-oriented, backend-independent control-flow representation for the executable subset. It contains typed scalar, string, nullable-string, and class locals, parameters, calls and returns; class allocation, compiler-known property initialization/load/store, explicit ownership transfer and drops; runtime string literal/local/call/concatenation/display expressions; string comparison; basic blocks; checked numeric operations/conversions; and panic termination. The debug interpreter uses safe private string and class values, an explicit heap-backed Doria frame stack, and exact stdout/stderr buffers. It models source value and lifetime behavior, not native pointer/refcount layout. Ordinary interpretation has no fixed execution-fuel or call-depth cap and does not reject repeated states.
+MIR is Doria's native-oriented, backend-independent control-flow representation for the executable subset. It contains typed scalar, string, nullable-string, and class locals, parameters, calls and returns; class allocation, compiler-known property initialization/load/store, explicit ownership transfer and drops; method identities with explicit receiver operands and receiver modes; static data operations; runtime string literal/local/call/concatenation/display expressions; string comparison; basic blocks; checked numeric operations/conversions; and panic termination. Constants are typed and evaluated before MIR, so consumers receive folded values rather than a second evaluator. The debug interpreter uses safe private string and class values, an explicit heap-backed Doria frame stack, per-program static storage, and exact stdout/stderr buffers. It models source value and lifetime behavior, not native pointer/refcount layout. Ordinary interpretation has no fixed execution-fuel or call-depth cap and does not reject repeated states.
 
-Native is the primary target. Checked HIR lowers to typed MIR, shared MIR validation gates both native lowerers, Cranelift emits the default fast object, LLVM 18 emits the O3 `--release` object, and the host linker combines either object with `doria-rt`. Native compilation has no interpreter preflight, fallback IR, or release-to-fast fallback. `doria-rt` owns entry policy, headerless class payload allocation/free, immutable refcounted runtime strings, Stage 17 text I/O and formatting support, exact stdout/stderr writes, abort-only panic formatting, stack traversal, and status 101. Both lowerers share scalar, opaque string, and pointer-sized class ABI conventions. Stage 19 cleanup drops still-owned class locals and statement temporaries on normal fallthrough, `return`, `break`, and `continue`; invokes `__destruct` before reverse-order owned-property cleanup; and frees the payload last. Ownership transfer suppresses source cleanup, assignment acquires the replacement before dropping the old value, and abort-only panic runs no cleanup. Runtime failures use the shared panic path. Only canonical int/void entry results cross the process boundary. Unsupported coverage remains for general native methods/statics including `Displayable` dispatch, Stage 20 `internal` enforcement, Stage 21 full definite initialization, collections, Stage 22 general nullable types, and Stage 23 `Bytes`.
+Native is the primary target. Checked HIR lowers to typed MIR, shared MIR validation gates both native lowerers, Cranelift emits the default fast object, LLVM 18 emits the O3 `--release` object, and the host linker combines either object with `doria-rt`. Native compilation has no interpreter preflight, fallback IR, or release-to-fast fallback. `doria-rt` owns entry policy, headerless class payload allocation/free, immutable refcounted runtime strings, Stage 17 text I/O and formatting support, exact stdout/stderr writes, abort-only panic formatting, stack traversal, and status 101. Both lowerers share scalar, opaque string, and pointer-sized class ABI conventions. Normal cleanup drops still-owned class locals and statement temporaries on fallthrough, `return`, `break`, and `continue`; invokes `__destruct` before reverse-order owned-property cleanup; and frees the payload last. Ordinary instance/static calls preserve those obligations, class returns transfer ownership, and only explicit `take` parameters consume class arguments. Copy-type statics are private compiler-generated data symbols; compile-time string statics use an immortal private runtime representation and remain Copy at the Doria surface. Ownership transfer suppresses source cleanup, assignment acquires the replacement before dropping the old value, and abort-only panic runs no cleanup. Runtime failures use the shared panic path. Only canonical int/void entry results cross the process boundary. Unsupported coverage remains for Stage 21 full definite initialization and borrowing, collections, Stage 22 general nullable types, Stage 23 `Bytes`, dynamic dispatch, and general interfaces.
 
 The PHP backend is currently implemented as a compatibility/debugging backend. It emits `<?php` and lowers Doria-only syntax away:
 

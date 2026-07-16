@@ -408,6 +408,7 @@ fn completion_items() -> Value {
         "break",
         "continue",
         "static",
+        "const",
         "not",
         "and",
         "or",
@@ -743,7 +744,8 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
         TokenKind::New => Some("Constructs an instance of a class."),
         TokenKind::Foreach => Some("Iterates over a list or dictionary value."),
         TokenKind::As => Some("Separates a `foreach` iterable from its binding."),
-        TokenKind::Static => Some("Reserved for static members and calls."),
+        TokenKind::Static => Some("Declares a static method or property."),
+        TokenKind::Const => Some("Declares a compile-time-evaluated constant."),
         TokenKind::Not => Some("Boolean NOT operator; exact synonym for `!`."),
         TokenKind::And => Some("Boolean AND operator; exact synonym for `&&`."),
         TokenKind::Or => Some("Boolean OR operator; exact synonym for `||`."),
@@ -983,6 +985,25 @@ mod tests {
                 item["documentation"],
                 "Accepted planned Doria syntax; compiler support lands in a later stage."
             );
+        }
+    }
+
+    #[test]
+    fn completions_and_hover_expose_stage20_declarations() {
+        for (keyword, kind, hover) in [
+            (
+                "static",
+                TokenKind::Static,
+                "Declares a static method or property.",
+            ),
+            (
+                "const",
+                TokenKind::Const,
+                "Declares a compile-time-evaluated constant.",
+            ),
+        ] {
+            assert_eq!(completion_item(keyword)["detail"], "Doria keyword");
+            assert_eq!(hover_description(&kind), Some(hover));
         }
     }
 

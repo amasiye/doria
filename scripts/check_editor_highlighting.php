@@ -33,6 +33,8 @@ $acceptedKeywords = [
     'extends',
     'implements',
     'function',
+    'const',
+    'static',
     'let',
     'take',
     'writable',
@@ -376,6 +378,44 @@ function check_vscode_grammar(): void
     require_check(
         str_contains($grammarText, 'keyword.declaration.implements.doria'),
         'VS Code must scope active implements syntax as a declaration keyword'
+    );
+    foreach ([
+        'keyword.declaration.constant.doria',
+        'constant.other.doria',
+        'constant.other.class.doria',
+        'storage.modifier.static.doria',
+        'variable.other.property.static.doria',
+        'entity.name.function.static.doria',
+    ] as $scope) {
+        require_check(str_contains($grammarText, $scope), "VS Code grammar is missing Stage 20 scope '{$scope}'");
+    }
+    $staticAccessorPatterns = $grammar['repository']['accessors']['patterns'] ?? [];
+    $staticMethodPatterns = [];
+    $classConstantPatterns = [];
+    $staticPropertyPatterns = [];
+    foreach ($staticAccessorPatterns as $pattern) {
+        $capture = $pattern['captures']['2']['name'] ?? null;
+        if ($capture === 'entity.name.function.static.doria') {
+            $staticMethodPatterns[] = (string) ($pattern['match'] ?? '');
+        } elseif ($capture === 'constant.other.class.doria') {
+            $classConstantPatterns[] = (string) ($pattern['match'] ?? '');
+        } elseif ($capture === 'variable.other.property.static.doria') {
+            $staticPropertyPatterns[] = (string) ($pattern['match'] ?? '');
+        }
+    }
+    require_check(
+        any_match($staticMethodPatterns, static fn (string $match): bool => regex_matches($match, '::nextId(')),
+        'VS Code must classify a parenthesized :: member as a static method'
+    );
+    require_check(
+        any_match($classConstantPatterns, static fn (string $match): bool => regex_matches($match, '::MAX_DEPTH')) &&
+            !any_match($classConstantPatterns, static fn (string $match): bool => regex_matches($match, '::nextId(')),
+        'VS Code must classify non-call :: members as class constants without swallowing static methods'
+    );
+    require_check(
+        any_match($staticPropertyPatterns, static fn (string $match): bool => regex_matches($match, '::next')) &&
+            !any_match($staticPropertyPatterns, static fn (string $match): bool => regex_matches($match, '::MAX_DEPTH')),
+        'VS Code must classify lowercase ::name as static-property access without swallowing class constants'
     );
 
     $tokens = array_unique([...$acceptedKeywords, ...$primitiveTypes, ...$reservedTypes, ...$plannedTypes, ...$wordOperators]);
@@ -731,6 +771,19 @@ function check_intellij_lexer(): void
         'IntelliJ lexer must emit dedicated attribute tokens'
     );
     require_check(
+        str_contains($lexerText, 'isConstantName(text) -> DoriaTokenTypes.CLASS_CONSTANT') &&
+            str_contains($lexerText, 'isConstantDeclaration()') &&
+            str_contains($lexerText, 'CONSTANT_REFERENCE_NAME.matches(text)'),
+        'IntelliJ lexer must distinguish class/top-level constants from static calls and type names'
+    );
+    require_check(
+        str_contains($lexerText, 'isStaticPropertyName(text) -> DoriaTokenTypes.STATIC_PROPERTY') &&
+            str_contains($lexerText, 'previousAccessor() == "::" && !isCallName()') &&
+            str_contains($lexerText, 'isStaticPropertyDeclaration() -> DoriaTokenTypes.STATIC_PROPERTY') &&
+            str_contains($lexerText, 'DoriaTokenTypes.STATIC_PROPERTY'),
+        'IntelliJ lexer must distinguish static properties from ordinary variables'
+    );
+    require_check(
         str_contains($lexerText, "private fun isCallName(): Boolean = nextNonWhitespace(tokenEnd) == '('") &&
             str_contains($lexerText, 'isCallName() -> callableTokenType()') &&
             str_contains($lexerText, 'callableTokenType()') &&
@@ -785,6 +838,8 @@ function check_intellij_lexer(): void
         'DORIA_FUNCTION_CALL',
         'DORIA_METHOD_CALL',
         'DORIA_STATIC_METHOD_CALL',
+        'DORIA_CLASS_CONSTANT',
+        'DORIA_STATIC_PROPERTY',
     ] as $tokenType) {
         require_check(str_contains($intellijHighlightingText, $tokenType), "IntelliJ highlighting is missing {$tokenType}");
     }
@@ -977,6 +1032,15 @@ function check_fixture(): void
     $fixtureText = read_text($fixture);
     $requiredSnippets = [
         'internal',
+        'const DEFAULT_LIMIT = 25;',
+        'const int HARD_LIMIT = 100;',
+        'internal const MAX_DEPTH = DEFAULT_LIMIT * 4;',
+        'static int $initial = 0;',
+        'static writable int $next = 1;',
+        'internal static string $label = "parser";',
+        'ParserLimits::next += 1;',
+        'ParserLimits::nextId()',
+        'ParserLimits::MAX_DEPTH',
         'uses HasSlug, TracksChanges;',
         'with ($base)',
         'with (take $resource)',

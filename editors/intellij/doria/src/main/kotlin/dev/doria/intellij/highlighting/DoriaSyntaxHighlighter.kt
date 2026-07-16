@@ -31,6 +31,8 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
         DoriaTokenTypes.FUNCTION_CALL -> FUNCTION_CALL_KEYS
         DoriaTokenTypes.METHOD_CALL -> METHOD_CALL_KEYS
         DoriaTokenTypes.STATIC_METHOD_CALL -> STATIC_METHOD_CALL_KEYS
+        DoriaTokenTypes.CLASS_CONSTANT -> CLASS_CONSTANT_KEYS
+        DoriaTokenTypes.STATIC_PROPERTY -> STATIC_PROPERTY_KEYS
         DoriaTokenTypes.IDENTIFIER -> IDENTIFIER_KEYS
         DoriaTokenTypes.VARIABLE -> VARIABLE_KEYS
         DoriaTokenTypes.PROPERTY -> PROPERTY_KEYS
@@ -130,6 +132,14 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
         val STATIC_METHOD_CALL: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
             "DORIA_STATIC_METHOD_CALL",
             DefaultLanguageHighlighterColors.FUNCTION_DECLARATION,
+        )
+        val CLASS_CONSTANT: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
+            "DORIA_CLASS_CONSTANT",
+            DefaultLanguageHighlighterColors.CONSTANT,
+        )
+        val STATIC_PROPERTY: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
+            "DORIA_STATIC_PROPERTY",
+            DefaultLanguageHighlighterColors.STATIC_FIELD,
         )
         val IDENTIFIER: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
             "DORIA_IDENTIFIER",
@@ -232,6 +242,8 @@ class DoriaSyntaxHighlighter : SyntaxHighlighter {
         private val FUNCTION_CALL_KEYS = arrayOf(FUNCTION_CALL)
         private val METHOD_CALL_KEYS = arrayOf(METHOD_CALL)
         private val STATIC_METHOD_CALL_KEYS = arrayOf(STATIC_METHOD_CALL)
+        private val CLASS_CONSTANT_KEYS = arrayOf(CLASS_CONSTANT)
+        private val STATIC_PROPERTY_KEYS = arrayOf(STATIC_PROPERTY)
         private val IDENTIFIER_KEYS = arrayOf(IDENTIFIER)
         private val VARIABLE_KEYS = arrayOf(VARIABLE)
         private val PROPERTY_KEYS = arrayOf(PROPERTY)

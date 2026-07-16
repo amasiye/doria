@@ -336,6 +336,8 @@ fn rejects_mixed_width_float_binary_operands() {
     program.functions.push(Function {
         id: FunctionId(1),
         name: "mixedWidth".to_string(),
+        method: None,
+        receiver_mode: None,
         params: Vec::new(),
         return_type: ReturnType::Value(Type::Scalar(ScalarType::Float(FloatType::Float64))),
         locals: Vec::new(),
@@ -376,9 +378,12 @@ fn rejects_malformed_block_id() {
 fn void_program() -> Program {
     Program {
         classes: vec![],
+        statics: vec![],
         functions: vec![Function {
             id: FunctionId(0),
             name: "main".to_string(),
+            method: None,
+            receiver_mode: None,
             params: Vec::new(),
             return_type: ReturnType::Void,
             locals: Vec::new(),

@@ -133,6 +133,7 @@ enum EvaluationTask {
     FinishStatement,
     DropTemporaryClasses(Vec<(usize, crate::class_layout::ClassId)>),
     Assign(mir::LocalId),
+    AssignStatic(mir::StaticId),
     AssignProperty {
         object: mir::LocalId,
         property: crate::class_layout::PropertyId,
@@ -179,6 +180,7 @@ struct Interpreter<'program> {
     stdin_cursor: usize,
     files: BTreeMap<String, Vec<u8>>,
     heap: BTreeMap<usize, ObjectValue>,
+    statics: Vec<LocalValue>,
     next_object: usize,
     frames: Vec<CallFrame>,
     limits: InterpreterLimits,
@@ -241,6 +243,18 @@ fn interpret_internal(
         stdin_cursor: 0,
         files: io.files,
         heap: BTreeMap::new(),
+        statics: program
+            .statics
+            .iter()
+            .map(|property| match &property.initializer {
+                mir::StaticValue::Scalar(value) => LocalValue::Scalar(*value),
+                mir::StaticValue::String(value) if property.ty == mir::Type::String => {
+                    LocalValue::String(value.clone())
+                }
+                mir::StaticValue::String(value) => LocalValue::NullableString(Some(value.clone())),
+                mir::StaticValue::Null => LocalValue::NullableString(None),
+            })
+            .collect(),
         next_object: 1,
         frames: Vec::new(),
         limits,
@@ -408,6 +422,11 @@ impl Interpreter<'_> {
                 frame
                     .tasks
                     .push(EvaluationTask::AssignProperty { object, property });
+                frame.tasks.push(EvaluationTask::Rvalue(value));
+            }
+            mir::Statement::AssignStatic { target, value } => {
+                let frame = self.current_frame_mut()?;
+                frame.tasks.push(EvaluationTask::AssignStatic(target));
                 frame.tasks.push(EvaluationTask::Rvalue(value));
             }
             mir::Statement::DropClass { local, .. } => {
@@ -924,6 +943,13 @@ impl Interpreter<'_> {
                         .push(EvaluationTask::DropObject { object, class });
                 }
             }
+            EvaluationTask::AssignStatic(target) => {
+                let value = self.pop_local_value()?;
+                let slot = self.statics.get_mut(target.0).ok_or_else(|| {
+                    InterpreterError::new(format!("MIR static{} does not exist", target.0))
+                })?;
+                *slot = value;
+            }
             EvaluationTask::AssignProperty { object, property } => {
                 let value = self.pop_local_value()?;
                 if let Some(LocalValue::Class { object, class }) =
@@ -1216,6 +1242,15 @@ impl Interpreter<'_> {
                     }
                 }
             }
+            mir::StringExpression::Static(id) => match self.statics.get(id.0) {
+                Some(LocalValue::String(value)) => self.push_string(value.clone())?,
+                _ => {
+                    return Err(InterpreterError::new(format!(
+                        "MIR static{} was used as string",
+                        id.0
+                    )))
+                }
+            },
             mir::StringExpression::NullableLocalAssumeNonNull(id) => {
                 match read_local(&self.current_frame()?.locals, id)? {
                     LocalValue::NullableString(Some(value)) => self.push_string(value.clone())?,
@@ -1296,6 +1331,17 @@ impl Interpreter<'_> {
                     }
                 }
             }
+            mir::NullableStringExpression::Static(id) => match self.statics.get(id.0) {
+                Some(LocalValue::NullableString(value)) => {
+                    self.push_nullable_string(value.clone())?;
+                }
+                _ => {
+                    return Err(InterpreterError::new(format!(
+                        "MIR static{} was used as ?string",
+                        id.0
+                    )))
+                }
+            },
             mir::NullableStringExpression::Property { object, property } => {
                 match self.read_property(object, property)? {
                     LocalValue::NullableString(value) => self.push_nullable_string(value)?,
@@ -1777,6 +1823,13 @@ impl Interpreter<'_> {
                 ))),
                 LocalValue::Class { .. } => Err(InterpreterError::new(format!(
                     "MIR class local local{} was used as a scalar value",
+                    id.0
+                ))),
+            },
+            mir::Operand::Static(id) => match self.statics.get(id.0) {
+                Some(LocalValue::Scalar(value)) => Ok(*value),
+                _ => Err(InterpreterError::new(format!(
+                    "MIR static{} was used as scalar",
                     id.0
                 ))),
             },

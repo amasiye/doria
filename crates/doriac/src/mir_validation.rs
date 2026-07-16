@@ -11,6 +11,27 @@ pub fn validate_program(program: &mir::Program) -> Result<(), BackendError> {
     for (index, class) in program.classes.iter().enumerate() {
         validate_class(program, index, class)?;
     }
+    for (index, property) in program.statics.iter().enumerate() {
+        if property.id != mir::StaticId(index) {
+            return Err(malformed_mir(format!(
+                "static table slot {index} contains static{}",
+                property.id.0
+            )));
+        }
+        class_in(program, property.class)?;
+        let valid = match (&property.initializer, property.ty) {
+            (mir::StaticValue::Scalar(value), mir::Type::Scalar(ty)) => value.ty() == ty,
+            (mir::StaticValue::String(_), mir::Type::String | mir::Type::NullableString)
+            | (mir::StaticValue::Null, mir::Type::NullableString) => true,
+            _ => false,
+        };
+        if !valid {
+            return Err(malformed_mir(format!(
+                "static{} initializer does not match {}",
+                property.id.0, property.ty
+            )));
+        }
+    }
 
     let entry = program
         .functions
@@ -23,6 +44,9 @@ pub fn validate_program(program: &mir::Program) -> Result<(), BackendError> {
     }
     if !entry.params.is_empty() {
         return Err(malformed_mir("entry function declares parameters"));
+    }
+    if entry.method.is_some() || entry.receiver_mode.is_some() {
+        return Err(malformed_mir("entry function cannot be a method"));
     }
     if !matches!(
         entry.return_type,
@@ -43,9 +67,50 @@ pub fn validate_program(program: &mir::Program) -> Result<(), BackendError> {
                 function.id.0
             )));
         }
+        validate_method_identity(program, function)?;
         validate_function(program, function)?;
     }
     Ok(())
+}
+
+fn validate_method_identity(
+    program: &mir::Program,
+    function: &mir::Function,
+) -> Result<(), BackendError> {
+    match (&function.method, function.receiver_mode) {
+        (None, None) => Ok(()),
+        (None, Some(_)) => Err(malformed_mir(format!(
+            "free function {} declares a receiver mode",
+            function.name
+        ))),
+        (Some(method), None) => {
+            class_in(program, method.class)?;
+            Ok(())
+        }
+        (Some(method), Some(mir::ReceiverMode::UnsupportedConsuming)) => {
+            Err(malformed_mir(format!(
+                "method class#{}::{} uses the unsupported consuming receiver mode",
+                method.class.0, method.name
+            )))
+        }
+        (Some(method), Some(_)) => {
+            class_in(program, method.class)?;
+            let receiver = function.params.first().ok_or_else(|| {
+                malformed_mir(format!(
+                    "method class#{}::{} has no receiver parameter",
+                    method.class.0, method.name
+                ))
+            })?;
+            let receiver = local_in(function, *receiver)?;
+            if receiver.ty != mir::Type::Class(method.class) || receiver.owned {
+                return Err(malformed_mir(format!(
+                    "method class#{}::{} has an invalid receiver parameter",
+                    method.class.0, method.name
+                )));
+            }
+            Ok(())
+        }
+    }
 }
 
 fn validate_class(
@@ -340,6 +405,24 @@ fn validate_statement(
                 )?;
             }
             Ok(())
+        }
+        mir::Statement::AssignStatic { target, value } => {
+            let property = static_in(program, *target)?;
+            if !property.writable {
+                return Err(malformed_mir(format!(
+                    "assignment targets readonly static{}",
+                    target.0
+                )));
+            }
+            if value.ty() != property.ty {
+                return Err(malformed_mir(format!(
+                    "static{} receives {} but has type {}",
+                    target.0,
+                    value.ty(),
+                    property.ty
+                )));
+            }
+            validate_rvalue(program, function, value)
         }
         mir::Statement::DropClass { local, class } => {
             let definition = local_in(function, *local)?;
@@ -726,6 +809,7 @@ fn collect_string_class_local_accesses(
         }
         mir::StringExpression::Literal(_)
         | mir::StringExpression::Local(_)
+        | mir::StringExpression::Static(_)
         | mir::StringExpression::NullableLocalAssumeNonNull(_) => {}
         mir::StringExpression::Property { object, .. } => accesses.borrow(*object),
     }
@@ -744,6 +828,7 @@ fn collect_nullable_string_class_local_accesses(
         }
         mir::NullableStringExpression::Null
         | mir::NullableStringExpression::Local(_)
+        | mir::NullableStringExpression::Static(_)
         | mir::NullableStringExpression::ReadLine => {}
         mir::NullableStringExpression::Property { object, .. } => {
             accesses.borrow(*object);
@@ -840,7 +925,7 @@ fn collect_format_class_local_accesses(
 fn collect_statement_class_local_accesses(statement: &mir::Statement) -> ClassLocalAccesses {
     let mut accesses = ClassLocalAccesses::default();
     match statement {
-        mir::Statement::AssignLocal { value, .. } => {
+        mir::Statement::AssignLocal { value, .. } | mir::Statement::AssignStatic { value, .. } => {
             collect_rvalue_class_local_accesses(value, &mut accesses);
         }
         mir::Statement::EchoString(value) | mir::Statement::WriteStderr(value) => {
@@ -1558,6 +1643,9 @@ fn statement_observes_property(
             rvalue_observes_property(value, receiver, property)
         }
         mir::Statement::EchoStringLiteral(_) | mir::Statement::DropClass { .. } => false,
+        mir::Statement::AssignStatic { value, .. } => {
+            rvalue_observes_property(value, receiver, property)
+        }
         mir::Statement::EchoString(value) | mir::Statement::WriteStderr(value) => {
             string_observes_property(value, receiver, property)
         }
@@ -1709,6 +1797,7 @@ fn string_observes_property(
         }
         mir::StringExpression::Literal(_)
         | mir::StringExpression::Local(_)
+        | mir::StringExpression::Static(_)
         | mir::StringExpression::NullableLocalAssumeNonNull(_) => false,
     }
 }
@@ -1731,6 +1820,7 @@ fn nullable_string_observes_property(
             .any(|value| rvalue_observes_property(value, receiver, property)),
         mir::NullableStringExpression::Null
         | mir::NullableStringExpression::Local(_)
+        | mir::NullableStringExpression::Static(_)
         | mir::NullableStringExpression::ReadLine => false,
     }
 }
@@ -1895,6 +1985,36 @@ fn validate_call_args(
             "ordinary call targets lifecycle function {}",
             callee.name
         )));
+    }
+    if let (Some(method), Some(receiver_mode)) = (&callee.method, callee.receiver_mode) {
+        let Some(mir::Rvalue::Class(receiver)) = args.first() else {
+            return Err(malformed_mir(format!(
+                "call to method class#{}::{} has no explicit borrowed receiver",
+                method.class.0, method.name
+            )));
+        };
+        if matches!(receiver, mir::ClassExpression::Local { transfer: true, .. }) {
+            return Err(malformed_mir(format!(
+                "call to method class#{}::{} transfers its receiver",
+                method.class.0, method.name
+            )));
+        }
+        if receiver.class() != method.class {
+            return Err(malformed_mir(format!(
+                "call to method class#{}::{} uses class#{} as receiver",
+                method.class.0,
+                method.name,
+                receiver.class().0
+            )));
+        }
+        if receiver_mode == mir::ReceiverMode::Writable {
+            require_writable_class_expression(
+                program,
+                caller,
+                receiver,
+                &format!("call to method class#{}::{}", method.class.0, method.name),
+            )?;
+        }
     }
     validate_call_args_for_params(program, caller, callee, &callee.params, args, None)
 }
@@ -2115,6 +2235,11 @@ fn validate_integer_operand(
             }
             Ok(())
         }
+        mir::Operand::Static(id) => validate_static_operand(
+            program,
+            *id,
+            mir::Type::Scalar(mir::ScalarType::Integer(ty)),
+        ),
         mir::Operand::Property { object, property } => validate_property_operand(
             program,
             function,
@@ -2144,6 +2269,9 @@ fn validate_string_expression(
                 )));
             }
             Ok(())
+        }
+        mir::StringExpression::Static(id) => {
+            validate_static_operand(program, *id, mir::Type::String)
         }
         mir::StringExpression::Property { object, property } => {
             validate_property_operand(program, function, *object, *property, mir::Type::String)
@@ -2201,6 +2329,9 @@ fn validate_nullable_string_expression(
                 ));
             }
             Ok(())
+        }
+        mir::NullableStringExpression::Static(id) => {
+            validate_static_operand(program, *id, mir::Type::NullableString)
         }
         mir::NullableStringExpression::Property { object, property } => validate_property_operand(
             program,
@@ -2291,6 +2422,32 @@ fn class_in(program: &mir::Program, id: ClassId) -> Result<&mir::Class, BackendE
         .get(id.0)
         .filter(|class| class.id == id)
         .ok_or_else(|| malformed_mir(format!("ClassId class#{} does not exist", id.0)))
+}
+
+fn static_in(
+    program: &mir::Program,
+    id: mir::StaticId,
+) -> Result<&mir::StaticProperty, BackendError> {
+    program
+        .statics
+        .get(id.0)
+        .filter(|property| property.id == id)
+        .ok_or_else(|| malformed_mir(format!("static{} does not exist", id.0)))
+}
+
+fn validate_static_operand(
+    program: &mir::Program,
+    id: mir::StaticId,
+    expected: mir::Type,
+) -> Result<(), BackendError> {
+    let property = static_in(program, id)?;
+    if property.ty != expected {
+        return Err(malformed_mir(format!(
+            "static{} has type {} but is used as {}",
+            id.0, property.ty, expected
+        )));
+    }
+    Ok(())
 }
 
 fn property_in(
