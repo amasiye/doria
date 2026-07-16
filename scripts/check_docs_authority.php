@@ -382,6 +382,27 @@ if ($namingAuthority !== false) {
             $failures[] = "{$namingAuthorityPath}: missing required namespace/naming authority guidance {$guidance}";
         }
     }
+    // Record-citation integrity (section 12 numbering policy).
+    //
+    // The plan's section 12 list holds record SUBJECTS, not assignments: real
+    // numbers are taken from the next free slot at authoring time. Prose must
+    // therefore cite a subject ("the Console/terminal decision") until the
+    // record exists, and a number only once docs/decisions/NNNN-*.md is real.
+    //
+    // Without this guard the plan silently points implementers at unrelated
+    // accepted decisions. It has already happened twice: the plan claimed 0074
+    // for both formatted I/O (real) and geometry math (speculative), and cited
+    // 0072 for Console when in-repo 0072 is floats/bools.
+    // ---------------------------------------------------------------------
+    if (preg_match_all('/\brecord\s+(\d{4})\b/i', $namingAuthority, $citations) > 0) {
+        foreach (array_unique($citations[1]) as $number) {
+            $matches = glob($root . '/docs/decisions/' . $number . '-*.md');
+            if ($matches === false || $matches === []) {
+                $failures[] = "{$namingAuthorityPath}: cites \"record {$number}\" but docs/decisions/{$number}-*.md does not exist — plan prose cites a record subject until the record is authored (section 12 numbering policy)";
+            }
+        }
+    }
+
 }
 
 if ($failures !== []) {
