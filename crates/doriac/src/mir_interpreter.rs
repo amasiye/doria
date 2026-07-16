@@ -2227,52 +2227,9 @@ fn local_value_type(value: &LocalValue) -> mir::Type {
 
 fn display_scalar(value: mir::ScalarValue) -> String {
     match value {
-        mir::ScalarValue::Integer(value) if value.ty.is_signed() => {
-            value.signed_value().to_string()
-        }
-        mir::ScalarValue::Integer(value) => value.unsigned_value().to_string(),
+        mir::ScalarValue::Integer(value) => value.display(),
         mir::ScalarValue::Bool(value) => value.to_string(),
-        mir::ScalarValue::Float(value) => match value.ty {
-            crate::numeric::FloatType::Float32 => display_float32(value.as_f32()),
-            crate::numeric::FloatType::Float64 => display_float64(value.as_f64()),
-        },
-    }
-}
-
-fn display_float32(value: f32) -> String {
-    if value.is_nan() {
-        "NaN".to_string()
-    } else if value.is_infinite() {
-        if value.is_sign_negative() {
-            "-Infinity".to_string()
-        } else {
-            "Infinity".to_string()
-        }
-    } else if value == 0.0 {
-        if value.is_sign_negative() {
-            "-0".to_string()
-        } else {
-            "0".to_string()
-        }
-    } else {
-        ryu::Buffer::new().format_finite(value).to_string()
-    }
-}
-
-fn display_float64(value: f64) -> String {
-    if value.is_nan() {
-        "NaN".to_string()
-    } else if value.is_infinite() {
-        if value.is_sign_negative() {
-            "-Infinity"
-        } else {
-            "Infinity"
-        }
-        .to_string()
-    } else if value == 0.0 {
-        if value.is_sign_negative() { "-0" } else { "0" }.to_string()
-    } else {
-        ryu::Buffer::new().format_finite(value).to_string()
+        mir::ScalarValue::Float(value) => value.display(),
     }
 }
 

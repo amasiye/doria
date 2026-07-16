@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::backend::BackendError;
+use crate::const_eval::{ConstKey, ConstValue, Evaluation};
 use crate::diagnostics::Diagnostic;
 use crate::format_string::{self, FormatConversion, FormatPiece};
 use crate::hir::*;
@@ -119,7 +120,13 @@ function __doria_printf(string $format, mixed ...$values): void
         .collect();
     let mut scopes = PhpNameScopes::new(static_properties);
     for item in &program.items {
-        emit_item(item, &mut output, 0, &mut scopes);
+        emit_item(
+            item,
+            &program.semantic_info.const_evaluation,
+            &mut output,
+            0,
+            &mut scopes,
+        );
         if !output.ends_with("\n\n") {
             output.push('\n');
         }
@@ -142,7 +149,16 @@ fn validate_item(item: &Item, semantic_info: &SemanticInfo) -> Result<(), Backen
                 match member {
                     ClassMember::Property(property) => {
                         validate_type(&property.ty, property.span)?;
-                        if let Some(initializer) = &property.initializer {
+                        if property.is_static {
+                            validate_evaluated_value(
+                                semantic_info,
+                                &ConstKey::Static {
+                                    class_name: class_decl.name.clone(),
+                                    name: property.name.clone(),
+                                },
+                                property.span,
+                            )?;
+                        } else if let Some(initializer) = &property.initializer {
                             validate_expr(initializer, semantic_info)?;
                         }
                     }
@@ -151,7 +167,14 @@ fn validate_item(item: &Item, semantic_info: &SemanticInfo) -> Result<(), Backen
                         if let Some(ty) = &constant.ty {
                             validate_type(ty, constant.span)?;
                         }
-                        validate_expr(&constant.initializer, semantic_info)?;
+                        validate_evaluated_value(
+                            semantic_info,
+                            &ConstKey::Class {
+                                class_name: class_decl.name.clone(),
+                                name: constant.name.clone(),
+                            },
+                            constant.span,
+                        )?;
                     }
                 }
             }
@@ -162,9 +185,41 @@ fn validate_item(item: &Item, semantic_info: &SemanticInfo) -> Result<(), Backen
             if let Some(ty) = &constant.ty {
                 validate_type(ty, constant.span)?;
             }
-            validate_expr(&constant.initializer, semantic_info)
+            validate_evaluated_value(
+                semantic_info,
+                &ConstKey::TopLevel(constant.name.clone()),
+                constant.span,
+            )
         }
         Item::Statement(statement) => validate_statement(statement, semantic_info),
+    }
+}
+
+fn validate_evaluated_value(
+    semantic_info: &SemanticInfo,
+    key: &ConstKey,
+    span: Span,
+) -> Result<(), BackendError> {
+    let value = evaluated_value(&semantic_info.const_evaluation, key);
+    match value {
+        ConstValue::Integer(value) if !value.ty.is_default_int() => Err(unsupported_integer_shape(
+            span,
+            format!(
+                "Doria `{}` width and signedness with PHP's single signed integer type",
+                value.ty.source_name()
+            ),
+        )),
+        ConstValue::Integer(value) if value.mathematical_value() > i64::MAX as i128 => {
+            Err(unsupported_integer_shape(
+                span,
+                "an integer constant outside PHP's signed integer range",
+            ))
+        }
+        ConstValue::Float(value) if !value.ty.is_default_float() => Err(unsupported_numeric_shape(
+            span,
+            "Doria `float32` precision with PHP's `float` type",
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -705,16 +760,28 @@ impl PhpNameScopes {
     }
 }
 
-fn emit_item(item: &Item, output: &mut String, indent: usize, scopes: &mut PhpNameScopes) {
+fn emit_item(
+    item: &Item,
+    evaluation: &Evaluation,
+    output: &mut String,
+    indent: usize,
+    scopes: &mut PhpNameScopes,
+) {
     match item {
-        Item::Class(class_decl) => emit_class(class_decl, output, indent, scopes),
+        Item::Class(class_decl) => emit_class(class_decl, evaluation, output, indent, scopes),
         Item::Function(function) => emit_function(function, output, indent, false, scopes),
-        Item::Constant(constant) => emit_constant(constant, output, indent, false, scopes),
+        Item::Constant(constant) => emit_constant(constant, None, evaluation, output, indent),
         Item::Statement(statement) => emit_statement(statement, output, indent, scopes),
     }
 }
 
-fn emit_class(class_decl: &ClassDecl, output: &mut String, indent: usize, scopes: &PhpNameScopes) {
+fn emit_class(
+    class_decl: &ClassDecl,
+    evaluation: &Evaluation,
+    output: &mut String,
+    indent: usize,
+    scopes: &PhpNameScopes,
+) {
     let implements = if class_decl
         .implements
         .iter()
@@ -732,11 +799,22 @@ fn emit_class(class_decl: &ClassDecl, output: &mut String, indent: usize, scopes
     writeln(output, indent, "{");
     for member in &class_decl.members {
         match member {
-            ClassMember::Property(property) => emit_property(property, output, indent + 1, scopes),
+            ClassMember::Property(property) => emit_property(
+                property,
+                &class_decl.name,
+                evaluation,
+                output,
+                indent + 1,
+                scopes,
+            ),
             ClassMember::Method(method) => emit_function(method, output, indent + 1, true, scopes),
-            ClassMember::Constant(constant) => {
-                emit_constant(constant, output, indent + 1, true, scopes)
-            }
+            ClassMember::Constant(constant) => emit_constant(
+                constant,
+                Some(&class_decl.name),
+                evaluation,
+                output,
+                indent + 1,
+            ),
         }
         output.push('\n');
     }
@@ -745,6 +823,8 @@ fn emit_class(class_decl: &ClassDecl, output: &mut String, indent: usize, scopes
 
 fn emit_property(
     property: &PropertyDecl,
+    class_name: &str,
+    evaluation: &Evaluation,
     output: &mut String,
     indent: usize,
     shared_scopes: &PhpNameScopes,
@@ -761,33 +841,80 @@ fn emit_property(
     output.push_str(" $");
     output.push_str(&property.name);
     if let Some(initializer) = &property.initializer {
-        let scopes = shared_scopes.expression_scope();
         output.push_str(" = ");
-        output.push_str(&emit_expr(initializer, &scopes));
+        if property.is_static {
+            output.push_str(&emit_const_value(evaluated_value(
+                evaluation,
+                &ConstKey::Static {
+                    class_name: class_name.to_string(),
+                    name: property.name.clone(),
+                },
+            )));
+        } else {
+            output.push_str(&emit_expr(initializer, &shared_scopes.expression_scope()));
+        }
     }
     output.push_str(";\n");
 }
 
 fn emit_constant(
     constant: &ConstDecl,
+    class_name: Option<&str>,
+    evaluation: &Evaluation,
     output: &mut String,
     indent: usize,
-    is_member: bool,
-    shared_scopes: &PhpNameScopes,
 ) {
     write_indent(output, indent);
-    if is_member {
+    if class_name.is_some() {
         output.push_str(emit_member_access(&constant.access));
         output.push(' ');
     }
     output.push_str("const ");
     output.push_str(&constant.name);
     output.push_str(" = ");
-    output.push_str(&emit_expr(
-        &constant.initializer,
-        &shared_scopes.expression_scope(),
-    ));
+    let key = class_name.map_or_else(
+        || ConstKey::TopLevel(constant.name.clone()),
+        |class_name| ConstKey::Class {
+            class_name: class_name.to_string(),
+            name: constant.name.clone(),
+        },
+    );
+    output.push_str(&emit_const_value(evaluated_value(evaluation, &key)));
     output.push_str(";\n");
+}
+
+fn evaluated_value<'a>(evaluation: &'a Evaluation, key: &ConstKey) -> &'a ConstValue {
+    &evaluation
+        .values
+        .get(key)
+        .unwrap_or_else(|| {
+            panic!(
+                "checked declaration `{}` has no evaluated value",
+                key.display()
+            )
+        })
+        .value
+}
+
+fn emit_const_value(value: &ConstValue) -> String {
+    match value {
+        ConstValue::Integer(value) => value.display(),
+        ConstValue::Float(value) => {
+            let value = value.display();
+            match value.as_str() {
+                "NaN" => "NAN".to_string(),
+                "Infinity" => "INF".to_string(),
+                "-Infinity" => "-INF".to_string(),
+                _ if !value.contains('.') && !value.contains('e') && !value.contains('E') => {
+                    format!("{value}.0")
+                }
+                _ => value,
+            }
+        }
+        ConstValue::String(value) => emit_php_string_literal(value),
+        ConstValue::Bool(value) => value.to_string(),
+        ConstValue::Null => "null".to_string(),
+    }
 }
 
 fn emit_function(

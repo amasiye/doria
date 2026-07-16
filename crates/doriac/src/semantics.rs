@@ -374,7 +374,9 @@ impl<'program> Checker<'program> {
                     self.check_statement(statement, &mut scopes, None, None, None, 0);
                 }
                 Item::Function(function) => self.check_function(function, None),
-                Item::Constant(_) => {}
+                Item::Constant(constant) => {
+                    self.check_constant_initializer(&constant.initializer, None)
+                }
                 Item::Class(class_decl) => self.check_class(class_decl),
                 Item::Interface(interface_decl) => {
                     self.diagnostics
@@ -464,6 +466,17 @@ impl<'program> Checker<'program> {
                             .insert(method.span.start, signature.clone());
 
                         self.check_lifecycle_declaration_shape(method);
+
+                        if method.is_static && method.writable_this {
+                            self.diagnostics.push(
+                                Diagnostic::new(
+                                    "E0497",
+                                    "static methods cannot be declared `writable` because they have no `$this` receiver",
+                                    method.span,
+                                )
+                                .with_help("remove `writable`; mutate writable static properties through `ClassName::member` or `self::member`"),
+                            );
+                        }
 
                         if method.name == "__destruct" && !method.params.is_empty() {
                             self.diagnostics.push(Diagnostic::new(
@@ -1465,11 +1478,17 @@ impl<'program> Checker<'program> {
         for member in &class_decl.members {
             match member {
                 ClassMember::Property(property) => {
-                    if !property.is_static {
+                    if property.is_static {
+                        if let Some(initializer) = &property.initializer {
+                            self.check_constant_initializer(initializer, Some(&class_decl.name));
+                        }
+                    } else {
                         self.check_property_initializer(&class_decl.name, property);
                     }
                 }
-                ClassMember::Constant(_) => {}
+                ClassMember::Constant(constant) => {
+                    self.check_constant_initializer(&constant.initializer, Some(&class_decl.name))
+                }
                 ClassMember::Method(method) => {
                     let lifecycle = LifecycleMethod::from_method_name(&method.name);
                     self.check_function(
@@ -1489,6 +1508,16 @@ impl<'program> Checker<'program> {
                 }
             }
         }
+    }
+
+    fn check_constant_initializer(&mut self, initializer: &Expr, class_name: Option<&str>) {
+        let scopes = ScopeStack::new();
+        let context = class_name.map(|class_name| MethodContext {
+            class_name: class_name.to_string(),
+            receiver_mode: None,
+            this_available: false,
+        });
+        self.check_expr(initializer, &scopes, context.as_ref());
     }
 
     fn check_property_initializer(&mut self, class_name: &str, property: &PropertyDecl) {

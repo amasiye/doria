@@ -26,6 +26,16 @@ impl ConstValue {
             Self::Null => TypeRef::named("null"),
         }
     }
+
+    fn display(&self) -> Option<String> {
+        match self {
+            Self::Integer(value) => Some(value.display()),
+            Self::Float(value) => Some(value.display()),
+            Self::String(value) => Some(value.clone()),
+            Self::Bool(value) => Some(value.to_string()),
+            Self::Null => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -297,16 +307,7 @@ impl Evaluator {
         requester: &ConstKey,
     ) -> Option<ConstValue> {
         match expr {
-            Expr::Int { value, span } => {
-                let ty = expected.integer().unwrap_or(IntegerType::Int64);
-                let magnitude = parse_decimal_magnitude(value)?;
-                IntegerValue::from_literal(ty, magnitude, false)
-                    .map(ConstValue::Integer)
-                    .or_else(|| {
-                        self.invalid(*span, format!("constant integer does not fit `{ty}`"));
-                        None
-                    })
-            }
+            Expr::Int { value, span } => self.integer_literal(value, false, expected, *span),
             Expr::Float { value, span } => {
                 let ty = expected.float().unwrap_or(FloatType::Float64);
                 FloatValue::parse_decimal(ty, value)
@@ -349,6 +350,14 @@ impl Evaluator {
                     }
                 }
             }
+            Expr::Unary {
+                op: UnaryOp::Negate,
+                expr,
+                span,
+            } if Self::integer_literal_text(expr).is_some() => {
+                let value = Self::integer_literal_text(expr).expect("guard ensures a literal");
+                self.integer_literal(value, true, expected, *span)
+            }
             Expr::Unary { op, expr, span } => {
                 let value = self.evaluate_expr(expr, expected, requester)?;
                 self.unary(op, value, *span)
@@ -360,6 +369,15 @@ impl Evaluator {
                 span,
             } => {
                 let left = self.evaluate_expr(left, expected, requester)?;
+                match (op, &left) {
+                    (BinaryOp::And, ConstValue::Bool(false)) => {
+                        return Some(ConstValue::Bool(false));
+                    }
+                    (BinaryOp::Or, ConstValue::Bool(true)) => {
+                        return Some(ConstValue::Bool(true));
+                    }
+                    _ => {}
+                }
                 let right_expected = ConstType::of(&left);
                 let right = self.evaluate_expr(right, right_expected, requester)?;
                 self.binary(op, left, right, *span)
@@ -379,6 +397,47 @@ impl Evaluator {
                 None
             }
         }
+    }
+
+    fn integer_literal(
+        &mut self,
+        text: &str,
+        negative: bool,
+        expected: ConstType,
+        span: Span,
+    ) -> Option<ConstValue> {
+        let ty = expected.integer().unwrap_or(IntegerType::Int64);
+        let value = parse_decimal_magnitude(text)
+            .and_then(|magnitude| IntegerValue::from_literal(ty, magnitude, negative));
+        value.map(ConstValue::Integer).or_else(|| {
+            self.integer_literal_out_of_range(span, ty);
+            None
+        })
+    }
+
+    fn integer_literal_text(expr: &Expr) -> Option<&str> {
+        match expr {
+            Expr::Int { value, .. } => Some(value),
+            Expr::Grouped { expr, .. } => Self::integer_literal_text(expr),
+            _ => None,
+        }
+    }
+
+    fn integer_literal_out_of_range(&mut self, span: Span, ty: IntegerType) {
+        let mut diagnostic = Diagnostic::new(
+            "E0417",
+            format!(
+                "integer literal is outside the Doria `{}` range",
+                ty.source_name()
+            ),
+            span,
+        );
+        if ty == IntegerType::Int64 {
+            diagnostic = diagnostic.with_help(
+                "unconstrained integer literals default to `int`; add a `uint64` context when that is intended",
+            );
+        }
+        self.diagnostics.push(diagnostic);
     }
 
     fn qualifier_class_name(
@@ -474,6 +533,22 @@ impl Evaluator {
         right: ConstValue,
         span: Span,
     ) -> Option<ConstValue> {
+        if *op == BinaryOp::Concat
+            && (matches!(&left, ConstValue::String(_)) || matches!(&right, ConstValue::String(_)))
+        {
+            let result = left
+                .display()
+                .zip(right.display())
+                .map(|(left, right)| ConstValue::String(left + &right));
+            if result.is_none() {
+                self.invalid(
+                    span,
+                    "constant expression operand is not display-convertible",
+                );
+            }
+            return result;
+        }
+
         let result = match (left, right) {
             (ConstValue::Integer(left), ConstValue::Integer(right)) if left.ty == right.ty => {
                 self.integer_binary(op, left, right)

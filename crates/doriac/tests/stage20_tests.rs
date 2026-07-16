@@ -153,6 +153,43 @@ function main(): void
 }
 
 #[test]
+fn constant_evaluation_preserves_runtime_expression_semantics() {
+    let hir = doriac::lower_source(
+        "constant-semantics.doria",
+        r#"
+const bool SHORT_AND = false && (1 / 0 == 0);
+const bool SHORT_OR = true || (1 / 0 == 0);
+const int8 MIN_INT8 = -128;
+const int MIN_INT = -9223372036854775808;
+const string LABEL = "v" . 1 . ":" . true . ":" . 1.5;
+"#,
+    )
+    .expect("valid constant expressions should evaluate");
+    let values = &hir.semantic_info.const_evaluation.values;
+
+    assert!(matches!(
+        values[&ConstKey::TopLevel("SHORT_AND".to_string())].value,
+        ConstValue::Bool(false)
+    ));
+    assert!(matches!(
+        values[&ConstKey::TopLevel("SHORT_OR".to_string())].value,
+        ConstValue::Bool(true)
+    ));
+    assert!(matches!(
+        values[&ConstKey::TopLevel("MIN_INT8".to_string())].value,
+        ConstValue::Integer(value) if value.signed_value() == -128
+    ));
+    assert!(matches!(
+        values[&ConstKey::TopLevel("MIN_INT".to_string())].value,
+        ConstValue::Integer(value) if value.signed_value() == i64::MIN as i128
+    ));
+    assert!(matches!(
+        &values[&ConstKey::TopLevel("LABEL".to_string())].value,
+        ConstValue::String(value) if value == "v1:true:1.5"
+    ));
+}
+
+#[test]
 fn rejects_invalid_constant_dependencies_operations_and_names() {
     let cases = [
         ("const FIRST = SECOND; const SECOND = FIRST;", "E0482"),
@@ -164,6 +201,10 @@ fn rejects_invalid_constant_dependencies_operations_and_names() {
         ("const int VALUE = \"wrong\";", "E0484"),
         ("const not_upper = 1;", "E0490"),
         ("const VALUE = 1; const VALUE = 2;", "E0481"),
+        (
+            "const HUGE = 999999999999999999999999999999999999999999999999999999999999999999999999999999999999;",
+            "E0417",
+        ),
     ];
     for (source, code) in cases {
         assert_diagnostic(source, code);
@@ -174,6 +215,31 @@ fn rejects_invalid_constant_dependencies_operations_and_names() {
         |diagnostic| diagnostic.message.contains("FIRST -> SECOND -> FIRST")
             || diagnostic.message.contains("SECOND -> FIRST -> SECOND")
     ));
+}
+
+#[test]
+fn constant_initializers_use_normal_static_access_diagnostics() {
+    let cases = [
+        ("const VALUE = self::OTHER;", "E0492"),
+        ("class Base { const VALUE = parent::OTHER; }", "E0496"),
+        ("class Base { const VALUE = static::OTHER; }", "E0495"),
+        ("class Base { static int $value = static::OTHER; }", "E0495"),
+        (
+            "class Base { const OTHER = 1; const VALUE = Base::$OTHER; }",
+            "E0494",
+        ),
+    ];
+    for (source, code) in cases {
+        assert_diagnostic(source, code);
+    }
+}
+
+#[test]
+fn static_methods_reject_receiver_mutability() {
+    let found = diagnostics("class Counter { static writable function increment(): void {} }");
+    assert!(found.iter().any(|diagnostic| {
+        diagnostic.code == "E0497" && diagnostic.message.contains("have no `$this` receiver")
+    }));
 }
 
 #[test]

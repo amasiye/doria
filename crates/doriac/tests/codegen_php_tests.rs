@@ -1539,10 +1539,51 @@ function main(): void
 
     assert!(php.contains("const TOP_LIMIT = 42;"));
     assert!(php.contains("public const LABEL = \"ready\";"));
-    assert!(php.contains("public static int $initial = TOP_LIMIT;"));
-    assert!(php.contains("public static string $current = Counter::LABEL;"));
+    assert!(php.contains("public static int $initial = 42;"));
+    assert!(php.contains("public static string $current = \"ready\";"));
     assert!(php.contains("public static function read(): string"));
     assert!(php.contains("return Counter::$current;"));
     assert!(php.contains("Counter::$current = \"done\";"));
     assert!(php.contains("Counter::LABEL"));
+}
+
+#[test]
+fn php_backend_emits_evaluated_constants_and_static_initializers() {
+    let php = doriac::compile_source_to_php(
+        "evaluated-constants.doria",
+        r#"
+const ANSWER = LATER + 1;
+const LATER = 41;
+
+class Counter
+{
+    static int $initial = ANSWER;
+    static writable int $value = Counter::initial + 1;
+}
+
+echo ANSWER;
+echo Counter::value;
+"#,
+    )
+    .expect("evaluated declarations should lower to PHP literals");
+
+    assert!(php.contains("const ANSWER = 42;"));
+    assert!(php.contains("const LATER = 41;"));
+    assert!(php.contains("public static int $initial = 42;"));
+    assert!(php.contains("public static int $value = 43;"));
+    assert!(!php.contains("= LATER + 1"));
+    assert!(!php.contains("= Counter::$initial + 1"));
+
+    let run = Command::new("php")
+        .arg("-r")
+        .arg(php.strip_prefix("<?php").expect("generated PHP header"))
+        .output()
+        .expect("PHP should execute evaluated declarations");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(run.stdout, b"4243");
+    assert!(run.stderr.is_empty());
 }
