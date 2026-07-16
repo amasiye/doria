@@ -1227,7 +1227,7 @@ fn checks_function_call_arguments() {
     doriac::check_source(
         "test.doria",
         r#"
-function greet(string $name, string $suffix = "!"): void
+function greet(string $name, int $times = 1): void
 {
 }
 
@@ -1245,7 +1245,7 @@ function collectMixed(List<mixed> $items): void
 }
 
 greet("Andrew");
-greet("Andrew", "!");
+greet("Andrew", 2);
 int $total = sum(1, 2);
 collect([1, 2, 3]);
 collectMixed([1, 2]);
@@ -3907,14 +3907,6 @@ class Inventory
     Dictionary<string, int> $counts = [];
     List<A> $objects = [new A(), new A()];
 }
-
-function readCounts(Dictionary<string, int> $counts = []): void
-{
-}
-
-function readObjects(List<A> $objects = [new A(), new A()]): void
-{
-}
 "#,
     )
     .expect("semantic check should succeed");
@@ -4001,27 +3993,22 @@ fn checks_parameter_default_compatibility() {
     doriac::check_source(
         "test.doria",
         r#"
-function greet(string $name = "Andrew"): void
+function greet(int $count = 1): void
 {
 }
 
 class Person
 {
-    function __construct(string $name = "Andrew")
+    function __construct(int $age = 37)
     {
     }
 
-    function greet(string $name = Person::defaultName()): void
+    function greet(int $count = 2): void
     {
     }
 
-    function rename(string $name = "Lucy"): void
+    function rename(int $count = 3): void
     {
-    }
-
-    internal static function defaultName(): string
-    {
-        return "Andrew";
     }
 }
 "#,

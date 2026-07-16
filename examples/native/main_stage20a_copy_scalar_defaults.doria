@@ -1,0 +1,83 @@
+const int TOP_DEFAULT = 3;
+
+class Config
+{
+    const int DEFAULT = 4;
+}
+
+class Counter
+{
+    function __construct(writable int $value = 0)
+    {
+    }
+}
+
+class Defaults
+{
+    function value(int $number = Config::DEFAULT): int
+    {
+        return $number;
+    }
+
+    static function enabled(bool $value = true): bool
+    {
+        return $value;
+    }
+}
+
+function selected(int $number = TOP_DEFAULT): int
+{
+    return $number;
+}
+
+function total(int $first, int $second = 2, int $third = 3): int
+{
+    return $first + $second + $third;
+}
+
+function copyWidths(
+    int8 $a = -8,
+    int16 $b = -16,
+    int32 $c = -32,
+    int64 $d = -64,
+    uint8 $e = 8,
+    uint16 $f = 16,
+    uint32 $g = 32,
+    uint64 $h = 64,
+): int
+{
+    return 1;
+}
+
+function ratio(float32 $value = 1.5): float32
+{
+    return $value;
+}
+
+function main(): void
+{
+    let $defaults = new Defaults();
+    let $zero = new Counter();
+    let $five = new Counter(5);
+
+    echo selected(7);
+    echo ":";
+    echo selected();
+    echo ":";
+    echo total(1);
+    echo ":";
+    echo total(1, 4);
+    echo ":";
+    echo copyWidths();
+    echo ":";
+    echo $zero->value;
+    echo ":";
+    echo $five->value;
+    echo ":";
+    echo $defaults->value();
+    echo ":";
+    echo Defaults::enabled();
+    echo ":";
+    echo ratio();
+    echo "\n";
+}

@@ -27,6 +27,9 @@ pub struct SemanticInfo {
     pub classes: Vec<ClassSemanticInfo>,
     /// Values produced by the bounded Stage 20 constant evaluator.
     pub const_evaluation: crate::const_eval::Evaluation,
+    /// Const-folded Copy-scalar defaults keyed by callable and parameter identity.
+    pub parameter_defaults:
+        HashMap<crate::const_eval::ParameterDefaultKey, crate::const_eval::ConstValue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +94,7 @@ pub fn analyze_program(program: &Program) -> DiagnosticResult<SemanticInfo> {
             float_expression_types: checker.float_expression_types,
             classes: collect_ordered_class_semantics(program),
             const_evaluation: checker.const_evaluation,
+            parameter_defaults: checker.parameter_defaults,
         })
     } else {
         Err(checker.diagnostics)
@@ -205,6 +209,8 @@ struct Checker<'program> {
     negative_integer_literals: HashMap<(usize, usize), u128>,
     negated_integer_literal_operands: HashSet<(usize, usize)>,
     const_evaluation: crate::const_eval::Evaluation,
+    parameter_defaults:
+        HashMap<crate::const_eval::ParameterDefaultKey, crate::const_eval::ConstValue>,
 }
 
 #[derive(Debug, Clone)]
@@ -352,6 +358,7 @@ impl<'program> Checker<'program> {
             negative_integer_literals: HashMap::new(),
             negated_integer_literal_operands: HashSet::new(),
             const_evaluation,
+            parameter_defaults: HashMap::new(),
         }
     }
 
@@ -1759,7 +1766,12 @@ impl<'program> Checker<'program> {
             );
         }
         let return_context = self.return_context_for_function(function, method_context.as_ref());
-        for (param, param_info) in function.params.iter().zip(signature.params.iter()) {
+        for (parameter_index, (param, param_info)) in function
+            .params
+            .iter()
+            .zip(signature.params.iter())
+            .enumerate()
+        {
             let ty = param_info.ty;
             if let Some(default) = &param.default {
                 let default_context = method_context.as_ref().map(|context| MethodContext {
@@ -1778,6 +1790,13 @@ impl<'program> Checker<'program> {
                     AssignmentDestination::Parameter {
                         name: param.name.clone(),
                     },
+                );
+                self.check_parameter_default_support(
+                    function,
+                    parameter_index,
+                    param,
+                    ty,
+                    method_context.as_ref(),
                 );
             }
             self.declare_binding(
@@ -1810,6 +1829,74 @@ impl<'program> Checker<'program> {
             0,
         );
         self.check_missing_final_return(function, &return_context);
+    }
+
+    fn check_parameter_default_support(
+        &mut self,
+        function: &FunctionDecl,
+        parameter_index: usize,
+        param: &Param,
+        ty: TypeId,
+        method_context: Option<&MethodContext>,
+    ) {
+        let default = param
+            .default
+            .as_ref()
+            .expect("parameter-default validation requires a default");
+        let kind = self.types.kind(ty).clone();
+
+        if matches!(kind, TypeKind::String | TypeKind::NullableString) {
+            self.diagnostics.push(Diagnostic::new(
+                "E0498",
+                "default values for string parameters are not yet supported",
+                default.span(),
+            ));
+            return;
+        }
+
+        if param.take || self.type_is_move_type(ty) {
+            self.diagnostics.push(Diagnostic::new(
+                "E0498",
+                "default values for move-type or `take` parameters are not yet supported",
+                default.span(),
+            ));
+            return;
+        }
+
+        if !matches!(
+            kind,
+            TypeKind::Integer(_) | TypeKind::Float(_) | TypeKind::Bool
+        ) {
+            self.diagnostics.push(Diagnostic::new(
+                "E0498",
+                "default values for this parameter type are not yet supported",
+                default.span(),
+            ));
+            return;
+        }
+
+        let declaring_class = method_context.map(|context| context.class_name.as_str());
+        let Some(value) = crate::const_eval::evaluate_parameter_default(
+            &self.const_evaluation,
+            default,
+            &param.ty,
+            declaring_class,
+        ) else {
+            self.diagnostics.push(Diagnostic::new(
+                "E0498",
+                "a default value must be a constant expression",
+                default.span(),
+            ));
+            return;
+        };
+
+        self.parameter_defaults.insert(
+            crate::const_eval::ParameterDefaultKey {
+                function_start: function.span.start,
+                parameter_index,
+            },
+            value,
+        );
     }
 
     fn return_context_for_function(

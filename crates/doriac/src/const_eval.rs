@@ -70,6 +70,34 @@ pub struct Evaluation {
     pub values: HashMap<ConstKey, EvaluatedDecl>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ParameterDefaultKey {
+    pub function_start: usize,
+    pub parameter_index: usize,
+}
+
+pub fn evaluate_parameter_default(
+    evaluation: &Evaluation,
+    expr: &Expr,
+    expected: &TypeRef,
+    declaring_class: Option<&str>,
+) -> Option<ConstValue> {
+    let expected = const_type(expected)?;
+    let requester = EvaluationRequester::parameter_default(declaring_class);
+    let mut evaluator = Evaluator {
+        nodes: HashMap::new(),
+        states: evaluation
+            .values
+            .iter()
+            .map(|(key, value)| (key.clone(), State::Done(value.clone())))
+            .collect(),
+        stack: Vec::new(),
+        diagnostics: Vec::new(),
+    };
+    let value = evaluator.evaluate_expr(expr, expected, &requester)?;
+    evaluator.diagnostics.is_empty().then_some(value)
+}
+
 #[derive(Clone)]
 struct Node {
     key: ConstKey,
@@ -85,6 +113,33 @@ enum State {
     Visiting(usize),
     Done(EvaluatedDecl),
     Failed,
+}
+
+#[derive(Clone)]
+struct EvaluationRequester {
+    declaring_class: Option<String>,
+    static_initializer: bool,
+}
+
+impl EvaluationRequester {
+    fn declaration(key: &ConstKey) -> Self {
+        Self {
+            declaring_class: match key {
+                ConstKey::Class { class_name, .. } | ConstKey::Static { class_name, .. } => {
+                    Some(class_name.clone())
+                }
+                ConstKey::TopLevel(_) => None,
+            },
+            static_initializer: matches!(key, ConstKey::Static { .. }),
+        }
+    }
+
+    fn parameter_default(declaring_class: Option<&str>) -> Self {
+        Self {
+            declaring_class: declaring_class.map(str::to_string),
+            static_initializer: false,
+        }
+    }
 }
 
 pub fn evaluate_program(program: &ast::Program) -> DiagnosticResult<Evaluation> {
@@ -263,9 +318,10 @@ impl Evaluator {
                 ));
             }
         }
+        let requester = EvaluationRequester::declaration(&node.key);
         let evaluated = expected
             .or_else(|| node.annotation.is_none().then_some(ConstType::Infer))
-            .and_then(|expected| self.evaluate_expr(&node.initializer, expected, &node.key));
+            .and_then(|expected| self.evaluate_expr(&node.initializer, expected, &requester));
         self.stack.pop();
 
         let result = evaluated.and_then(|value| {
@@ -304,7 +360,7 @@ impl Evaluator {
         &mut self,
         expr: &Expr,
         expected: ConstType,
-        requester: &ConstKey,
+        requester: &EvaluationRequester,
     ) -> Option<ConstValue> {
         match expr {
             Expr::Int { value, span } => self.integer_literal(value, false, expected, *span),
@@ -335,14 +391,14 @@ impl Evaluator {
                     class_name: class_name.clone(),
                     name: member.clone(),
                 };
-                if self.nodes.contains_key(&constant) {
+                if self.nodes.contains_key(&constant) || self.states.contains_key(&constant) {
                     self.reference(&constant, *span, requester)
                 } else {
                     let static_key = ConstKey::Static {
                         class_name: class_name.clone(),
                         name: member.clone(),
                     };
-                    if !matches!(requester, ConstKey::Static { .. }) {
+                    if !requester.static_initializer {
                         self.invalid(*span, "constant expressions cannot read static properties");
                         None
                     } else {
@@ -443,16 +499,11 @@ impl Evaluator {
     fn qualifier_class_name(
         &self,
         qualifier: &StaticQualifier,
-        requester: &ConstKey,
+        requester: &EvaluationRequester,
     ) -> Option<String> {
         match qualifier {
             StaticQualifier::Class(name) => Some(name.clone()),
-            StaticQualifier::SelfType => match requester {
-                ConstKey::Class { class_name, .. } | ConstKey::Static { class_name, .. } => {
-                    Some(class_name.clone())
-                }
-                ConstKey::TopLevel(_) => None,
-            },
+            StaticQualifier::SelfType => requester.declaring_class.clone(),
             StaticQualifier::Parent | StaticQualifier::InvalidStatic => None,
         }
     }
@@ -461,17 +512,23 @@ impl Evaluator {
         &mut self,
         key: &ConstKey,
         span: Span,
-        requester: &ConstKey,
+        requester: &EvaluationRequester,
     ) -> Option<ConstValue> {
-        let Some(node) = self.nodes.get(key) else {
+        let declaration = self
+            .nodes
+            .get(key)
+            .map(|node| (node.access.clone(), node.writable))
+            .or_else(|| match self.states.get(key) {
+                Some(State::Done(value)) => Some((value.access.clone(), value.writable)),
+                Some(State::Visiting(_) | State::Failed) | None => None,
+            });
+        let Some((access, writable)) = declaration else {
             self.invalid(
                 span,
                 format!("unknown constant or static `{}`", key.display()),
             );
             return None;
         };
-        let access = node.access.clone();
-        let writable = node.writable;
         if matches!(key, ConstKey::Static { .. }) && writable {
             self.invalid(
                 span,
@@ -488,12 +545,7 @@ impl Evaluator {
             }
             ConstKey::TopLevel(_) => None,
         };
-        let requester_class = match requester {
-            ConstKey::Class { class_name, .. } | ConstKey::Static { class_name, .. } => {
-                Some(class_name.as_str())
-            }
-            ConstKey::TopLevel(_) => None,
-        };
+        let requester_class = requester.declaring_class.as_deref();
         if declaring_class != requester_class && access == MemberAccess::Internal {
             self.invalid(
                 span,
@@ -649,7 +701,7 @@ impl Evaluator {
         method: &str,
         args: &[Expr],
         span: Span,
-        requester: &ConstKey,
+        requester: &EvaluationRequester,
     ) -> Option<ConstValue> {
         let [argument] = args else {
             self.invalid(span, "constant conversion expects exactly one argument");
@@ -708,8 +760,8 @@ impl Evaluator {
         None
     }
 
-    fn unavailable(&mut self, requester: &ConstKey, span: Span, operation: &str) {
-        let diagnostic = if matches!(requester, ConstKey::Static { .. }) {
+    fn unavailable(&mut self, requester: &EvaluationRequester, span: Span, operation: &str) {
+        let diagnostic = if requester.static_initializer {
             Diagnostic::new(
                 "E0485",
                 format!(

@@ -13,6 +13,7 @@ struct FunctionSignature {
     id: mir::FunctionId,
     return_type: mir::ReturnType,
     parameter_types: Vec<mir::Type>,
+    parameter_defaults: Vec<Option<crate::const_eval::ConstValue>>,
     parameter_transfers: Vec<bool>,
     parameter_owns: Vec<bool>,
     method_class: Option<ClassId>,
@@ -236,6 +237,7 @@ pub fn lower_program(program: &hir::Program) -> DiagnosticResult<mir::Program> {
             function,
             mir::FunctionId(index),
             &class_ids,
+            &program.semantic_info,
             matches!(function.name.as_str(), "__construct" | "__destruct"),
         )?;
         signature.method_class = declaration.class;
@@ -377,6 +379,7 @@ fn collect_function_signature(
     function: &hir::FunctionDecl,
     id: mir::FunctionId,
     class_ids: &HashMap<String, ClassId>,
+    semantic_info: &SemanticInfo,
     lifecycle: bool,
 ) -> DiagnosticResult<FunctionSignature> {
     let return_type = match function.return_type.as_ref() {
@@ -434,18 +437,10 @@ fn collect_function_signature(
     }
 
     let mut parameter_types = Vec::with_capacity(function.params.len());
+    let mut parameter_defaults = Vec::with_capacity(function.params.len());
     let mut parameter_transfers = Vec::with_capacity(function.params.len());
     let mut parameter_owns = Vec::with_capacity(function.params.len());
-    for param in &function.params {
-        if param.default.is_some() {
-            return Err(vec![unsupported(
-                param.span,
-                format!(
-                    "default arguments are not supported by native compilation for function `{}`",
-                    function.name
-                ),
-            )]);
-        }
+    for (parameter_index, param) in function.params.iter().enumerate() {
         let parameter_type = if let Some(ty) = mir_type_ref(&param.ty, class_ids) {
             ty
         } else {
@@ -459,7 +454,31 @@ fn collect_function_signature(
         };
         let transfers = matches!(parameter_type, mir::Type::Class(_)) && param.take;
         let owns = transfers && param.promoted_access.is_none();
+        let default = if param.default.is_some() {
+            Some(
+                semantic_info
+                    .parameter_defaults
+                    .get(&crate::const_eval::ParameterDefaultKey {
+                        function_start: function.span.start,
+                        parameter_index,
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        vec![Diagnostic::new(
+                            "I2001",
+                            format!(
+                                "checked default for parameter `${}` of `{}` is missing",
+                                param.name, function.name
+                            ),
+                            param.span,
+                        )]
+                    })?,
+            )
+        } else {
+            None
+        };
         parameter_types.push(parameter_type);
+        parameter_defaults.push(default);
         parameter_transfers.push(transfers);
         parameter_owns.push(owns);
     }
@@ -468,6 +487,7 @@ fn collect_function_signature(
         id,
         return_type,
         parameter_types,
+        parameter_defaults,
         parameter_transfers,
         parameter_owns,
         method_class: None,
@@ -2757,44 +2777,110 @@ fn lower_call_args_with_ownership(
     span: Span,
     context: &LoweringContext,
 ) -> DiagnosticResult<Vec<mir::Rvalue>> {
-    if args.len() != signature.parameter_types.len() {
+    let required = signature
+        .parameter_defaults
+        .iter()
+        .filter(|default| default.is_none())
+        .count();
+    let total = signature.parameter_types.len();
+    if args.len() < required || args.len() > total {
         return Err(vec![unsupported(
             span,
             format!(
-                "function `{name}` expects {} positional argument(s), got {}",
-                signature.parameter_types.len(),
+                "function `{name}` expects {required}..={total} positional argument(s), got {}",
                 args.len()
             ),
         )]);
     }
 
-    args.iter()
-        .zip(
-            signature
-                .parameter_types
-                .into_iter()
-                .zip(signature.parameter_transfers),
-        )
-        .map(|(arg, (expected, transfers))| {
-            let lowered = match expected {
-                mir::Type::Class(class) => {
-                    mir::Rvalue::Class(lower_class_expression(arg, class, transfers, context)?)
-                }
-                _ => lower_rvalue_as_expected(arg, expected, context)?,
-            };
-            if lowered.ty() != expected {
-                return Err(vec![Diagnostic::new(
-                    "I1301",
-                    format!(
-                        "internal compiler consistency error: argument to `{name}` has MIR type `{}`, expected `{expected}`",
-                        lowered.ty()
-                    ),
-                    arg.span(),
-                )]);
+    let mut lowered_args = Vec::with_capacity(total);
+    for (index, arg) in args.iter().enumerate() {
+        let expected = signature.parameter_types[index];
+        let transfers = signature.parameter_transfers[index];
+        let lowered = match expected {
+            mir::Type::Class(class) => {
+                mir::Rvalue::Class(lower_class_expression(arg, class, transfers, context)?)
             }
-            Ok(lowered)
-        })
-        .collect()
+            _ => lower_rvalue_as_expected(arg, expected, context)?,
+        };
+        if lowered.ty() != expected {
+            return Err(vec![Diagnostic::new(
+                "I1301",
+                format!(
+                    "internal compiler consistency error: argument to `{name}` has MIR type `{}`, expected `{expected}`",
+                    lowered.ty()
+                ),
+                arg.span(),
+            )]);
+        }
+        lowered_args.push(lowered);
+    }
+
+    append_omitted_trailing_defaults(name, args.len(), &signature, span, &mut lowered_args)?;
+    Ok(lowered_args)
+}
+
+fn append_omitted_trailing_defaults(
+    name: &str,
+    supplied: usize,
+    signature: &FunctionSignature,
+    span: Span,
+    args: &mut Vec<mir::Rvalue>,
+) -> DiagnosticResult<()> {
+    for index in supplied..signature.parameter_types.len() {
+        let value = signature.parameter_defaults[index]
+            .as_ref()
+            .ok_or_else(|| {
+                vec![Diagnostic::new(
+                    "I2002",
+                    format!(
+                        "required parameter {} of `{name}` was omitted after semantic checking",
+                        index + 1
+                    ),
+                    span,
+                )]
+            })?;
+        args.push(lower_copy_scalar_default(
+            value,
+            signature.parameter_types[index],
+            span,
+        )?);
+    }
+    Ok(())
+}
+
+fn lower_copy_scalar_default(
+    value: &crate::const_eval::ConstValue,
+    expected: mir::Type,
+    span: Span,
+) -> DiagnosticResult<mir::Rvalue> {
+    let value = match (value, expected) {
+        (
+            crate::const_eval::ConstValue::Integer(value),
+            mir::Type::Scalar(mir::ScalarType::Integer(integer)),
+        ) if value.ty == integer => {
+            mir::ValueExpression::Integer(mir::IntegerExpression::constant(*value))
+        }
+        (
+            crate::const_eval::ConstValue::Float(value),
+            mir::Type::Scalar(mir::ScalarType::Float(float)),
+        ) if value.ty == float => {
+            mir::ValueExpression::Float(mir::FloatExpression::constant(*value))
+        }
+        (crate::const_eval::ConstValue::Bool(value), mir::Type::Scalar(mir::ScalarType::Bool)) => {
+            mir::ValueExpression::Bool(mir::BoolExpression::Use {
+                operand: mir::Operand::Scalar(mir::ScalarValue::Bool(*value)),
+            })
+        }
+        _ => {
+            return Err(vec![Diagnostic::new(
+                "I2003",
+                "checked parameter default does not match its Copy-scalar MIR type",
+                span,
+            )]);
+        }
+    };
+    Ok(mir::Rvalue::Value(value))
 }
 
 fn lower_instance_method_call(
