@@ -2372,6 +2372,27 @@ fn reports_qualified_type_names_as_semantic_coverage() {
 }
 
 #[test]
+fn reports_qualified_bare_identifiers_as_semantic_coverage() {
+    let diagnostics = doriac::check_source(
+        "test.doria",
+        r#"
+let $value = Vendor\Lib\VALUE;
+echo "{Vendor\Lib\LABEL}";
+"#,
+    )
+    .expect_err("qualified-name resolution is not implemented yet");
+
+    let qualified_name_diagnostics = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "E0475")
+        .count();
+    assert_eq!(qualified_name_diagnostics, 2, "{diagnostics:#?}");
+    assert!(diagnostics
+        .iter()
+        .all(|diagnostic| !diagnostic.code.starts_with('P')));
+}
+
+#[test]
 fn allows_property_initializer_accessing_own_internal_static_method() {
     doriac::check_source(
         "test.doria",

@@ -211,7 +211,7 @@ private class DoriaCreateClassDialog(
             return ValidationInfo("Enter a valid Doria namespace.", namespaceField)
         }
         val parent = parentField.text.trim()
-        if (parent.isNotEmpty() && !isDoriaQualifiedTypeName(parent)) {
+        if (parent.isNotEmpty() && !isDoriaQualifiedClassName(parent)) {
             return ValidationInfo("Enter one valid Doria parent type.", parentField)
         }
         return null
@@ -241,7 +241,7 @@ private class DoriaCreateClassDialog(
             "Add Doria Interface",
             DoriaIcons.FILE,
         )?.trim() ?: return
-        if (!isDoriaQualifiedTypeName(interfaceName)) {
+        if (!isDoriaQualifiedInterfaceName(interfaceName)) {
             Messages.showErrorDialog(
                 project,
                 "Enter a valid Doria interface type.",
@@ -347,10 +347,13 @@ private class DoriaCreateClassDialog(
         fun isDoriaNamespaceName(value: String): Boolean =
             DORIA_QUALIFIED_NAME.matches(value) && value.split('\\').all(::isDoriaIdentifier)
 
-        fun isDoriaQualifiedTypeName(value: String): Boolean {
+        fun isDoriaQualifiedClassName(value: String): Boolean {
             if (!DORIA_QUALIFIED_NAME.matches(value)) return false
             val segments = value.split('\\')
             return segments.dropLast(1).all(::isDoriaIdentifier) && isDoriaClassName(segments.last())
         }
+
+        fun isDoriaQualifiedInterfaceName(value: String): Boolean =
+            value == "Displayable" || isDoriaQualifiedClassName(value)
     }
 }

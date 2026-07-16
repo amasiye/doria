@@ -1179,7 +1179,7 @@ impl Parser {
 
     fn contains_bare_identifier(expr: &Expr) -> bool {
         match expr {
-            Expr::Identifier { .. } => true,
+            Expr::Identifier { name, .. } => !name.contains('\\'),
             Expr::InterpolatedString { parts, .. } => parts.iter().any(|part| match part {
                 InterpolatedStringPart::Text { .. } => false,
                 InterpolatedStringPart::Expr(expr) => Self::contains_bare_identifier(expr),

@@ -66,6 +66,10 @@ function is_naming_scanned_path(string $path): bool
         return false;
     }
 
+    if (is_decision_path($path)) {
+        return true;
+    }
+
     if (str_ends_with(strtolower($path), '.md')) {
         return true;
     }
@@ -155,6 +159,10 @@ foreach ($iterator as $file) {
 sort($markdownFiles);
 sort($namingFiles);
 sort($doriaCodeFiles);
+
+if (array_filter($namingFiles, 'is_decision_path') === []) {
+    $failures[] = 'internal docs-authority error: decision records are missing from naming checks';
+}
 
 foreach ($markdownFiles as $path) {
     $contents = file_get_contents($root . '/' . $path);

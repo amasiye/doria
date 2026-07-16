@@ -2625,10 +2625,12 @@ impl<'program> Checker<'program> {
                 }
             }
             Expr::Float { .. } => self.check_float_literal_range(expr, FloatType::Float64),
-            Expr::Identifier { .. }
-            | Expr::String { .. }
-            | Expr::Bool { .. }
-            | Expr::Null { .. } => {}
+            Expr::Identifier { name, span } => {
+                if name.contains('\\') {
+                    self.report_deferred_qualified_name(name, *span);
+                }
+            }
+            Expr::String { .. } | Expr::Bool { .. } | Expr::Null { .. } => {}
             Expr::Int { value, span } => {
                 if let Some(magnitude) = parse_decimal_magnitude(value) {
                     self.integer_literals

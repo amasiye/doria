@@ -942,8 +942,14 @@ function check_intellij_class_name_vocabulary(): void
         );
     }
     require_check(
-        str_contains($actionText, "isDoriaClassName(segments.last())"),
+        str_contains($actionText, "fun isDoriaQualifiedClassName")
+            && str_contains($actionText, "isDoriaClassName(segments.last())"),
         'IntelliJ class workflow must validate the terminal qualified type-name segment as a class name'
+    );
+    require_check(
+        str_contains($actionText, "if (!isDoriaQualifiedInterfaceName(interfaceName))")
+            && str_contains($actionText, 'value == "Displayable" || isDoriaQualifiedClassName(value)'),
+        'IntelliJ class workflow must accept Displayable in the interface picker without allowing it as a class name'
     );
 }
 
