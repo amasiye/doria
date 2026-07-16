@@ -1,30 +1,55 @@
+use crate::diagnostics::{Diagnostic, DiagnosticResult};
 use crate::{ast, hir};
 
-pub fn lower_program(program: &ast::Program) -> hir::Program {
+pub fn lower_program(program: &ast::Program) -> DiagnosticResult<hir::Program> {
     lower_program_with_semantics(program, crate::semantics::SemanticInfo::default())
 }
 
 pub fn lower_program_with_semantics(
     program: &ast::Program,
     semantic_info: crate::semantics::SemanticInfo,
-) -> hir::Program {
-    hir::Program {
-        items: program.items.iter().map(lower_item).collect(),
-        semantic_info,
+) -> DiagnosticResult<hir::Program> {
+    let mut items = Vec::with_capacity(program.items.len());
+    let mut diagnostics = Vec::new();
+    for item in &program.items {
+        match lower_item(item) {
+            Ok(item) => items.push(item),
+            Err(diagnostic) => diagnostics.push(diagnostic),
+        }
     }
+    if !diagnostics.is_empty() {
+        return Err(diagnostics);
+    }
+
+    Ok(hir::Program {
+        namespace: program
+            .namespace
+            .as_ref()
+            .map(|namespace| hir::NamespaceDecl {
+                name: namespace.name.clone(),
+                span: namespace.span,
+            }),
+        items,
+        semantic_info,
+    })
 }
 
-fn lower_item(item: &ast::Item) -> hir::Item {
+fn lower_item(item: &ast::Item) -> Result<hir::Item, Diagnostic> {
     match item {
-        ast::Item::Class(class_decl) => hir::Item::Class(lower_class(class_decl)),
-        ast::Item::Function(function) => hir::Item::Function(lower_function(function)),
-        ast::Item::Statement(statement) => hir::Item::Statement(lower_stmt(statement)),
+        ast::Item::Class(class_decl) => Ok(hir::Item::Class(lower_class(class_decl))),
+        ast::Item::Interface(interface_decl) => Err(
+            crate::semantics::interface_declaration_diagnostic(interface_decl),
+        ),
+        ast::Item::Function(function) => Ok(hir::Item::Function(lower_function(function))),
+        ast::Item::Statement(statement) => Ok(hir::Item::Statement(lower_stmt(statement))),
     }
 }
 
 fn lower_class(class_decl: &ast::ClassDecl) -> hir::ClassDecl {
     hir::ClassDecl {
         name: class_decl.name.clone(),
+        parent: class_decl.parent.clone(),
+        parent_span: class_decl.parent_span,
         implements: class_decl.implements.clone(),
         members: class_decl.members.iter().map(lower_class_member).collect(),
         span: class_decl.span,

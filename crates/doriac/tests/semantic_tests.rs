@@ -2315,13 +2315,81 @@ fn reserves_displayable_and_defers_general_interfaces() {
     assert_diagnostic_code("class Displayable {}", "E0309");
     assert_diagnostic_code("class Label implements Other {}", "E0464");
 
-    for source in ["interface Displayable {}", "interface Other {}"] {
-        let diagnostics = doriac::parse_source("test.doria", source)
-            .expect_err("interface declarations remain outside the Stage 18 subset");
+    for (source, code) in [
+        ("interface Displayable {}", "E0309"),
+        ("interface Other {}", "E0464"),
+    ] {
+        doriac::parse_source("test.doria", source)
+            .expect("accepted interface declarations should parse");
+        let diagnostics = doriac::check_source("test.doria", source)
+            .expect_err("interface semantics are not implemented yet");
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == code));
         assert!(diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "P0003"));
+            .all(|diagnostic| !diagnostic.code.starts_with('P')));
     }
+}
+
+#[test]
+fn reports_stable_semantic_gaps_for_accepted_class_workflow_syntax() {
+    let diagnostics = doriac::check_source(
+        "test.doria",
+        r#"
+namespace Vendor\App;
+class Child extends Vendor\Base implements Vendor\Contracts\Printable {}
+"#,
+    )
+    .expect_err("namespace, inheritance, and general conformance are not implemented yet");
+
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "E0475" && diagnostic.message.contains("namespace")));
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "E0476" && diagnostic.message.contains("extends")));
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "E0464" && diagnostic.message.contains("interface")));
+    assert!(diagnostics
+        .iter()
+        .all(|diagnostic| !diagnostic.code.starts_with('P')));
+}
+
+#[test]
+fn reports_qualified_type_names_as_semantic_coverage() {
+    let diagnostics = doriac::check_source(
+        "test.doria",
+        "function accept(Vendor\\Contracts\\Input $input): void {}",
+    )
+    .expect_err("qualified-name resolution is not implemented yet");
+
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "E0475" && diagnostic.message.contains("namespace")));
+    assert!(diagnostics
+        .iter()
+        .all(|diagnostic| !diagnostic.code.starts_with('P')));
+}
+
+#[test]
+fn reports_qualified_bare_identifiers_as_semantic_coverage() {
+    let diagnostics = doriac::check_source(
+        "test.doria",
+        r#"
+let $value = Vendor\Lib\VALUE;
+echo "{Vendor\Lib\LABEL}";
+"#,
+    )
+    .expect_err("qualified-name resolution is not implemented yet");
+
+    let qualified_name_diagnostics = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "E0475")
+        .count();
+    assert_eq!(qualified_name_diagnostics, 2, "{diagnostics:#?}");
+    assert!(diagnostics
+        .iter()
+        .all(|diagnostic| !diagnostic.code.starts_with('P')));
 }
 
 #[test]

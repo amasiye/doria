@@ -23,6 +23,11 @@ impl Parser {
     }
 
     pub fn parse_program(mut self) -> DiagnosticResult<Program> {
+        let namespace = if self.match_kind(&TokenKind::Namespace) {
+            self.parse_namespace()
+        } else {
+            None
+        };
         let mut items = Vec::new();
 
         while !self.is_at_end() {
@@ -33,18 +38,33 @@ impl Parser {
         }
 
         if self.diagnostics.is_empty() {
-            Ok(Program { items })
+            Ok(Program { namespace, items })
         } else {
             Err(self.diagnostics)
         }
+    }
+
+    fn parse_namespace(&mut self) -> Option<NamespaceDecl> {
+        let start = self.previous().span.start;
+        let name = self.expect_qualified_name("expected namespace name")?;
+        let end = self
+            .expect(
+                TokenKind::Semicolon,
+                "expected `;` after namespace declaration",
+            )?
+            .span
+            .end;
+        Some(NamespaceDecl {
+            name,
+            span: Span::new(start, end),
+        })
     }
 
     fn parse_item(&mut self) -> Option<Item> {
         if self.match_kind(&TokenKind::Class) {
             self.parse_class().map(Item::Class)
         } else if self.match_kind(&TokenKind::Interface) {
-            self.parse_unsupported_interface();
-            None
+            self.parse_interface().map(Item::Interface)
         } else if self.match_kind(&TokenKind::Function) {
             self.parse_function(MemberAccess::External, None, None, self.previous().span)
                 .map(Item::Function)
@@ -56,11 +76,22 @@ impl Parser {
     fn parse_class(&mut self) -> Option<ClassDecl> {
         let start = self.previous().span.start;
         let name = self.expect_identifier("expected class name")?;
+        let (parent, parent_span) = if self.match_kind(&TokenKind::Extends) {
+            let parent_start = self.previous().span.start;
+            let parent = self.expect_qualified_name("expected parent class after `extends`")?;
+            (
+                Some(parent),
+                Some(Span::new(parent_start, self.previous().span.end)),
+            )
+        } else {
+            (None, None)
+        };
         let mut implements = Vec::new();
         if self.match_kind(&TokenKind::Implements) {
             loop {
-                implements
-                    .push(self.expect_identifier("expected interface name after `implements`")?);
+                implements.push(
+                    self.expect_qualified_name("expected interface name after `implements`")?,
+                );
                 if !self.match_kind(&TokenKind::Comma) {
                     break;
                 }
@@ -84,6 +115,8 @@ impl Parser {
 
         Some(ClassDecl {
             name,
+            parent,
+            parent_span,
             implements,
             members,
             span: Span::new(start, end),
@@ -188,30 +221,31 @@ impl Parser {
         })
     }
 
-    fn parse_unsupported_interface(&mut self) {
+    fn parse_interface(&mut self) -> Option<InterfaceDecl> {
         let start = self.previous().span.start;
-        let name = self.expect_identifier("expected interface name");
-        let message = if matches!(name.as_deref(), Some("Displayable")) {
-            "`Displayable` is a compiler-known interface and cannot be redeclared"
-        } else {
-            "general interface declarations are not supported by this compiler"
-        };
+        let name = self.expect_identifier("expected interface name")?;
+        self.expect(TokenKind::LeftBrace, "expected `{` after interface name")?;
 
+        let mut depth = 1_usize;
         let mut end = self.previous().span.end;
-        if self.match_kind(&TokenKind::LeftBrace) {
-            let mut depth = 1_usize;
-            while depth > 0 && !self.is_at_end() {
-                let token = self.advance();
-                end = token.span.end;
-                match token.kind {
-                    TokenKind::LeftBrace => depth += 1,
-                    TokenKind::RightBrace => depth -= 1,
-                    _ => {}
-                }
+        while depth > 0 {
+            if self.is_at_end() {
+                self.error("expected `}` after interface body", self.peek().span);
+                return None;
+            }
+            let token = self.advance();
+            end = token.span.end;
+            match token.kind {
+                TokenKind::LeftBrace => depth += 1,
+                TokenKind::RightBrace => depth -= 1,
+                _ => {}
             }
         }
-        self.diagnostics
-            .push(Diagnostic::new("P0003", message, Span::new(start, end)));
+
+        Some(InterfaceDecl {
+            name,
+            span: Span::new(start, end),
+        })
     }
 
     fn parse_param(&mut self, is_constructor: bool) -> Option<Param> {
@@ -924,6 +958,11 @@ impl Parser {
                 }
             }
             TokenKind::Identifier(name) => {
+                let name = self.finish_qualified_name(
+                    name,
+                    "expected name segment after namespace separator",
+                )?;
+                let name_span = Span::new(token.span.start, self.previous().span.end);
                 if self.match_kind(&TokenKind::DoubleColon) {
                     let method = self.expect_identifier("expected method name after `::`")?;
                     self.expect(
@@ -941,7 +980,7 @@ impl Parser {
                 } else {
                     Some(Expr::Identifier {
                         name,
-                        span: token.span,
+                        span: name_span,
                     })
                 }
             }
@@ -1140,7 +1179,7 @@ impl Parser {
 
     fn contains_bare_identifier(expr: &Expr) -> bool {
         match expr {
-            Expr::Identifier { .. } => true,
+            Expr::Identifier { name, .. } => !name.contains('\\'),
             Expr::InterpolatedString { parts, .. } => parts.iter().any(|part| match part {
                 InterpolatedStringPart::Text { .. } => false,
                 InterpolatedStringPart::Expr(expr) => Self::contains_bare_identifier(expr),
@@ -1192,7 +1231,7 @@ impl Parser {
     }
 
     fn parse_new(&mut self, start: usize) -> Option<Expr> {
-        let class_name = self.expect_identifier("expected class name after `new`")?;
+        let class_name = self.expect_qualified_name("expected class name after `new`")?;
         self.expect(TokenKind::LeftParen, "expected `(` after class name")?;
         let args = self.parse_argument_list_after_open()?;
         let span = Span::new(start, self.previous().span.end);
@@ -1291,7 +1330,10 @@ impl Parser {
             TokenKind::StringType => "string".to_string(),
             TokenKind::BoolType => "bool".to_string(),
             TokenKind::Null => "null".to_string(),
-            TokenKind::Identifier(name) => name,
+            TokenKind::Identifier(name) => self.finish_qualified_name(
+                name,
+                "expected type-name segment after namespace separator",
+            )?,
             other => {
                 self.error(
                     format!("expected type name, found `{}`", token_name(&other)),
@@ -1452,6 +1494,19 @@ impl Parser {
         }
     }
 
+    fn expect_qualified_name(&mut self, message: &str) -> Option<String> {
+        let first = self.expect_identifier(message)?;
+        self.finish_qualified_name(first, "expected name segment after namespace separator")
+    }
+
+    fn finish_qualified_name(&mut self, mut name: String, message: &str) -> Option<String> {
+        while self.match_kind(&TokenKind::Backslash) {
+            name.push('\\');
+            name.push_str(&self.expect_identifier(message)?);
+        }
+        Some(name)
+    }
+
     fn expect_variable(&mut self, message: &str) -> Option<(String, Span)> {
         self.consume_variable().or_else(|| {
             self.error(message, self.peek().span);
@@ -1529,6 +1584,7 @@ impl Parser {
             match self.peek().kind {
                 TokenKind::Class
                 | TokenKind::Interface
+                | TokenKind::Namespace
                 | TokenKind::Function
                 | TokenKind::Let
                 | TokenKind::Echo
@@ -1553,6 +1609,8 @@ fn token_name(kind: &TokenKind) -> &'static str {
         TokenKind::Class => "class",
         TokenKind::Interface => "interface",
         TokenKind::Implements => "implements",
+        TokenKind::Namespace => "namespace",
+        TokenKind::Extends => "extends",
         TokenKind::Function => "function",
         TokenKind::Internal => "internal",
         TokenKind::Static => "static",
@@ -1602,6 +1660,7 @@ fn token_name(kind: &TokenKind) -> &'static str {
         TokenKind::Minus => "-",
         TokenKind::Star => "*",
         TokenKind::Slash => "/",
+        TokenKind::Backslash => "\\",
         TokenKind::Percent => "%",
         TokenKind::Dot => ".",
         TokenKind::DotDot => "..",

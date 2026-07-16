@@ -4,6 +4,65 @@ use doriac::ast::{
 };
 
 #[test]
+fn parses_class_workflow_and_qualified_type_syntax_before_semantics_land() {
+    let program = doriac::parse_source(
+        "test.doria",
+        r#"
+namespace Vendor\App;
+
+class Child extends Vendor\Base implements Vendor\Contracts\Printable
+{
+    function convert(Vendor\Input $input): Vendor\Output
+    {
+        return new Vendor\Output();
+    }
+}
+"#,
+    )
+    .expect("accepted namespace and inheritance syntax should parse");
+
+    assert_eq!(
+        program
+            .namespace
+            .as_ref()
+            .map(|namespace| namespace.name.as_str()),
+        Some("Vendor\\App")
+    );
+    let Item::Class(class) = &program.items[0] else {
+        panic!("expected class declaration");
+    };
+    assert_eq!(class.parent.as_deref(), Some("Vendor\\Base"));
+    assert_eq!(class.implements, ["Vendor\\Contracts\\Printable"]);
+    let ClassMember::Method(method) = &class.members[0] else {
+        panic!("expected method declaration");
+    };
+    assert_eq!(method.params[0].ty.name, "Vendor\\Input");
+    assert_eq!(
+        method.return_type.as_ref().map(|ty| ty.name.as_str()),
+        Some("Vendor\\Output")
+    );
+}
+
+#[test]
+fn parses_interface_declarations_before_semantics_land() {
+    let program = doriac::parse_source(
+        "test.doria",
+        r#"
+interface Printable
+{
+    function render(): string;
+}
+"#,
+    )
+    .expect("accepted interface syntax should parse");
+
+    let Item::Interface(interface) = &program.items[0] else {
+        panic!("expected interface declaration");
+    };
+    assert_eq!(interface.name, "Printable");
+}
+
+#[test]
 fn parses_variable_declarations() {
     let program = doriac::parse_source(
         "test.doria",
@@ -284,7 +343,8 @@ fn structural_lowering_preserves_stage_13_operator_variants() {
         "$value <<= 1; echo ~-$value | $mask ^ $other & 1;",
     )
     .expect("parse should succeed");
-    let hir = doriac::lowering::lower_program(&ast);
+    let hir = doriac::lowering::lower_program(&ast)
+        .expect("AST without interface declarations should lower structurally");
 
     assert!(matches!(
         &hir.items[0],
@@ -301,6 +361,20 @@ fn structural_lowering_preserves_stage_13_operator_variants() {
             ..
         })
     ));
+}
+
+#[test]
+fn direct_lowering_reports_accepted_interface_declarations() {
+    let ast = doriac::parse_source("test.doria", "interface Printable {}")
+        .expect("accepted interface declaration should parse");
+    let diagnostics = doriac::lowering::lower_program(&ast)
+        .expect_err("unsupported interface declaration should not reach Doria IR");
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code, "E0464");
+    assert!(diagnostics[0]
+        .message
+        .contains("interface declaration `Printable`"));
 }
 
 #[test]

@@ -66,6 +66,10 @@ function is_naming_scanned_path(string $path): bool
         return false;
     }
 
+    if (is_decision_path($path)) {
+        return true;
+    }
+
     if (str_ends_with(strtolower($path), '.md')) {
         return true;
     }
@@ -78,9 +82,43 @@ function is_naming_scanned_path(string $path): bool
         && str_ends_with(strtolower($path), '.doria');
 }
 
+/**
+ * Doria source that must be charter-clean, checked strictly with no contextual
+ * exemption. Prose may legitimately name a rejected spelling (fixit tables,
+ * migration mappings, "considered and rejected" rationale); code never may.
+ *
+ * examples/errors/ and editors/fixtures/rejected-syntax.doria are exempt: those
+ * corpora exist to demonstrate rejected spellings and their diagnostics.
+ * examples/future/ is NOT exempt — per plan section 0 (two clocks), future
+ * examples are accepted Doria that has not been implemented yet, so they are
+ * held to the same charter as any other source.
+ */
+function is_doria_strict_code_path(string $path): bool
+{
+    if (!str_ends_with(strtolower($path), '.doria')) {
+        return false;
+    }
+
+    if (str_starts_with($path, 'examples/errors/') || $path === 'editors/fixtures/rejected-syntax.doria') {
+        return false;
+    }
+
+    return str_starts_with($path, 'examples/')
+        || $path === 'editors/fixtures/latest-tokens.doria';
+}
+
 function line_is_negating_or_contextual(string $line): bool
 {
     return preg_match('/\b(not|never|no|without|reject|rejected|invalid|reserved|literal|planned|future|PHP|interop|migration|historical|not Doria)\b/i', $line) === 1;
+}
+
+/**
+ * `std::` is forbidden as a Doria stdlib spelling, but other languages'
+ * standard libraries are legitimately discussed in rationale and prior art.
+ */
+function line_is_foreign_stdlib_context(string $line): bool
+{
+    return preg_match('/\b(Rust|C\+\+|Cargo|crate)\b/i', $line) === 1;
 }
 
 function add_failure(array &$failures, string $path, int $lineNumber, string $message, string $line): void
@@ -94,6 +132,7 @@ $iterator = new RecursiveIteratorIterator(
 
 $markdownFiles = [];
 $namingFiles = [];
+$doriaCodeFiles = [];
 foreach ($iterator as $file) {
     if (!$file->isFile()) {
         continue;
@@ -111,10 +150,19 @@ foreach ($iterator as $file) {
     if (is_naming_scanned_path($path)) {
         $namingFiles[] = $path;
     }
+
+    if (is_doria_strict_code_path($path)) {
+        $doriaCodeFiles[] = $path;
+    }
 }
 
 sort($markdownFiles);
 sort($namingFiles);
+sort($doriaCodeFiles);
+
+if (array_filter($namingFiles, 'is_decision_path') === []) {
+    $failures[] = 'internal docs-authority error: decision records are missing from naming checks';
+}
 
 foreach ($markdownFiles as $path) {
     $contents = file_get_contents($root . '/' . $path);
@@ -213,15 +261,88 @@ foreach ($namingFiles as $path) {
 
     $lines = preg_split('/\R/', $contents) ?: [];
     foreach ($lines as $index => $line) {
+        $lineNumber = $index + 1;
+
         foreach ($forbiddenNamingExamples as $example) {
             if (str_contains($line, $example)) {
                 add_failure(
                     $failures,
                     $path,
-                    $index + 1,
+                    $lineNumber,
                     "active Doria guidance must not use stale snake_case member example {$example}",
                     $line
                 );
+            }
+        }
+
+        // Record 0085: stdlib modules are namespaces under the reserved Doria\Std
+        // root. `std::term` and friends were a Rust-shaped spelling that leaked
+        // through the plan, decision records, and agent prompts before it was
+        // caught; this guard prevents the regression.
+        if (preg_match('/\bstd::/', $line) === 1 && !line_is_foreign_stdlib_context($line)) {
+            add_failure(
+                $failures,
+                $path,
+                $lineNumber,
+                'Doria stdlib modules are namespaces (Doria\\Std\\Term, Doria\\Std\\Math), never Rust-shaped std:: paths',
+                $line
+            );
+        }
+
+        // Section 9.1: namespace segments are PascalCase with acronyms folded.
+        if (preg_match('/\bDoria(?:\\\\[A-Za-z0-9_]+)*\\\\[A-Z]{2,}/', $line) === 1) {
+            add_failure(
+                $failures,
+                $path,
+                $lineNumber,
+                'namespace segments fold acronyms: Doria\\Std\\Io / Doria\\Std\\Http / Doria\\Orm, never IO / HTTP / ORM',
+                $line
+            );
+        }
+    }
+}
+
+/**
+ * Strict charter checks over Doria source. No contextual exemption: prose may
+ * name a rejected spelling, code may not.
+ */
+$forbiddenVisibilityPattern = '/^\s*(public|private|protected)\b/';
+foreach (['public Person $owner;', 'private List<int> $items;'] as $visibilityExample) {
+    if (preg_match($forbiddenVisibilityPattern, $visibilityExample) !== 1) {
+        $failures[] = "internal docs-authority error: visibility guard does not cover {$visibilityExample}";
+    }
+}
+$forbiddenPrintStatementPattern = '/^\s*print\b/';
+foreach (['print "text";', 'print 1;', 'print true;', 'print getName();'] as $printExample) {
+    if (preg_match($forbiddenPrintStatementPattern, $printExample) !== 1) {
+        $failures[] = "internal docs-authority error: print guard does not cover {$printExample}";
+    }
+}
+
+$forbiddenCodeSpellings = [
+    ['/\binstanceof\b/', 'instanceof is rejected permanently; the type-test and narrowing operator is `is` (record 0085)'],
+    ['/\breadline\s*\(/', 'readline is rejected as a fused name; the stdin built-in is read_line'],
+    ['/__toString/', 'Doria has no __toString magic method; display conversion is Displayable::toString'],
+    [$forbiddenPrintStatementPattern, 'print is rejected; echo is the spelling'],
+    ['/\bstd::/', 'Doria stdlib modules are namespaces (Doria\\Std\\Term), never std:: paths'],
+    [
+        $forbiddenVisibilityPattern,
+        'Doria has no public/private/protected; members are accessible by default and internal marks implementation details',
+    ],
+];
+
+foreach ($doriaCodeFiles as $path) {
+    $contents = file_get_contents($root . '/' . $path);
+    if ($contents === false) {
+        $failures[] = "{$path}: unable to read file for Doria source charter checks";
+        continue;
+    }
+
+    $lines = preg_split('/\R/', $contents) ?: [];
+    foreach ($lines as $index => $line) {
+        foreach ($forbiddenCodeSpellings as [$pattern, $message]) {
+            if (preg_match($pattern, $line) === 1) {
+                add_failure($failures, $path, $index + 1, $message, $line);
             }
         }
     }
@@ -236,6 +357,13 @@ if ($namingAuthority === false) {
         if (!str_contains($namingAuthority, $example)) {
             $failures[] = "{$namingAuthorityPath}: missing required corrected naming example {$example}";
         }
+    }
+
+    // The bullet the examples live under. Previously an unenforced convention
+    // communicated by hand to contributors and agents; now a checked invariant.
+    $namingBullet = 'Canonical member-casing examples (normative; preserve these spellings)';
+    if (!str_contains($namingAuthority, $namingBullet)) {
+        $failures[] = "{$namingAuthorityPath}: missing required naming-authority bullet \"{$namingBullet}\"";
     }
 }
 
@@ -256,6 +384,46 @@ if ($namingAuthority !== false) {
             $failures[] = "{$namingAuthorityPath}: contains stale I/O authority guidance {$staleGuidance}";
         }
     }
+
+    // ---------------------------------------------------------------------
+    // Namespace-model authority (record 0085).
+    //
+    // PAIRING NOTE: these assertions land WITH the plan commit that performs
+    // the Doria\Std sweep and adds record 0085. Enabling them against a plan
+    // that still carries `std::term` spellings will fail CI. Land both, or
+    // neither.
+    // ---------------------------------------------------------------------
+    $requiredNamespaceGuidance = [
+        'Doria\Std\Term',
+        'Doria\Std\Math',
+        'read_line',
+    ];
+    foreach ($requiredNamespaceGuidance as $guidance) {
+        if (!str_contains($namingAuthority, $guidance)) {
+            $failures[] = "{$namingAuthorityPath}: missing required namespace/naming authority guidance {$guidance}";
+        }
+    }
+    // Record-citation integrity (section 12 numbering policy).
+    //
+    // The plan's section 12 list holds record SUBJECTS, not assignments: real
+    // numbers are taken from the next free slot at authoring time. Prose must
+    // therefore cite a subject ("the Console/terminal decision") until the
+    // record exists, and a number only once docs/decisions/NNNN-*.md is real.
+    //
+    // Without this guard the plan silently points implementers at unrelated
+    // accepted decisions. It has already happened twice: the plan claimed 0074
+    // for both formatted I/O (real) and geometry math (speculative), and cited
+    // 0072 for Console when in-repo 0072 is floats/bools.
+    // ---------------------------------------------------------------------
+    if (preg_match_all('/\brecord\s+(\d{4})\b/i', $namingAuthority, $citations) > 0) {
+        foreach (array_unique($citations[1]) as $number) {
+            $matches = glob($root . '/docs/decisions/' . $number . '-*.md');
+            if ($matches === false || $matches === []) {
+                $failures[] = "{$namingAuthorityPath}: cites \"record {$number}\" but docs/decisions/{$number}-*.md does not exist — plan prose cites a record subject until the record is authored (section 12 numbering policy)";
+            }
+        }
+    }
+
 }
 
 if ($failures !== []) {

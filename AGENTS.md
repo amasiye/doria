@@ -194,8 +194,8 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo build --workspace --all-targets --locked --verbose
 cargo test --workspace --all-targets --locked --verbose
-cargo run -p doriac -- check examples/person.doria
-cargo run -p doriac -- hir examples/person.doria
+cargo run -p doriac -- check examples/php/person.doria
+cargo run -p doriac -- hir examples/php/person.doria
 cargo run -p doriac -- compile examples/native/main_return_zero.doria --target native --out build/native/main_return_zero
 cargo run -p doriac -- compile examples/native/main_return_42.doria --target native --out build/native/main_return_42
 cargo run -p doriac -- compile examples/native/main_void_hello.doria --target native --out build/native/main_void_hello
@@ -211,7 +211,7 @@ php scripts/check_editor_highlighting.php
 Run backend-specific checks only when the touched task depends on that backend. For the current PHP compatibility backend:
 
 ```bash
-cargo run -p doriac -- compile examples/person.doria --target php --out build/person.php
+cargo run -p doriac -- compile examples/php/person.doria --target php --out build/person.php
 ```
 
 When native backend work changes supported behavior, run linker-independent Cranelift and LLVM object tests plus the complete durable interpreter/Cranelift/LLVM differential suite. The current Stage 18 profiles support top-level free functions, one parameterless int/void `main`, path-sensitive returns, recursion, structured control flow, fixed-width numerics, runtime bool/string/narrow-nullable values, full primitive expression interpolation, checked formatting, UTF-8 line and file I/O, exact stderr, and abort-only panic. Normal interpretation has no artificial block or call-depth cap, and native compilation has no interpreter preflight. Only `main(): int` crosses the `0..125` process-status boundary. The durable manifest must include every finite native example and compare exact stdout, stderr, status, and declared file side effects. Do not treat the internal `doria-rt` ABI as stable or claim native classes, collections, general ownership checking, general nullable types, or binary I/O support.
