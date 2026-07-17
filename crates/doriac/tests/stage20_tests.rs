@@ -347,6 +347,20 @@ function main(): void
     );
     assert_eq!(independent.stdout, b"32");
 
+    let grouped_place = interpret(
+        r#"
+class Counter { static writable int $value = 1; }
+function main(): void
+{
+    (Counter::value) = 2;
+    (Counter::value) += 3;
+    (Counter::value)++;
+    echo Counter::value;
+}
+"#,
+    );
+    assert_eq!(grouped_place.stdout, b"6");
+
     assert_diagnostic(
         "class Counter { static int $value = 1; } function main(): void { Counter::value = 2; }",
         "E0202",

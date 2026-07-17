@@ -2115,12 +2115,18 @@ impl ScalarPlace {
     }
 }
 
+fn unparenthesized_place(expr: &hir::Expr) -> &hir::Expr {
+    match expr {
+        hir::Expr::Grouped { expr, .. } => unparenthesized_place(expr),
+        _ => expr,
+    }
+}
+
 fn lower_scalar_place(
     expr: &hir::Expr,
     context: &LoweringContext,
 ) -> DiagnosticResult<(ScalarPlace, mir::ScalarType)> {
-    match expr {
-        hir::Expr::Grouped { expr, .. } => lower_scalar_place(expr, context),
+    match unparenthesized_place(expr) {
         hir::Expr::Variable { name, span } => {
             let local = context.lookup_local(name, *span)?;
             Ok((ScalarPlace::Local(local), context.local_scalar_type(local)?))
@@ -2173,24 +2179,20 @@ fn lower_assignment(
         return Ok(());
     }
 
+    let target = unparenthesized_place(&assignment.target);
     if let hir::Expr::StaticMember {
         class_name,
         member,
         span,
-    } = &assignment.target
+    } = target
     {
         let (target, ty) = context.static_property(class_name, member, *span)?;
         let value = lower_rvalue_as_expected(&assignment.value, ty, context)?;
         context.push_statement(mir::Statement::AssignStatic { target, value });
         return Ok(());
     }
-    if matches!(
-        &assignment.target,
-        hir::Expr::PropertyAccess { .. } | hir::Expr::Grouped { .. }
-    ) {
-        if let Ok((object, property, property_type)) =
-            lower_property_place(&assignment.target, context)
-        {
+    if matches!(target, hir::Expr::PropertyAccess { .. }) {
+        if let Ok((object, property, property_type)) = lower_property_place(target, context) {
             let value = lower_rvalue_as_expected(&assignment.value, property_type, context)?;
             context.push_statement(mir::Statement::AssignProperty {
                 object,
@@ -2200,7 +2202,7 @@ fn lower_assignment(
             return Ok(());
         }
     }
-    let target = lower_assignment_target(&assignment.target, context)?;
+    let target = lower_assignment_target(target, context)?;
     if context.local_type(target) == mir::Type::String {
         context.push_statement(mir::Statement::AssignLocal {
             target,
@@ -2307,8 +2309,7 @@ fn lower_assignment_target(
     target: &hir::Expr,
     context: &LoweringContext,
 ) -> DiagnosticResult<mir::LocalId> {
-    match target {
-        hir::Expr::Grouped { expr, .. } => lower_assignment_target(expr, context),
+    match unparenthesized_place(target) {
         hir::Expr::Variable { name, span } => context.lookup_local(name, *span),
         _ => Err(vec![unsupported(
             target.span(),
@@ -3435,9 +3436,7 @@ fn lower_property_place(
     expr: &hir::Expr,
     context: &LoweringContext,
 ) -> DiagnosticResult<(mir::LocalId, crate::class_layout::PropertyId, mir::Type)> {
-    if let hir::Expr::Grouped { expr, .. } = expr {
-        return lower_property_place(expr, context);
-    }
+    let expr = unparenthesized_place(expr);
     let hir::Expr::PropertyAccess {
         object,
         property,
@@ -3449,17 +3448,7 @@ fn lower_property_place(
             "expected class property access",
         )]);
     };
-    let object_local = match object.as_ref() {
-        hir::Expr::Grouped { expr, .. } => {
-            return lower_property_place(
-                &hir::Expr::PropertyAccess {
-                    object: expr.clone(),
-                    property: property.clone(),
-                    span: *span,
-                },
-                context,
-            );
-        }
+    let object_local = match unparenthesized_place(object) {
         hir::Expr::Variable { name, span } => context.lookup_local(name, *span)?,
         hir::Expr::This { span } => context.lookup_local("this", *span)?,
         _ => {
