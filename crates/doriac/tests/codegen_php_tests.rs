@@ -21,6 +21,26 @@ echo $count;
 }
 
 #[test]
+fn php_backend_emits_folded_copy_scalar_parameter_defaults() {
+    let php = doriac::compile_source_to_php(
+        "folded-defaults.doria",
+        r#"
+function sample(int $count = 1 + 2, float $ratio = 1.0 / 2.0, bool $ordered = 1 < 2): void
+{
+}
+"#,
+    )
+    .expect("const-evaluable Copy-scalar defaults should lower to PHP literals");
+
+    assert!(php.contains(
+        "function sample(int $count = 3, float $ratio = 0.5, bool $ordered = true): void"
+    ));
+    assert!(!php.contains("$count = 1 + 2"));
+    assert!(!php.contains("$ratio = fdiv("));
+    assert!(!php.contains("$ordered = __doria_less("));
+}
+
+#[test]
 fn emits_php_for_boolean_word_operators() {
     let php = doriac::compile_source_to_php(
         "test.doria",
@@ -1505,5 +1525,252 @@ fn php_backend_reserves_display_helper_class_name_case_insensitively() {
                 && diagnostic.message.contains("`__DoriaDisplayable`")
                 && diagnostic.message.contains("reserved")
         }));
+    }
+}
+
+#[test]
+fn php_backend_distinguishes_stage20_constants_and_static_properties() {
+    let php = doriac::compile_source_to_php(
+        "statics.doria",
+        r#"
+const TOP_LIMIT = 42;
+
+class Counter
+{
+    const LABEL = "ready";
+    static int $initial = TOP_LIMIT;
+    static writable string $current = Counter::LABEL;
+
+    static function read(): string
+    {
+        return Counter::current;
+    }
+}
+
+function main(): void
+{
+    Counter::current = "done";
+    echo Counter::LABEL;
+    echo Counter::read();
+}
+"#,
+    )
+    .expect("Stage 20 statics should lower to the PHP compatibility backend");
+
+    assert!(php.contains("const __DORIA_CONST_TOP_LIMIT = 42;"));
+    assert!(php.contains("public const LABEL = \"ready\";"));
+    assert!(php.contains("public static int $initial = 42;"));
+    assert!(php.contains("public static string $current = \"ready\";"));
+    assert!(php.contains("public static function read(): string"));
+    assert!(php.contains("return Counter::$current;"));
+    assert!(php.contains("Counter::$current = \"done\";"));
+    assert!(php.contains("Counter::LABEL"));
+}
+
+#[test]
+fn php_backend_emits_evaluated_constants_and_static_initializers() {
+    let php = doriac::compile_source_to_php(
+        "evaluated-constants.doria",
+        r#"
+const ANSWER = LATER + 1;
+const LATER = 41;
+
+class Counter
+{
+    static int $initial = ANSWER;
+    static writable int $value = Counter::initial + 1;
+}
+
+echo ANSWER;
+echo Counter::value;
+"#,
+    )
+    .expect("evaluated declarations should lower to PHP literals");
+
+    assert!(php.contains("const __DORIA_CONST_ANSWER = 42;"));
+    assert!(php.contains("const __DORIA_CONST_LATER = 41;"));
+    assert!(php.contains("public static int $initial = 42;"));
+    assert!(php.contains("public static int $value = 43;"));
+    assert!(!php.contains("= LATER + 1"));
+    assert!(!php.contains("= Counter::$initial + 1"));
+
+    let run = Command::new("php")
+        .arg("-r")
+        .arg(php.strip_prefix("<?php").expect("generated PHP header"))
+        .output()
+        .expect("PHP should execute evaluated declarations");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(run.stdout, b"4243");
+    assert!(run.stderr.is_empty());
+}
+
+#[test]
+fn php_backend_mangles_every_top_level_constant_away_from_php_names() {
+    let php = doriac::compile_source_to_php(
+        "predefined-constants.doria",
+        r#"
+const CLASS = 1;
+const INF = 2;
+const NAN = 3;
+echo CLASS;
+echo INF;
+echo NAN;
+"#,
+    )
+    .expect("top-level Doria constants should not collide with PHP names");
+
+    for name in ["CLASS", "INF", "NAN"] {
+        assert!(php.contains(&format!("const __DORIA_CONST_{name} =")));
+        assert!(!php.contains(&format!("const {name} =")));
+        assert!(php.contains(&format!("echo __doria_display(__DORIA_CONST_{name});")));
+    }
+}
+
+#[test]
+fn php_backend_rejects_class_constant_named_class_case_insensitively() {
+    let diagnostics =
+        doriac::compile_source_to_php("class-constant.doria", "class Counter { const CLASS = 1; }")
+            .expect_err("PHP reserves the CLASS class-constant name");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "B2001"
+            && diagnostic.message.contains("reserves `class`")));
+}
+
+#[test]
+fn php_backend_rejects_instance_initializers_that_read_static_properties() {
+    let source = r#"
+class Counter
+{
+    static int $seed = 41;
+    int $value = Counter::seed;
+}
+"#;
+    doriac::check_source("static-read-in-property.doria", source)
+        .expect("the Doria initializer is valid independently of PHP restrictions");
+    let diagnostics = doriac::compile_source_to_php("static-read-in-property.doria", source)
+        .expect_err("PHP cannot emit a static property read in an instance default");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "B2001"
+            && diagnostic
+                .message
+                .contains("instance property initializers that read static properties")
+    }));
+}
+
+#[test]
+fn php_backend_rejects_static_calls_in_instance_property_defaults() {
+    let source = r#"
+class Factory
+{
+    int $value = Factory::seed();
+    internal static function seed(): int { return 42; }
+}
+"#;
+    doriac::check_source("static-call-in-property.doria", source)
+        .expect("Doria property initializers may call declaring-class static methods");
+    let diagnostics = doriac::compile_source_to_php("static-call-in-property.doria", source)
+        .expect_err("PHP cannot emit a static call in an instance property default");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "B2001"
+            && diagnostic
+                .message
+                .contains("instance property initializers that call static methods")
+    }));
+}
+
+#[test]
+fn php_backend_rejects_executable_instance_property_defaults() {
+    let cases = [
+        (
+            "function-call-in-property.doria",
+            r#"
+function seed(): int { return 42; }
+class Counter { int $value = seed(); }
+"#,
+            "instance property initializers that call functions",
+        ),
+        (
+            "construction-in-property.doria",
+            r#"
+class Person {}
+class Office { Person $manager = new Person(); }
+"#,
+            "object construction in instance property initializers",
+        ),
+    ];
+
+    for (path, source, expected_message) in cases {
+        doriac::check_source(path, source)
+            .expect("executable property defaults are valid Doria independently of PHP");
+        let diagnostics = doriac::compile_source_to_php(path, source)
+            .expect_err("PHP property defaults cannot execute calls or construction");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "B2001" && diagnostic.message.contains(expected_message)
+        }));
+    }
+}
+
+#[test]
+fn php_backend_keeps_php_constant_expression_property_defaults() {
+    let php = doriac::compile_source_to_php(
+        "constant-property-defaults.doria",
+        r#"
+const int SEED = 41;
+class Config
+{
+    const int OFFSET = 1;
+    List<int> $values = [SEED, Config::OFFSET];
+    bool $enabled = true && !false;
+}
+"#,
+    )
+    .expect("PHP constant expressions remain valid property defaults");
+
+    assert!(php.contains("public array $values = [__DORIA_CONST_SEED, Config::OFFSET];"));
+    assert!(php.contains("public bool $enabled = ((true) && (!(false)));"));
+}
+
+#[test]
+fn php_backend_emits_int_min_constants_without_php_literal_overflow() {
+    let php = doriac::compile_source_to_php(
+        "int-min-constant.doria",
+        r#"
+const int MINIMUM = -9223372036854775808;
+class Limits { static int $minimum = MINIMUM; }
+"#,
+    )
+    .expect("the full signed int range should lower to PHP");
+
+    assert!(php.contains("const __DORIA_CONST_MINIMUM = (-9223372036854775807 - 1);"));
+    assert!(php.contains("public static int $minimum = (-9223372036854775807 - 1);"));
+
+    if let Ok(version) = Command::new("php").arg("--version").output() {
+        if version.status.success() {
+            let mut child = Command::new("php")
+                .arg("-l")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("PHP lint should start");
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .expect("PHP stdin")
+                .write_all(php.as_bytes())
+                .expect("generated PHP should be written");
+            let output = child.wait_with_output().expect("PHP lint should finish");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 }

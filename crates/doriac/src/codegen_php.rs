@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::backend::BackendError;
+use crate::const_eval::{ConstKey, ConstValue, Evaluation, ParameterDefaultKey};
 use crate::diagnostics::Diagnostic;
 use crate::format_string::{self, FormatConversion, FormatPiece};
 use crate::hir::*;
@@ -11,6 +12,7 @@ use crate::types::TypeRef;
 
 const PHP_INTEGER_UNSUPPORTED_CODE: &str = "B1301";
 const PHP_OWNERSHIP_UNSUPPORTED_CODE: &str = "B1901";
+const PHP_CONSTANT_UNSUPPORTED_CODE: &str = "B2001";
 
 pub fn generate(program: &Program) -> Result<String, BackendError> {
     validate_program(program)?;
@@ -101,9 +103,25 @@ function __doria_printf(string $format, mixed ...$values): void
 
 "#,
     );
-    let mut scopes = PhpNameScopes::new();
+    let static_properties = program
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Class(class) => Some(class),
+            _ => None,
+        })
+        .flat_map(|class| {
+            class.members.iter().filter_map(move |member| match member {
+                ClassMember::Property(property) if property.is_static => {
+                    Some((class.name.clone(), property.name.clone()))
+                }
+                _ => None,
+            })
+        })
+        .collect();
+    let mut scopes = PhpNameScopes::new(static_properties);
     for item in &program.items {
-        emit_item(item, &mut output, 0, &mut scopes);
+        emit_item(item, &program.semantic_info, &mut output, 0, &mut scopes);
         if !output.ends_with("\n\n") {
             output.push('\n');
         }
@@ -126,17 +144,99 @@ fn validate_item(item: &Item, semantic_info: &SemanticInfo) -> Result<(), Backen
                 match member {
                     ClassMember::Property(property) => {
                         validate_type(&property.ty, property.span)?;
-                        if let Some(initializer) = &property.initializer {
+                        if property.is_static {
+                            validate_evaluated_value(
+                                semantic_info,
+                                &ConstKey::Static {
+                                    class_name: class_decl.name.clone(),
+                                    name: property.name.clone(),
+                                },
+                                property.span,
+                            )?;
+                        } else if let Some(initializer) = &property.initializer {
                             validate_expr(initializer, semantic_info)?;
+                            if let Some((span, feature)) =
+                                unsupported_php_property_default(initializer, semantic_info)
+                            {
+                                return Err(unsupported_constant_shape(span, feature));
+                            }
                         }
                     }
                     ClassMember::Method(method) => validate_function(method, semantic_info, true)?,
+                    ClassMember::Constant(constant) => {
+                        validate_php_class_constant_name(constant)?;
+                        if let Some(ty) = &constant.ty {
+                            validate_type(ty, constant.span)?;
+                        }
+                        validate_evaluated_value(
+                            semantic_info,
+                            &ConstKey::Class {
+                                class_name: class_decl.name.clone(),
+                                name: constant.name.clone(),
+                            },
+                            constant.span,
+                        )?;
+                    }
                 }
             }
             Ok(())
         }
         Item::Function(function) => validate_function(function, semantic_info, false),
+        Item::Constant(constant) => {
+            if let Some(ty) = &constant.ty {
+                validate_type(ty, constant.span)?;
+            }
+            validate_evaluated_value(
+                semantic_info,
+                &ConstKey::TopLevel(constant.name.clone()),
+                constant.span,
+            )
+        }
         Item::Statement(statement) => validate_statement(statement, semantic_info),
+    }
+}
+
+fn validate_php_class_constant_name(constant: &ConstDecl) -> Result<(), BackendError> {
+    if constant.name.eq_ignore_ascii_case("class") {
+        return Err(unsupported_constant_shape(
+            constant.span,
+            format!(
+                "class constant `{}` because PHP reserves `class` for class-name fetching",
+                constant.name
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_evaluated_value(
+    semantic_info: &SemanticInfo,
+    key: &ConstKey,
+    span: Span,
+) -> Result<(), BackendError> {
+    validate_const_value(evaluated_value(&semantic_info.const_evaluation, key), span)
+}
+
+fn validate_const_value(value: &ConstValue, span: Span) -> Result<(), BackendError> {
+    match value {
+        ConstValue::Integer(value) if !value.ty.is_default_int() => Err(unsupported_integer_shape(
+            span,
+            format!(
+                "Doria `{}` width and signedness with PHP's single signed integer type",
+                value.ty.source_name()
+            ),
+        )),
+        ConstValue::Integer(value) if value.mathematical_value() > i64::MAX as i128 => {
+            Err(unsupported_integer_shape(
+                span,
+                "an integer constant outside PHP's signed integer range",
+            ))
+        }
+        ConstValue::Float(value) if !value.ty.is_default_float() => Err(unsupported_numeric_shape(
+            span,
+            "Doria `float32` precision with PHP's `float` type",
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -160,7 +260,7 @@ fn validate_function(
             function.name
         )));
     }
-    for param in &function.params {
+    for (parameter_index, param) in function.params.iter().enumerate() {
         if param.take && is_move_type(&param.ty, semantic_info) {
             return Err(unsupported_ownership_shape(
                 param.span,
@@ -168,8 +268,20 @@ fn validate_function(
             ));
         }
         validate_type(&param.ty, param.span)?;
-        if let Some(default) = &param.default {
-            validate_expr(default, semantic_info)?;
+        if param.default.is_some() {
+            let default = semantic_info
+                .parameter_defaults
+                .get(&ParameterDefaultKey {
+                    function_start: function.span.start,
+                    parameter_index,
+                })
+                .ok_or_else(|| {
+                    BackendError::new(format!(
+                        "compiler invariant violated: checked default for parameter `${}` has no folded value",
+                        param.name
+                    ))
+                })?;
+            validate_const_value(default, param.span)?;
         }
     }
     if let Some(return_type) = &function.return_type {
@@ -417,6 +529,7 @@ fn validate_expr(expr: &Expr, semantic_info: &SemanticInfo) -> Result<(), Backen
             }
             validate_exprs(args, semantic_info)
         }
+        Expr::StaticMember { .. } => Ok(()),
         Expr::Grouped { expr, .. } => validate_expr(expr, semantic_info),
         Expr::Unary { op, expr, span } => {
             if *op == UnaryOp::Negate {
@@ -549,6 +662,93 @@ fn validate_exprs(expressions: &[Expr], semantic_info: &SemanticInfo) -> Result<
     Ok(())
 }
 
+// Instance initializers are currently emitted in PHP property-default syntax.
+// Keep that syntax boundary as an allow-list so executable Doria expressions
+// cannot reach a PHP constant-expression context unnoticed.
+fn unsupported_php_property_default(
+    expr: &Expr,
+    semantic_info: &SemanticInfo,
+) -> Option<(Span, &'static str)> {
+    match expr {
+        Expr::StaticMember {
+            class_name,
+            member,
+            span,
+        } if semantic_info
+            .const_evaluation
+            .values
+            .contains_key(&ConstKey::Static {
+                class_name: class_name.clone(),
+                name: member.clone(),
+            }) =>
+        {
+            Some((
+                *span,
+                "instance property initializers that read static properties",
+            ))
+        }
+        Expr::Variable { span, .. } | Expr::This { span } => {
+            Some((*span, "runtime values in instance property initializers"))
+        }
+        Expr::InterpolatedString { span, .. } => {
+            Some((*span, "interpolated instance property initializers"))
+        }
+        Expr::Array { elements, .. } => elements.iter().find_map(|element| {
+            element
+                .key
+                .as_ref()
+                .and_then(|key| unsupported_php_property_default(key, semantic_info))
+                .or_else(|| unsupported_php_property_default(&element.value, semantic_info))
+        }),
+        Expr::PropertyAccess { span, .. } => {
+            Some((*span, "instance property initializers that read properties"))
+        }
+        Expr::MethodCall { span, .. } => {
+            Some((*span, "instance property initializers that call methods"))
+        }
+        Expr::FunctionCall { span, .. } => {
+            Some((*span, "instance property initializers that call functions"))
+        }
+        Expr::StaticCall { span, .. } => Some((
+            *span,
+            "instance property initializers that call static methods",
+        )),
+        Expr::New { span, .. } => Some((
+            *span,
+            "object construction in instance property initializers",
+        )),
+        Expr::Grouped { expr, .. } | Expr::Unary { expr, .. } => {
+            unsupported_php_property_default(expr, semantic_info)
+        }
+        Expr::Binary {
+            op:
+                BinaryOp::Div
+                | BinaryOp::Concat
+                | BinaryOp::Less
+                | BinaryOp::LessEqual
+                | BinaryOp::Greater
+                | BinaryOp::GreaterEqual,
+            span,
+            ..
+        } => Some((
+            *span,
+            "instance property initializers that require runtime helper calls",
+        )),
+        Expr::Binary { left, right, .. } => unsupported_php_property_default(left, semantic_info)
+            .or_else(|| unsupported_php_property_default(right, semantic_info)),
+        Expr::Range { span, .. } => {
+            Some((*span, "range expressions in instance property initializers"))
+        }
+        Expr::Identifier { .. }
+        | Expr::String { .. }
+        | Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Bool { .. }
+        | Expr::Null { .. }
+        | Expr::StaticMember { .. } => None,
+    }
+}
+
 fn integer_literal_magnitude(expr: &Expr) -> Option<u128> {
     match expr {
         Expr::Int { value, .. } => parse_decimal_magnitude(value),
@@ -583,20 +783,42 @@ fn unsupported_ownership_shape(span: Span, feature: impl Into<String>) -> Backen
     )])
 }
 
+fn unsupported_constant_shape(span: Span, feature: impl Into<String>) -> BackendError {
+    BackendError::from_diagnostics(vec![Diagnostic::new(
+        PHP_CONSTANT_UNSUPPORTED_CODE,
+        format!(
+            "PHP compatibility backend cannot preserve {} exactly; use the `native` or `debug` target for this valid Doria program",
+            feature.into()
+        ),
+        span,
+    )])
+}
+
 #[derive(Debug, Default)]
 struct PhpNameScopes {
     scopes: Vec<HashMap<String, String>>,
     used_php_names: HashSet<String>,
     next_mangled_id: usize,
+    static_properties: HashSet<(String, String)>,
 }
 
 impl PhpNameScopes {
-    fn new() -> Self {
+    fn new(static_properties: HashSet<(String, String)>) -> Self {
         Self {
             scopes: vec![HashMap::new()],
             used_php_names: HashSet::new(),
             next_mangled_id: 0,
+            static_properties,
         }
+    }
+
+    fn expression_scope(&self) -> Self {
+        Self::new(self.static_properties.clone())
+    }
+
+    fn is_static_property(&self, class_name: &str, member: &str) -> bool {
+        self.static_properties
+            .contains(&(class_name.to_string(), member.to_string()))
     }
 
     fn push(&mut self) {
@@ -665,15 +887,36 @@ impl PhpNameScopes {
     }
 }
 
-fn emit_item(item: &Item, output: &mut String, indent: usize, scopes: &mut PhpNameScopes) {
+fn emit_item(
+    item: &Item,
+    semantic_info: &SemanticInfo,
+    output: &mut String,
+    indent: usize,
+    scopes: &mut PhpNameScopes,
+) {
     match item {
-        Item::Class(class_decl) => emit_class(class_decl, output, indent),
-        Item::Function(function) => emit_function(function, output, indent, false),
+        Item::Class(class_decl) => emit_class(class_decl, semantic_info, output, indent, scopes),
+        Item::Function(function) => {
+            emit_function(function, semantic_info, output, indent, false, scopes)
+        }
+        Item::Constant(constant) => emit_constant(
+            constant,
+            None,
+            &semantic_info.const_evaluation,
+            output,
+            indent,
+        ),
         Item::Statement(statement) => emit_statement(statement, output, indent, scopes),
     }
 }
 
-fn emit_class(class_decl: &ClassDecl, output: &mut String, indent: usize) {
+fn emit_class(
+    class_decl: &ClassDecl,
+    semantic_info: &SemanticInfo,
+    output: &mut String,
+    indent: usize,
+    scopes: &PhpNameScopes,
+) {
     let implements = if class_decl
         .implements
         .iter()
@@ -691,33 +934,143 @@ fn emit_class(class_decl: &ClassDecl, output: &mut String, indent: usize) {
     writeln(output, indent, "{");
     for member in &class_decl.members {
         match member {
-            ClassMember::Property(property) => emit_property(property, output, indent + 1),
-            ClassMember::Method(method) => emit_function(method, output, indent + 1, true),
+            ClassMember::Property(property) => emit_property(
+                property,
+                &class_decl.name,
+                &semantic_info.const_evaluation,
+                output,
+                indent + 1,
+                scopes,
+            ),
+            ClassMember::Method(method) => {
+                emit_function(method, semantic_info, output, indent + 1, true, scopes)
+            }
+            ClassMember::Constant(constant) => emit_constant(
+                constant,
+                Some(&class_decl.name),
+                &semantic_info.const_evaluation,
+                output,
+                indent + 1,
+            ),
         }
         output.push('\n');
     }
     writeln(output, indent, "}");
 }
 
-fn emit_property(property: &PropertyDecl, output: &mut String, indent: usize) {
+fn emit_property(
+    property: &PropertyDecl,
+    class_name: &str,
+    evaluation: &Evaluation,
+    output: &mut String,
+    indent: usize,
+    shared_scopes: &PhpNameScopes,
+) {
     let visibility = emit_member_access(&property.access);
     let ty = php_type(&property.ty);
     write_indent(output, indent);
     output.push_str(visibility);
     output.push(' ');
+    if property.is_static {
+        output.push_str("static ");
+    }
     output.push_str(&ty);
     output.push_str(" $");
     output.push_str(&property.name);
     if let Some(initializer) = &property.initializer {
-        let scopes = PhpNameScopes::new();
         output.push_str(" = ");
-        output.push_str(&emit_expr(initializer, &scopes));
+        if property.is_static {
+            output.push_str(&emit_const_value(evaluated_value(
+                evaluation,
+                &ConstKey::Static {
+                    class_name: class_name.to_string(),
+                    name: property.name.clone(),
+                },
+            )));
+        } else {
+            output.push_str(&emit_expr(initializer, &shared_scopes.expression_scope()));
+        }
     }
     output.push_str(";\n");
 }
 
-fn emit_function(function: &FunctionDecl, output: &mut String, indent: usize, is_method: bool) {
-    let mut scopes = PhpNameScopes::new();
+fn emit_constant(
+    constant: &ConstDecl,
+    class_name: Option<&str>,
+    evaluation: &Evaluation,
+    output: &mut String,
+    indent: usize,
+) {
+    write_indent(output, indent);
+    if class_name.is_some() {
+        output.push_str(emit_member_access(&constant.access));
+        output.push(' ');
+    }
+    output.push_str("const ");
+    output.push_str(&class_name.map_or_else(
+        || php_top_level_constant_name(&constant.name),
+        |_| constant.name.clone(),
+    ));
+    output.push_str(" = ");
+    let key = class_name.map_or_else(
+        || ConstKey::TopLevel(constant.name.clone()),
+        |class_name| ConstKey::Class {
+            class_name: class_name.to_string(),
+            name: constant.name.clone(),
+        },
+    );
+    output.push_str(&emit_const_value(evaluated_value(evaluation, &key)));
+    output.push_str(";\n");
+}
+
+fn evaluated_value<'a>(evaluation: &'a Evaluation, key: &ConstKey) -> &'a ConstValue {
+    &evaluation
+        .values
+        .get(key)
+        .unwrap_or_else(|| {
+            panic!(
+                "checked declaration `{}` has no evaluated value",
+                key.display()
+            )
+        })
+        .value
+}
+
+fn emit_const_value(value: &ConstValue) -> String {
+    match value {
+        ConstValue::Integer(value)
+            if value.ty.is_default_int() && value.mathematical_value() == i64::MIN as i128 =>
+        {
+            "(-9223372036854775807 - 1)".to_string()
+        }
+        ConstValue::Integer(value) => value.display(),
+        ConstValue::Float(value) => {
+            let value = value.display();
+            match value.as_str() {
+                "NaN" => "NAN".to_string(),
+                "Infinity" => "INF".to_string(),
+                "-Infinity" => "-INF".to_string(),
+                _ if !value.contains('.') && !value.contains('e') && !value.contains('E') => {
+                    format!("{value}.0")
+                }
+                _ => value,
+            }
+        }
+        ConstValue::String(value) => emit_php_string_literal(value),
+        ConstValue::Bool(value) => value.to_string(),
+        ConstValue::Null => "null".to_string(),
+    }
+}
+
+fn emit_function(
+    function: &FunctionDecl,
+    semantic_info: &SemanticInfo,
+    output: &mut String,
+    indent: usize,
+    is_method: bool,
+    shared_scopes: &PhpNameScopes,
+) {
+    let mut scopes = shared_scopes.expression_scope();
     for param in &function.params {
         scopes.declare_unmangled(&param.name);
     }
@@ -737,7 +1090,17 @@ fn emit_function(function: &FunctionDecl, output: &mut String, indent: usize, is
         &function
             .params
             .iter()
-            .map(|param| emit_param(param, &scopes))
+            .enumerate()
+            .map(|(parameter_index, param)| {
+                emit_param(
+                    param,
+                    semantic_info.parameter_defaults.get(&ParameterDefaultKey {
+                        function_start: function.span.start,
+                        parameter_index,
+                    }),
+                    &scopes,
+                )
+            })
             .collect::<Vec<_>>()
             .join(", "),
     );
@@ -756,7 +1119,11 @@ fn emit_function(function: &FunctionDecl, output: &mut String, indent: usize, is
     emit_block(&function.body, output, indent, &mut scopes);
 }
 
-fn emit_param(param: &Param, scopes: &PhpNameScopes) -> String {
+fn emit_param(
+    param: &Param,
+    evaluated_default: Option<&ConstValue>,
+    scopes: &PhpNameScopes,
+) -> String {
     let mut output = String::new();
     if let Some(access) = &param.promoted_access {
         output.push_str(emit_member_access(access));
@@ -765,11 +1132,17 @@ fn emit_param(param: &Param, scopes: &PhpNameScopes) -> String {
     output.push_str(&php_type(&param.ty));
     output.push_str(" $");
     output.push_str(&scopes.php_name(&param.name));
-    if let Some(default) = &param.default {
+    if param.default.is_some() {
         output.push_str(" = ");
-        output.push_str(&emit_expr(default, scopes));
+        output.push_str(&emit_const_value(evaluated_default.expect(
+            "checked Copy-scalar parameter default must have an evaluated value",
+        )));
     }
     output
+}
+
+fn php_top_level_constant_name(name: &str) -> String {
+    format!("__DORIA_CONST_{name}")
 }
 
 fn emit_block(block: &Block, output: &mut String, indent: usize, scopes: &mut PhpNameScopes) {
@@ -1157,7 +1530,7 @@ fn emit_expr(expr: &Expr, scopes: &PhpNameScopes) -> String {
     match expr {
         Expr::Variable { name, .. } => format!("${}", scopes.php_name(name)),
         Expr::This { .. } => "$this".to_string(),
-        Expr::Identifier { name, .. } => name.clone(),
+        Expr::Identifier { name, .. } => php_top_level_constant_name(name),
         Expr::String { value, .. } => emit_php_string_literal(value),
         Expr::InterpolatedString { parts, .. } => emit_interpolated_string(parts, scopes),
         Expr::Int { value, .. } | Expr::Float { value, .. } => value.clone(),
@@ -1216,6 +1589,14 @@ fn emit_expr(expr: &Expr, scopes: &PhpNameScopes) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        Expr::StaticMember {
+            class_name, member, ..
+        } if scopes.is_static_property(class_name, member) => {
+            format!("{class_name}::${member}")
+        }
+        Expr::StaticMember {
+            class_name, member, ..
+        } => format!("{class_name}::{member}"),
         Expr::New {
             class_name, args, ..
         } => format!(

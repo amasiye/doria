@@ -17,7 +17,39 @@ pub struct Binding {
 pub struct ClassInfo {
     pub implements_displayable: bool,
     pub properties: HashMap<String, PropertyInfo>,
+    pub static_properties: HashMap<String, StaticPropertyInfo>,
+    pub constants: HashMap<String, ConstantInfo>,
     pub methods: HashMap<String, MethodInfo>,
+    pub members: HashMap<String, MemberDeclaration>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MemberDeclaration {
+    pub kind: MemberKind,
+    pub span: crate::source::Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberKind {
+    InstanceProperty,
+    StaticProperty,
+    Constant,
+    InstanceMethod,
+    StaticMethod,
+    PromotedProperty,
+}
+
+impl MemberKind {
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::InstanceProperty => "instance property",
+            Self::StaticProperty => "static property",
+            Self::Constant => "class constant",
+            Self::InstanceMethod => "instance method",
+            Self::StaticMethod => "static method",
+            Self::PromotedProperty => "promoted property",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -26,6 +58,19 @@ pub struct PropertyInfo {
     pub writable: bool,
     pub ty: TypeId,
     pub init_state: PropertyInitState,
+}
+
+#[derive(Debug, Clone)]
+pub struct StaticPropertyInfo {
+    pub access: MemberAccess,
+    pub writable: bool,
+    pub ty: TypeId,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstantInfo {
+    pub access: MemberAccess,
+    pub ty: TypeId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,10 +98,24 @@ pub struct FunctionInfo {
 #[derive(Debug, Clone)]
 pub struct MethodInfo {
     pub access: MemberAccess,
-    pub writable_this: bool,
+    pub receiver_mode: Option<ReceiverMode>,
     pub is_static: bool,
     pub params: Vec<ParamInfo>,
     pub return_ty: TypeId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiverMode {
+    Readonly,
+    Writable,
+    /// Reserved representation point for a future accepted consuming receiver.
+    UnsupportedConsuming,
+}
+
+impl ReceiverMode {
+    pub const fn is_writable(self) -> bool {
+        matches!(self, Self::Writable)
+    }
 }
 
 #[derive(Debug, Default, Clone)]

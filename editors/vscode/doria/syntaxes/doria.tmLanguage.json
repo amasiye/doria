@@ -22,6 +22,9 @@
       "include": "#accessors"
     },
     {
+      "include": "#constants"
+    },
+    {
       "include": "#variables"
     },
     {
@@ -123,6 +126,17 @@
         {
           "name": "invalid.illegal.keyword.rejected.doria",
           "match": "\\b(?:goto|require|require_once|include_once|print)\\b|\\buse\\b(?=\\s*\\()"
+        },
+        {
+          "match": "(::)(\\s*)(\\$)(?=[A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "punctuation.accessor.static.doria"
+            },
+            "3": {
+              "name": "invalid.illegal.sigil.static-access.doria"
+            }
+          }
         }
       ]
     },
@@ -308,6 +322,20 @@
     "declarations": {
       "patterns": [
         {
+          "match": "\\b(const)(?:\\s+(\\??[A-Za-z_][A-Za-z0-9_]*(?:<[^>]+>)?(?:\\[\\])*))?\\s+([A-Z][A-Z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.constant.doria"
+            },
+            "2": {
+              "name": "storage.type.doria"
+            },
+            "3": {
+              "name": "constant.other.doria"
+            }
+          }
+        },
+        {
           "match": "\\b(namespace)\\s+([A-Za-z_][A-Za-z0-9_]*(?:\\\\[A-Za-z_][A-Za-z0-9_]*)*)",
           "captures": {
             "1": {
@@ -438,6 +466,23 @@
           }
         },
         {
+          "match": "\\b(static)\\s+(?:(writable)\\s+)?([A-Za-z_][A-Za-z0-9_]*(?:<[^>]+>)?(?:\\[\\])*)\\s+(\\$[A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.static.doria"
+            },
+            "2": {
+              "name": "storage.modifier.mutability.doria"
+            },
+            "3": {
+              "name": "storage.type.doria"
+            },
+            "4": {
+              "name": "variable.other.property.static.doria"
+            }
+          }
+        },
+        {
           "match": "\\b(function)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": {
@@ -490,7 +535,18 @@
           }
         },
         {
-          "match": "(::)\\s*([A-Za-z_][A-Za-z0-9_]*)",
+          "match": "(::)\\s*([a-z_][A-Za-z0-9_]*)\\b(?!\\s*\\()",
+          "captures": {
+            "1": {
+              "name": "punctuation.accessor.static.doria"
+            },
+            "2": {
+              "name": "variable.other.property.static.doria"
+            }
+          }
+        },
+        {
+          "match": "(::)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
           "captures": {
             "1": {
               "name": "punctuation.accessor.static.doria"
@@ -499,6 +555,25 @@
               "name": "entity.name.function.static.doria"
             }
           }
+        },
+        {
+          "match": "(::)\\s*([A-Z][A-Z0-9_]*)\\b(?!\\s*\\()",
+          "captures": {
+            "1": {
+              "name": "punctuation.accessor.static.doria"
+            },
+            "2": {
+              "name": "constant.other.class.doria"
+            }
+          }
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.other.doria",
+          "match": "\\b[A-Z][A-Z0-9_]+\\b"
         }
       ]
     },
@@ -528,6 +603,10 @@
     },
     "keywords": {
       "patterns": [
+        {
+          "name": "keyword.declaration.constant.doria",
+          "match": "\\bconst\\b"
+        },
         {
           "name": "constant.language.boolean.doria",
           "match": "\\b(?:true|false)\\b"
@@ -567,6 +646,10 @@
         {
           "name": "storage.modifier.static.doria",
           "match": "\\b(?:static)\\b"
+        },
+        {
+          "name": "variable.language.class-context.doria",
+          "match": "\\b(?:self|parent)\\b"
         },
         {
           "name": "keyword.other.reserved.doria",

@@ -33,6 +33,7 @@ pub struct DrStringV1 {
 }
 
 const STRING_HEADER_SIZE: usize = mem::size_of::<DrStringV1>();
+const IMMORTAL_STRING_REFERENCES: usize = usize::MAX;
 
 pub type DrMainIntV1 = unsafe extern "C" fn(*const DrStackFrameV1) -> i64;
 pub type DrMainVoidV1 = unsafe extern "C" fn(*const DrStackFrameV1);
@@ -356,7 +357,7 @@ unsafe fn allocate_string(byte_length: usize) -> *mut DrStringV1 {
 /// `string` must be null or a live doria-rt string.
 #[no_mangle]
 pub unsafe extern "C" fn dr_v1_string_retain(string: *mut DrStringV1) -> *mut DrStringV1 {
-    if !string.is_null() {
+    if !string.is_null() && (*string).references != IMMORTAL_STRING_REFERENCES {
         (*string).references = (*string)
             .references
             .checked_add(1)
@@ -375,6 +376,9 @@ pub unsafe extern "C" fn dr_v1_string_release(string: *mut DrStringV1) {
         return;
     }
     let references = (*string).references;
+    if references == IMMORTAL_STRING_REFERENCES {
+        return;
+    }
     if references == 0 {
         string_runtime_panic(b"string reference count underflow");
     }
@@ -1171,6 +1175,21 @@ mod tests {
             dr_v1_string_release(retained);
             dr_v1_string_release(right);
             dr_v1_string_release(joined);
+        }
+    }
+
+    #[test]
+    fn retain_and_release_leave_compile_time_strings_immortal() {
+        unsafe {
+            let mut string = DrStringV1 {
+                references: IMMORTAL_STRING_REFERENCES,
+                byte_length: 0,
+            };
+            let pointer = &mut string as *mut DrStringV1;
+            assert_eq!(dr_v1_string_retain(pointer), pointer);
+            assert_eq!(string.references, IMMORTAL_STRING_REFERENCES);
+            dr_v1_string_release(pointer);
+            assert_eq!(string.references, IMMORTAL_STRING_REFERENCES);
         }
     }
 

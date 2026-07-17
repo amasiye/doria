@@ -262,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn release_profile_prefers_release_runtime_over_compiler_built_fallback() {
+    fn release_profile_archive_precedes_compiler_built_fallback() {
         let directory = temp_directory("release-preference");
         let compiler_built = directory.join("build/libdoria_rt.a");
         let release = directory.join("target/release/libdoria_rt.a");

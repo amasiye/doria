@@ -1061,7 +1061,12 @@ function age(): int
 
 class Person
 {
-    function age(): int
+    function instanceAge(): int
+    {
+        return 37;
+    }
+
+    static function age(): int
     {
         return 37;
     }
@@ -1069,7 +1074,7 @@ class Person
 
 int $fromFunction = age();
 let $person = new Person();
-int $fromMethod = $person->age();
+int $fromMethod = $person->instanceAge();
 int $fromStatic = Person::age();
 "#,
     )
@@ -1087,7 +1092,7 @@ string $name = age();
         r#"
 class Person
 {
-    function age(): int
+    static function age(): int
     {
         return 37;
     }
@@ -1099,7 +1104,7 @@ string $name = $person->age();
         r#"
 class Person
 {
-    function age(): int
+    static function age(): int
     {
         return 37;
     }
@@ -1121,7 +1126,7 @@ class Person
         r#"
 class Person
 {
-    function age(): int
+    static function age(): int
     {
         return 37;
     }
@@ -1222,7 +1227,7 @@ fn checks_function_call_arguments() {
     doriac::check_source(
         "test.doria",
         r#"
-function greet(string $name, string $suffix = "!"): void
+function greet(string $name, int $times = 1): void
 {
 }
 
@@ -1240,7 +1245,7 @@ function collectMixed(List<mixed> $items): void
 }
 
 greet("Andrew");
-greet("Andrew", "!");
+greet("Andrew", 2);
 int $total = sum(1, 2);
 collect([1, 2, 3]);
 collectMixed([1, 2]);
@@ -1347,7 +1352,7 @@ fn checks_static_call_arguments() {
         r#"
 class Person
 {
-    function makeName(string $name): string
+    static function makeName(string $name): string
     {
         return $name;
     }
@@ -1362,7 +1367,7 @@ string $name = Person::makeName("Andrew");
         r#"
 class Person
 {
-    function makeName(string $name): string
+    static function makeName(string $name): string
     {
         return $name;
     }
@@ -2401,7 +2406,7 @@ class Person
 {
     string $name = Person::defaultName();
 
-    internal function defaultName(): string
+    internal static function defaultName(): string
     {
         return "Andrew";
     }
@@ -3420,7 +3425,11 @@ class Person
     )
     .expect_err("semantic check should fail");
 
-    assert!(err.iter().any(|diagnostic| diagnostic.code == "E0301"));
+    let duplicate = err
+        .iter()
+        .find(|diagnostic| diagnostic.code == "E0481")
+        .expect("duplicate member diagnostic");
+    assert_eq!(duplicate.related.len(), 1);
 }
 
 #[test]
@@ -3437,7 +3446,11 @@ class Person
     )
     .expect_err("semantic check should fail");
 
-    assert!(err.iter().any(|diagnostic| diagnostic.code == "E0302"));
+    let duplicate = err
+        .iter()
+        .find(|diagnostic| diagnostic.code == "E0481")
+        .expect("duplicate member diagnostic");
+    assert_eq!(duplicate.related.len(), 1);
 }
 
 #[test]
@@ -3590,7 +3603,7 @@ fn rejects_external_static_call_to_internal_method() {
         r#"
 class Person
 {
-    internal function message(): string
+    internal static function message(): string
     {
         return "Hello";
     }
@@ -3894,14 +3907,6 @@ class Inventory
     Dictionary<string, int> $counts = [];
     List<A> $objects = [new A(), new A()];
 }
-
-function readCounts(Dictionary<string, int> $counts = []): void
-{
-}
-
-function readObjects(List<A> $objects = [new A(), new A()]): void
-{
-}
 "#,
     )
     .expect("semantic check should succeed");
@@ -3988,27 +3993,22 @@ fn checks_parameter_default_compatibility() {
     doriac::check_source(
         "test.doria",
         r#"
-function greet(string $name = "Andrew"): void
+function greet(int $count = 1): void
 {
 }
 
 class Person
 {
-    function __construct(string $name = "Andrew")
+    function __construct(int $age = 37)
     {
     }
 
-    function greet(string $name = Person::defaultName()): void
+    function greet(int $count = 2): void
     {
     }
 
-    function rename(string $name = "Lucy"): void
+    function rename(int $count = 3): void
     {
-    }
-
-    internal function defaultName(): string
-    {
-        return "Andrew";
     }
 }
 "#,

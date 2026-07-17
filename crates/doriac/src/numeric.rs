@@ -256,6 +256,30 @@ impl FloatValue {
         }
     }
 
+    pub fn display(self) -> String {
+        let value = match self.ty {
+            FloatType::Float32 => self.as_f32() as f64,
+            FloatType::Float64 => self.as_f64(),
+        };
+        if value.is_nan() {
+            "NaN".to_string()
+        } else if value.is_infinite() {
+            if value.is_sign_negative() {
+                "-Infinity"
+            } else {
+                "Infinity"
+            }
+            .to_string()
+        } else if value == 0.0 {
+            if value.is_sign_negative() { "-0" } else { "0" }.to_string()
+        } else {
+            match self.ty {
+                FloatType::Float32 => ryu::Buffer::new().format_finite(self.as_f32()).to_string(),
+                FloatType::Float64 => ryu::Buffer::new().format_finite(self.as_f64()).to_string(),
+            }
+        }
+    }
+
     pub fn to_i64_checked(self) -> Option<i64> {
         debug_assert_eq!(self.ty, FloatType::Float64);
         let value = self.as_f64();
@@ -486,6 +510,14 @@ impl IntegerValue {
             self.signed_value()
         } else {
             self.unsigned_value() as i128
+        }
+    }
+
+    pub fn display(self) -> String {
+        if self.ty.is_signed() {
+            self.signed_value().to_string()
+        } else {
+            self.unsigned_value().to_string()
         }
     }
 

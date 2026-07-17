@@ -29,6 +29,8 @@ object DoriaTokenTypes {
     val FUNCTION_CALL = DoriaTokenType("DORIA_FUNCTION_CALL")
     val METHOD_CALL = DoriaTokenType("DORIA_METHOD_CALL")
     val STATIC_METHOD_CALL = DoriaTokenType("DORIA_STATIC_METHOD_CALL")
+    val CLASS_CONSTANT = DoriaTokenType("DORIA_CLASS_CONSTANT")
+    val STATIC_PROPERTY = DoriaTokenType("DORIA_STATIC_PROPERTY")
     val IDENTIFIER = DoriaTokenType("DORIA_IDENTIFIER")
     val VARIABLE = DoriaTokenType("DORIA_VARIABLE")
     val PROPERTY = DoriaTokenType("DORIA_PROPERTY")

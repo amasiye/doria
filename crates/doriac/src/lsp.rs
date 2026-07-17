@@ -101,7 +101,7 @@ pub fn diagnostics_for_document(uri: &str, text: &str) -> Vec<Value> {
         Ok(_) => Vec::new(),
         Err(diagnostics) => diagnostics
             .iter()
-            .map(|diagnostic| diagnostic_to_lsp(text, diagnostic))
+            .map(|diagnostic| diagnostic_to_lsp(uri, text, diagnostic))
             .collect(),
     }
 }
@@ -128,7 +128,7 @@ pub fn code_actions_for_document(uri: &str, text: &str) -> Vec<Value> {
                     .as_deref()
                     .unwrap_or("Apply compiler-suggested fix"),
                 "kind": "quickfix",
-                "diagnostics": [diagnostic_to_lsp(text, diagnostic)],
+                "diagnostics": [diagnostic_to_lsp(uri, text, diagnostic)],
                 "isPreferred": true,
                 "edit": {
                     "changes": changes,
@@ -408,6 +408,9 @@ fn completion_items() -> Value {
         "break",
         "continue",
         "static",
+        "self",
+        "parent",
+        "const",
         "not",
         "and",
         "or",
@@ -743,7 +746,17 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
         TokenKind::New => Some("Constructs an instance of a class."),
         TokenKind::Foreach => Some("Iterates over a list or dictionary value."),
         TokenKind::As => Some("Separates a `foreach` iterable from its binding."),
-        TokenKind::Static => Some("Reserved for static members and calls."),
+        TokenKind::Static => Some("Declares a static method or property."),
+        TokenKind::SelfType => Some(
+            "Reserved declaring-class qualifier and type: `self::member` or a `self` return type.",
+        ),
+        TokenKind::Parent => Some(
+            "Reserved parent-implementation qualifier. Its semantics land with inheritance in Stage 34.",
+        ),
+        TokenKind::Trait => Some(
+            "Declares accepted trait syntax. Trait composition semantics land in Stage 35.",
+        ),
+        TokenKind::Const => Some("Declares a compile-time-evaluated constant."),
         TokenKind::Not => Some("Boolean NOT operator; exact synonym for `!`."),
         TokenKind::And => Some("Boolean AND operator; exact synonym for `&&`."),
         TokenKind::Or => Some("Boolean OR operator; exact synonym for `||`."),
@@ -792,7 +805,7 @@ fn hover_description(kind: &TokenKind) -> Option<&'static str> {
     }
 }
 
-fn diagnostic_to_lsp(text: &str, diagnostic: &Diagnostic) -> Value {
+fn diagnostic_to_lsp(uri: &str, text: &str, diagnostic: &Diagnostic) -> Value {
     let message = if let Some(help) = &diagnostic.help {
         format!("{}\nHelp: {help}", diagnostic.message)
     } else {
@@ -813,6 +826,23 @@ fn diagnostic_to_lsp(text: &str, diagnostic: &Diagnostic) -> Value {
                 "newText": fix.replacement,
             }
         });
+    }
+    if !diagnostic.related.is_empty() {
+        value["relatedInformation"] = Value::Array(
+            diagnostic
+                .related
+                .iter()
+                .map(|related| {
+                    json!({
+                        "location": {
+                            "uri": uri,
+                            "range": span_to_range(text, related.span),
+                        },
+                        "message": related.message,
+                    })
+                })
+                .collect(),
+        );
     }
     value
 }
@@ -983,6 +1013,25 @@ mod tests {
                 item["documentation"],
                 "Accepted planned Doria syntax; compiler support lands in a later stage."
             );
+        }
+    }
+
+    #[test]
+    fn completions_and_hover_expose_stage20_declarations() {
+        for (keyword, kind, hover) in [
+            (
+                "static",
+                TokenKind::Static,
+                "Declares a static method or property.",
+            ),
+            (
+                "const",
+                TokenKind::Const,
+                "Declares a compile-time-evaluated constant.",
+            ),
+        ] {
+            assert_eq!(completion_item(keyword)["detail"], "Doria keyword");
+            assert_eq!(hover_description(&kind), Some(hover));
         }
     }
 

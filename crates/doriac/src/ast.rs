@@ -17,8 +17,17 @@ pub struct NamespaceDecl {
 pub enum Item {
     Class(ClassDecl),
     Interface(InterfaceDecl),
+    Trait(TraitDecl),
     Function(FunctionDecl),
+    Constant(ConstDecl),
     Statement(Stmt),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitDecl {
+    pub name: String,
+    pub members: Vec<ClassMember>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,6 +50,7 @@ pub struct ClassDecl {
 pub enum ClassMember {
     Property(PropertyDecl),
     Method(FunctionDecl),
+    Constant(ConstDecl),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,10 +62,20 @@ pub enum MemberAccess {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PropertyDecl {
     pub access: MemberAccess,
+    pub is_static: bool,
     pub writable: bool,
     pub ty: TypeRef,
     pub name: String,
     pub initializer: Option<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConstDecl {
+    pub access: MemberAccess,
+    pub ty: Option<TypeRef>,
+    pub name: String,
+    pub initializer: Expr,
     pub span: Span,
 }
 
@@ -284,9 +304,18 @@ pub enum Expr {
         span: Span,
     },
     StaticCall {
-        class_name: String,
+        qualifier: StaticQualifier,
+        qualifier_span: Span,
         method: String,
+        member_sigil_span: Option<Span>,
         args: Vec<Expr>,
+        span: Span,
+    },
+    StaticMember {
+        qualifier: StaticQualifier,
+        qualifier_span: Span,
+        member: String,
+        member_sigil_span: Option<Span>,
         span: Span,
     },
     New {
@@ -315,6 +344,14 @@ pub enum Expr {
         inclusive: bool,
         span: Span,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaticQualifier {
+    Class(String),
+    SelfType,
+    Parent,
+    InvalidStatic,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -378,6 +415,7 @@ impl Expr {
             | Expr::MethodCall { span, .. }
             | Expr::FunctionCall { span, .. }
             | Expr::StaticCall { span, .. }
+            | Expr::StaticMember { span, .. }
             | Expr::New { span, .. }
             | Expr::Grouped { span, .. }
             | Expr::Unary { span, .. }
