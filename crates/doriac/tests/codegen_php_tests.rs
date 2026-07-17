@@ -21,6 +21,23 @@ echo $count;
 }
 
 #[test]
+fn php_backend_emits_folded_copy_scalar_parameter_defaults() {
+    let php = doriac::compile_source_to_php(
+        "folded-defaults.doria",
+        r#"
+function sample(float $ratio = 1.0 / 2.0, bool $ordered = 1 < 2): void
+{
+}
+"#,
+    )
+    .expect("const-evaluable Copy-scalar defaults should lower to PHP literals");
+
+    assert!(php.contains("function sample(float $ratio = 0.5, bool $ordered = true): void"));
+    assert!(!php.contains("$ratio = fdiv("));
+    assert!(!php.contains("$ordered = __doria_less("));
+}
+
+#[test]
 fn emits_php_for_boolean_word_operators() {
     let php = doriac::compile_source_to_php(
         "test.doria",
@@ -1537,7 +1554,7 @@ function main(): void
     )
     .expect("Stage 20 statics should lower to the PHP compatibility backend");
 
-    assert!(php.contains("const TOP_LIMIT = 42;"));
+    assert!(php.contains("const __DORIA_CONST_TOP_LIMIT = 42;"));
     assert!(php.contains("public const LABEL = \"ready\";"));
     assert!(php.contains("public static int $initial = 42;"));
     assert!(php.contains("public static string $current = \"ready\";"));
@@ -1567,8 +1584,8 @@ echo Counter::value;
     )
     .expect("evaluated declarations should lower to PHP literals");
 
-    assert!(php.contains("const ANSWER = 42;"));
-    assert!(php.contains("const LATER = 41;"));
+    assert!(php.contains("const __DORIA_CONST_ANSWER = 42;"));
+    assert!(php.contains("const __DORIA_CONST_LATER = 41;"));
     assert!(php.contains("public static int $initial = 42;"));
     assert!(php.contains("public static int $value = 43;"));
     assert!(!php.contains("= LATER + 1"));
@@ -1589,20 +1606,36 @@ echo Counter::value;
 }
 
 #[test]
-fn php_backend_rejects_case_variants_of_predefined_top_level_constants() {
-    for name in ["TRUE", "FALSE", "NULL"] {
-        let diagnostics = doriac::compile_source_to_php(
-            "predefined-constant.doria",
-            format!("const {name} = 1;"),
-        )
-        .expect_err("PHP predefined constant names must not be emitted");
-        assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "B2001"
-                && diagnostic
-                    .message
-                    .contains("reserves that name case-insensitively")
-        }));
+fn php_backend_mangles_every_top_level_constant_away_from_php_names() {
+    let php = doriac::compile_source_to_php(
+        "predefined-constants.doria",
+        r#"
+const CLASS = 1;
+const INF = 2;
+const NAN = 3;
+echo CLASS;
+echo INF;
+echo NAN;
+"#,
+    )
+    .expect("top-level Doria constants should not collide with PHP names");
+
+    for name in ["CLASS", "INF", "NAN"] {
+        assert!(php.contains(&format!("const __DORIA_CONST_{name} =")));
+        assert!(!php.contains(&format!("const {name} =")));
+        assert!(php.contains(&format!("echo __doria_display(__DORIA_CONST_{name});")));
     }
+}
+
+#[test]
+fn php_backend_rejects_class_constant_named_class_case_insensitively() {
+    let diagnostics =
+        doriac::compile_source_to_php("class-constant.doria", "class Counter { const CLASS = 1; }")
+            .expect_err("PHP reserves the CLASS class-constant name");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "B2001"
+            && diagnostic.message.contains("reserves `class`")));
 }
 
 #[test]
@@ -1658,7 +1691,7 @@ class Limits { static int $minimum = MINIMUM; }
     )
     .expect("the full signed int range should lower to PHP");
 
-    assert!(php.contains("const MINIMUM = (-9223372036854775807 - 1);"));
+    assert!(php.contains("const __DORIA_CONST_MINIMUM = (-9223372036854775807 - 1);"));
     assert!(php.contains("public static int $minimum = (-9223372036854775807 - 1);"));
 
     if let Ok(version) = Command::new("php").arg("--version").output() {

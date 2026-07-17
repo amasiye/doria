@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::backend::BackendError;
-use crate::const_eval::{ConstKey, ConstValue, Evaluation};
+use crate::const_eval::{ConstKey, ConstValue, Evaluation, ParameterDefaultKey};
 use crate::diagnostics::Diagnostic;
 use crate::format_string::{self, FormatConversion, FormatPiece};
 use crate::hir::*;
@@ -121,13 +121,7 @@ function __doria_printf(string $format, mixed ...$values): void
         .collect();
     let mut scopes = PhpNameScopes::new(static_properties);
     for item in &program.items {
-        emit_item(
-            item,
-            &program.semantic_info.const_evaluation,
-            &mut output,
-            0,
-            &mut scopes,
-        );
+        emit_item(item, &program.semantic_info, &mut output, 0, &mut scopes);
         if !output.ends_with("\n\n") {
             output.push('\n');
         }
@@ -170,6 +164,7 @@ fn validate_item(item: &Item, semantic_info: &SemanticInfo) -> Result<(), Backen
                     }
                     ClassMember::Method(method) => validate_function(method, semantic_info, true)?,
                     ClassMember::Constant(constant) => {
+                        validate_php_class_constant_name(constant)?;
                         if let Some(ty) = &constant.ty {
                             validate_type(ty, constant.span)?;
                         }
@@ -188,18 +183,6 @@ fn validate_item(item: &Item, semantic_info: &SemanticInfo) -> Result<(), Backen
         }
         Item::Function(function) => validate_function(function, semantic_info, false),
         Item::Constant(constant) => {
-            if matches!(
-                constant.name.to_ascii_lowercase().as_str(),
-                "true" | "false" | "null"
-            ) {
-                return Err(unsupported_constant_shape(
-                    constant.span,
-                    format!(
-                        "top-level constant `{}` because PHP reserves that name case-insensitively",
-                        constant.name
-                    ),
-                ));
-            }
             if let Some(ty) = &constant.ty {
                 validate_type(ty, constant.span)?;
             }
@@ -211,6 +194,19 @@ fn validate_item(item: &Item, semantic_info: &SemanticInfo) -> Result<(), Backen
         }
         Item::Statement(statement) => validate_statement(statement, semantic_info),
     }
+}
+
+fn validate_php_class_constant_name(constant: &ConstDecl) -> Result<(), BackendError> {
+    if constant.name.eq_ignore_ascii_case("class") {
+        return Err(unsupported_constant_shape(
+            constant.span,
+            format!(
+                "class constant `{}` because PHP reserves `class` for class-name fetching",
+                constant.name
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_evaluated_value(
@@ -860,22 +856,30 @@ impl PhpNameScopes {
 
 fn emit_item(
     item: &Item,
-    evaluation: &Evaluation,
+    semantic_info: &SemanticInfo,
     output: &mut String,
     indent: usize,
     scopes: &mut PhpNameScopes,
 ) {
     match item {
-        Item::Class(class_decl) => emit_class(class_decl, evaluation, output, indent, scopes),
-        Item::Function(function) => emit_function(function, output, indent, false, scopes),
-        Item::Constant(constant) => emit_constant(constant, None, evaluation, output, indent),
+        Item::Class(class_decl) => emit_class(class_decl, semantic_info, output, indent, scopes),
+        Item::Function(function) => {
+            emit_function(function, semantic_info, output, indent, false, scopes)
+        }
+        Item::Constant(constant) => emit_constant(
+            constant,
+            None,
+            &semantic_info.const_evaluation,
+            output,
+            indent,
+        ),
         Item::Statement(statement) => emit_statement(statement, output, indent, scopes),
     }
 }
 
 fn emit_class(
     class_decl: &ClassDecl,
-    evaluation: &Evaluation,
+    semantic_info: &SemanticInfo,
     output: &mut String,
     indent: usize,
     scopes: &PhpNameScopes,
@@ -900,16 +904,18 @@ fn emit_class(
             ClassMember::Property(property) => emit_property(
                 property,
                 &class_decl.name,
-                evaluation,
+                &semantic_info.const_evaluation,
                 output,
                 indent + 1,
                 scopes,
             ),
-            ClassMember::Method(method) => emit_function(method, output, indent + 1, true, scopes),
+            ClassMember::Method(method) => {
+                emit_function(method, semantic_info, output, indent + 1, true, scopes)
+            }
             ClassMember::Constant(constant) => emit_constant(
                 constant,
                 Some(&class_decl.name),
-                evaluation,
+                &semantic_info.const_evaluation,
                 output,
                 indent + 1,
             ),
@@ -968,7 +974,10 @@ fn emit_constant(
         output.push(' ');
     }
     output.push_str("const ");
-    output.push_str(&constant.name);
+    output.push_str(&class_name.map_or_else(
+        || php_top_level_constant_name(&constant.name),
+        |_| constant.name.clone(),
+    ));
     output.push_str(" = ");
     let key = class_name.map_or_else(
         || ConstKey::TopLevel(constant.name.clone()),
@@ -1022,6 +1031,7 @@ fn emit_const_value(value: &ConstValue) -> String {
 
 fn emit_function(
     function: &FunctionDecl,
+    semantic_info: &SemanticInfo,
     output: &mut String,
     indent: usize,
     is_method: bool,
@@ -1047,7 +1057,17 @@ fn emit_function(
         &function
             .params
             .iter()
-            .map(|param| emit_param(param, &scopes))
+            .enumerate()
+            .map(|(parameter_index, param)| {
+                emit_param(
+                    param,
+                    semantic_info.parameter_defaults.get(&ParameterDefaultKey {
+                        function_start: function.span.start,
+                        parameter_index,
+                    }),
+                    &scopes,
+                )
+            })
             .collect::<Vec<_>>()
             .join(", "),
     );
@@ -1066,7 +1086,11 @@ fn emit_function(
     emit_block(&function.body, output, indent, &mut scopes);
 }
 
-fn emit_param(param: &Param, scopes: &PhpNameScopes) -> String {
+fn emit_param(
+    param: &Param,
+    evaluated_default: Option<&ConstValue>,
+    scopes: &PhpNameScopes,
+) -> String {
     let mut output = String::new();
     if let Some(access) = &param.promoted_access {
         output.push_str(emit_member_access(access));
@@ -1075,11 +1099,17 @@ fn emit_param(param: &Param, scopes: &PhpNameScopes) -> String {
     output.push_str(&php_type(&param.ty));
     output.push_str(" $");
     output.push_str(&scopes.php_name(&param.name));
-    if let Some(default) = &param.default {
+    if param.default.is_some() {
         output.push_str(" = ");
-        output.push_str(&emit_expr(default, scopes));
+        output.push_str(&emit_const_value(evaluated_default.expect(
+            "checked Copy-scalar parameter default must have an evaluated value",
+        )));
     }
     output
+}
+
+fn php_top_level_constant_name(name: &str) -> String {
+    format!("__DORIA_CONST_{name}")
 }
 
 fn emit_block(block: &Block, output: &mut String, indent: usize, scopes: &mut PhpNameScopes) {
@@ -1467,7 +1497,7 @@ fn emit_expr(expr: &Expr, scopes: &PhpNameScopes) -> String {
     match expr {
         Expr::Variable { name, .. } => format!("${}", scopes.php_name(name)),
         Expr::This { .. } => "$this".to_string(),
-        Expr::Identifier { name, .. } => name.clone(),
+        Expr::Identifier { name, .. } => php_top_level_constant_name(name),
         Expr::String { value, .. } => emit_php_string_literal(value),
         Expr::InterpolatedString { parts, .. } => emit_interpolated_string(parts, scopes),
         Expr::Int { value, .. } | Expr::Float { value, .. } => value.clone(),
