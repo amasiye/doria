@@ -154,7 +154,7 @@ These are identity, not scope deferral. They do not become available later, and 
 
 - The parser tracks the accepted language; the checker tracks what is implemented. Accepted-but-unimplemented syntax must parse cleanly and then produce a semantic unsupported-feature diagnostic naming its landing stage, never a parser malformed-syntax error. The LSP delegates to the compiler and the website playground runs examples against it, so a parser that rejects future syntax makes valid Doria show as errors and destroys early developer-experience feedback.
 - Grammar work is assigned, never implied. When syntax is accepted, its lexer/parser work goes at that moment into a named grammar slice or the nearest preceding stage. It is never left to the semantic stage that gives the syntax meaning, because that is the deferral this rule rejects.
-- Every stage that activates syntax ships an LSP no-false-diagnostics test asserting that accepted-but-unimplemented forms yield stage-named unsupported diagnostics and zero parser errors.
+- Every stage that activates syntax ships a compiler-side accepted-syntax regression test asserting that accepted-but-unimplemented forms yield stage-named unsupported diagnostics and zero parser errors. Coordinate the corresponding LSP no-false-diagnostics coverage in `dorialang/doria-language-server`.
 - Do not confuse unsupported native backend coverage with invalid Doria. If a construct is valid Doria but unsupported by the current native slice, call it unsupported native backend coverage.
 
 ### Surface and spelling
@@ -265,7 +265,7 @@ These are identity, not scope deferral. They do not become available later, and 
 - If a file duplicates the end-to-end plan, stop and classify it.
 - A clear picture is required before implementation; a complete picture is not required.
 - Local MVP work must not undermine the long-term architecture.
-- When a design decision affects parser, AST, HIR, MIR, backend, LSP, editor grammar, docs, and tests, plan the full surface area up front, even if implementation is sliced.
+- When a design decision affects parser, AST, HIR, MIR, backend, LSP, editor grammar, docs, and tests, plan the full surface area up front, even if implementation is sliced; LSP and editor work is coordinated in `dorialang/doria-language-server`.
 - The end-to-end plan states decisions; decision records hold rationale, alternatives, and consequences. Do not put the same reasoning in both. A plan entry that grows into an essay is a signal the record needs authoring, not that the entry needs expanding.
 - Documentation and examples may only demonstrate behavior the plan or an accepted decision record specifies. Specified-but-unimplemented features shown in docs carry the stage in which they land.
 

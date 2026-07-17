@@ -463,6 +463,41 @@ if ($readmeStage !== null && $parityStage !== null && $readmeStage !== $paritySt
     $failures[] = "native status claims disagree: {$readmeStatusPath} ends at Stage {$readmeStage}, but {$parityStatusPath} names Stage {$parityStage}";
 }
 
+// Editor and language-server ownership is external to this compiler repository.
+// Guard both authorities because an in-repo stage obligation can otherwise
+// contradict the repository boundary while every individual sentence remains
+// plausible in isolation.
+$agentsPath = 'AGENTS.md';
+$agents = file_get_contents($root . '/' . $agentsPath);
+$languageServerRepo = 'dorialang/doria-language-server';
+
+foreach ([$namingAuthorityPath => $namingAuthority, $agentsPath => $agents] as $path => $contents) {
+    if ($contents === false) {
+        $failures[] = "{$path}: unable to read language-server ownership guidance";
+        continue;
+    }
+
+    if (!str_contains($contents, $languageServerRepo)) {
+        $failures[] = "{$path}: missing external language-server ownership guidance {$languageServerRepo}";
+    }
+}
+
+if ($namingAuthority !== false) {
+    foreach ([
+        'updated editor token guardrails when vocabulary changes',
+        'Every stage that activates syntax must ship an **LSP no-false-diagnostics** test',
+        '**LSP no-false-diagnostics test** per §0',
+    ] as $staleOwnership) {
+        if (str_contains($namingAuthority, $staleOwnership)) {
+            $failures[] = "{$namingAuthorityPath}: contains stale in-repo editor/LSP obligation {$staleOwnership}";
+        }
+    }
+}
+
+if ($agents !== false && str_contains($agents, 'Every stage that activates syntax ships an LSP no-false-diagnostics test')) {
+    $failures[] = "{$agentsPath}: contains stale in-repo LSP test ownership guidance";
+}
+
 if ($failures !== []) {
     fwrite(STDERR, "docs authority check failed:\n");
     foreach ($failures as $failure) {

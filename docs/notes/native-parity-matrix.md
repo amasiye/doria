@@ -71,7 +71,7 @@ Source of truth for sequencing remains `docs/doria-end-to-end-plan.md`. The dura
 | Sigil-free static identity and `self` | Covered | Covered | Covered | Covered | Constants, static properties, and static methods resolve to concrete class-owned identities before MIR; `self` return types resolve before ABI lowering. |
 | Constructor writable-static mutation | Covered | Covered | Covered | Covered | `main_stage20_static_constructor.doria` treats the write as ordinary mutation and preserves exact destructor output. |
 | Stage 20 static identity diagnostics | Frontend | Frontend | Frontend | Covered | `Foo::$prop` and `static::` are rejected before MIR with exact `$` removal and `self` qualifier fixes. |
-| Generalized `parent::` and trait-local `self::` grammar | Frontend | Frontend | Frontend | Covered | Accepted syntax produces Stage 34/35 semantic diagnostics without parser or LSP syntax errors. |
+| Generalized `parent::` and trait-local `self::` grammar | Frontend | Frontend | Frontend | Covered | Accepted syntax produces Stage 34/35 semantic diagnostics without compiler parser errors; companion LSP coverage is coordinated in `dorialang/doria-language-server`. |
 | `internal` member enforcement | Frontend | Frontend | Frontend | Covered | Rejected access never reaches MIR; same-class access covers instance, static, constant, and lifecycle members. |
 | `Displayable` native execution | Covered | Covered | Covered | Covered | Statically known conforming classes call ordinary `toString()` MIR exactly once and left-to-right. |
 | PHP `Displayable` subset | N/A | N/A | N/A | Covered | Generated private interface invokes Doria `toString` exactly once and never relies on `__toString`. |
