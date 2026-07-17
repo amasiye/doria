@@ -1681,6 +1681,58 @@ class Factory
 }
 
 #[test]
+fn php_backend_rejects_executable_instance_property_defaults() {
+    let cases = [
+        (
+            "function-call-in-property.doria",
+            r#"
+function seed(): int { return 42; }
+class Counter { int $value = seed(); }
+"#,
+            "instance property initializers that call functions",
+        ),
+        (
+            "construction-in-property.doria",
+            r#"
+class Person {}
+class Office { Person $manager = new Person(); }
+"#,
+            "object construction in instance property initializers",
+        ),
+    ];
+
+    for (path, source, expected_message) in cases {
+        doriac::check_source(path, source)
+            .expect("executable property defaults are valid Doria independently of PHP");
+        let diagnostics = doriac::compile_source_to_php(path, source)
+            .expect_err("PHP property defaults cannot execute calls or construction");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "B2001" && diagnostic.message.contains(expected_message)
+        }));
+    }
+}
+
+#[test]
+fn php_backend_keeps_php_constant_expression_property_defaults() {
+    let php = doriac::compile_source_to_php(
+        "constant-property-defaults.doria",
+        r#"
+const int SEED = 41;
+class Config
+{
+    const int OFFSET = 1;
+    List<int> $values = [SEED, Config::OFFSET];
+    bool $enabled = true && !false;
+}
+"#,
+    )
+    .expect("PHP constant expressions remain valid property defaults");
+
+    assert!(php.contains("public array $values = [__DORIA_CONST_SEED, Config::OFFSET];"));
+    assert!(php.contains("public bool $enabled = ((true) && (!(false)));"));
+}
+
+#[test]
 fn php_backend_emits_int_min_constants_without_php_literal_overflow() {
     let php = doriac::compile_source_to_php(
         "int-min-constant.doria",
