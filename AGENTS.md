@@ -89,7 +89,7 @@ The procedure is deliberately mechanical, because judgment is what fails here. G
 - After an edit, grep for what the edit just made false.
 - Before accepting a new rule, name what the rule invalidates. A rule with no listed casualties has not been checked.
 - When writing a guard, a lint, or a CI check, enumerate the forms the fact takes rather than the form in front of you. A pattern matched against one example is an example, not a pattern.
-- Sweep the whole tree, not the file being edited: `docs/`, `docs/decisions/`, `SPEC.md`, `README.md`, `AGENTS.md`, `examples/**`, `editors/**`, tests, fixtures, and diagnostic snapshots.
+- Sweep the whole tree, not the file being edited: `docs/`, `docs/decisions/`, `SPEC.md`, `README.md`, `AGENTS.md`, `examples/**`, tests, fixtures, and diagnostic snapshots. For editor-visible language changes, coordinate the corresponding work in `dorialang/doria-language-server`.
 - Fix what is in scope, report what is not, and never leave a falsified claim standing because it was outside the diff.
 
 Locally-correct fixes are this project's dominant defect source. Every recorded instance was caught late — by review or by acceptance testing — at the most expensive moment available.
@@ -154,7 +154,7 @@ These are identity, not scope deferral. They do not become available later, and 
 
 - The parser tracks the accepted language; the checker tracks what is implemented. Accepted-but-unimplemented syntax must parse cleanly and then produce a semantic unsupported-feature diagnostic naming its landing stage, never a parser malformed-syntax error. The LSP delegates to the compiler and the website playground runs examples against it, so a parser that rejects future syntax makes valid Doria show as errors and destroys early developer-experience feedback.
 - Grammar work is assigned, never implied. When syntax is accepted, its lexer/parser work goes at that moment into a named grammar slice or the nearest preceding stage. It is never left to the semantic stage that gives the syntax meaning, because that is the deferral this rule rejects.
-- Every stage that activates syntax ships an LSP no-false-diagnostics test asserting that accepted-but-unimplemented forms yield stage-named unsupported diagnostics and zero parser errors.
+- Every stage that activates syntax ships a compiler-side accepted-syntax regression test asserting that accepted-but-unimplemented forms yield stage-named unsupported diagnostics and zero parser errors. Coordinate the corresponding LSP no-false-diagnostics coverage in `dorialang/doria-language-server`.
 - Do not confuse unsupported native backend coverage with invalid Doria. If a construct is valid Doria but unsupported by the current native slice, call it unsupported native backend coverage.
 
 ### Surface and spelling
@@ -237,7 +237,8 @@ These are identity, not scope deferral. They do not become available later, and 
 
 ### Tooling and ecosystem
 
-- Do not make Doria editor support VS Code-only. Keep VS Code and IntelliJ / JetBrains syntax highlighting aligned.
+- Language-server transport, syntax highlighting, shared editor fixtures, and IDE clients live in `dorialang/doria-language-server`; do not add them back to this compiler repository.
+- Keep compiler frontend services reusable by `doria-language-server`, and coordinate protocol/editor updates when language behavior changes.
 - Treat TextMate/editor highlighting as editor UX only, not lexer, parser, compiler, or LSP semantic-token support.
 - Use `doria` fences for Doria Markdown examples. Keep `php` fences only for generated PHP, PHP interop, or PHP migration input/output.
 - Planned Doria keywords may be highlighted in editor tooling to keep docs readable, but highlighting must never be described as compiler implementation.
@@ -264,7 +265,7 @@ These are identity, not scope deferral. They do not become available later, and 
 - If a file duplicates the end-to-end plan, stop and classify it.
 - A clear picture is required before implementation; a complete picture is not required.
 - Local MVP work must not undermine the long-term architecture.
-- When a design decision affects parser, AST, HIR, MIR, backend, LSP, editor grammar, docs, and tests, plan the full surface area up front, even if implementation is sliced.
+- When a design decision affects parser, AST, HIR, MIR, backend, LSP, editor grammar, docs, and tests, plan the full surface area up front, even if implementation is sliced; LSP and editor work is coordinated in `dorialang/doria-language-server`.
 - The end-to-end plan states decisions; decision records hold rationale, alternatives, and consequences. Do not put the same reasoning in both. A plan entry that grows into an essay is a signal the record needs authoring, not that the entry needs expanding.
 - Documentation and examples may only demonstrate behavior the plan or an accepted decision record specifies. Specified-but-unimplemented features shown in docs carry the stage in which they land.
 
@@ -309,11 +310,10 @@ cargo run -p doriac -- compile examples/native/main_return_42.doria --target nat
 cargo run -p doriac -- compile examples/native/main_void_hello.doria --target native --out build/native/main_void_hello
 ```
 
-Run documentation and editor guardrails for docs/editor changes:
+Run documentation guardrails for documentation changes:
 
 ```bash
 php scripts/check_docs_authority.php
-php scripts/check_editor_highlighting.php
 ```
 
 Run backend-specific checks only when the touched task depends on that backend. For the current PHP compatibility backend:
