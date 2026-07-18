@@ -8,21 +8,15 @@
 
 ## 1. Open decisions awaiting Andrew
 
-### 1.1 DDO contradicts accepted record 0007
+### 1.1 DDO vs record 0007 — RESOLVED (PR #85)
 
-> **Resolved (PR #85).** Andrew superseded 0007 rather than reconcile it: the plan's §9 DDO charter is authoritative, `0007` is marked **Superseded**, and the modern DDO decision takes a fresh record number when DDO is scheduled (post-Stage-29). The recommendations below are historical — the supersession kept §9's typed connection config over 0007's DSN (a DSN-as-additional-path is deferred to DDO authoring), kept the decomposed API, **carried streaming result sets into the §9 charter**, and mooted `DDO`-vs-`Ddo` (`DDO` is a brand, not a class). The `foreach ($users as UserRow $user)` binding is a pre-SPEC sketch, not adopted.
+Superseded, not reconciled. The plan's §9 DDO charter is authoritative; `docs/decisions/0007-ddo-database-abstraction.md` is marked **Superseded**; the modern DDO decision takes a fresh record number when DDO is scheduled (post-Stage-29). Outcomes of the three former conflicts and two open questions:
 
-`docs/decisions/0007-ddo-database-abstraction.md` (accepted, 18 Jun) predates the plan's §9 DDO paragraph, which was written without reading it. Three conflicts:
-
-| 0007 (accepted) | Plan §9 | Recommendation |
-|---|---|---|
-| `new DDO("mysql://user:pass@localhost/app")` | "typed connection configuration with named arguments, **not stringly DSNs**" | **0007 wins.** DSN is canonical (its Notes list "DSN construction" explicitly); typed named-arg construction becomes an *additional* safe path; DSN parse failure is a `throws`. |
-| `DDO` is the connection class | "decomposed API, **no god object**"; DDO as brand not class | **0007 wins.** Concede the rename. 0007 is already 2/4 decomposed (`DDO` + `Statement`); only the connection-class rename dies. |
-| Notes require **streaming result sets** | absent from plan's fetch shapes | **Plan gap.** Add streaming to the design. |
-
-**Unresolved, needs Andrew:**
-- **`DDO` vs `Ddo`.** §9.1 folds acronyms (`Doria\Std\Io`, `JsonRenderable`). That implies `Ddo`. 0007 says `DDO`. Either the fold rule carves out established brand acronyms, or the class is `Ddo`.
-- **`foreach ($users as UserRow $user)`** in 0007's example is a typed loop binding that does not exist in SPEC's `foreach`. Either a pre-SPEC sketch to rewrite, or it implies a typed-binding form needing a decision.
+- **DSN vs typed config:** §9's typed connection configuration stands; 0007's `new DDO("mysql://...")` DSN is dropped. A DSN-as-additional-path is deferred to DDO authoring.
+- **God object vs decomposed API:** §9's decomposed API (`Connection`/`Statement`/`Transaction`) stands.
+- **Streaming result sets:** carried into the §9 charter (a lazily-streamed typed-row cursor for large results).
+- **`DDO` vs `Ddo`:** moot — `DDO` is the layer/brand name, not a class.
+- **`foreach ($users as UserRow $user)`:** a pre-SPEC sketch in 0007, not adopted.
 
 ### 1.2 Record 0006 (Console) — two tightenings to record as amendments
 
