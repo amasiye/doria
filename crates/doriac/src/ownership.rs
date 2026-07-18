@@ -226,6 +226,7 @@ pub(crate) fn check_program_with_inferred_move_returns(
         properties,
         inferred_move_returns: inferred_move_returns.clone(),
         receiver_class: None,
+        receiver_writable: false,
         current_return_borrow: None,
         active_assignment_writes: HashSet::new(),
         active_assignment_targets: HashSet::new(),
@@ -416,15 +417,25 @@ fn expr_return_borrow(
             source: BorrowSource::Receiver,
             writable: function.writable_this,
         }),
-        Expr::Variable { name, .. } if !shadowed.contains(name) => function
-            .params
-            .iter()
-            .enumerate()
-            .find(|(_, param)| param.name == *name && !param.take)
-            .map(|(index, param)| ReturnBorrow {
-                source: BorrowSource::Parameter(index),
-                writable: param.writable,
-            }),
+        Expr::Variable { name, .. }
+            if !shadowed.contains(name)
+                && function
+                    .params
+                    .iter()
+                    .filter(|param| !param.take && param.ty.as_class_name().is_some())
+                    .count()
+                    == 1 =>
+        {
+            function
+                .params
+                .iter()
+                .enumerate()
+                .find(|(_, param)| param.name == *name && !param.take)
+                .map(|(index, param)| ReturnBorrow {
+                    source: BorrowSource::Parameter(index),
+                    writable: param.writable,
+                })
+        }
         Expr::Grouped { expr, .. } => expr_return_borrow(expr, function, shadowed),
         Expr::PropertyAccess { object, .. } => {
             expr_return_borrow(object, function, shadowed).map(|borrow| ReturnBorrow {
@@ -533,6 +544,7 @@ struct Checker {
     properties: HashMap<(String, String), PropertyInfo>,
     inferred_move_returns: HashSet<usize>,
     receiver_class: Option<String>,
+    receiver_writable: bool,
     current_return_borrow: Option<UseMode>,
     active_assignment_writes: HashSet<String>,
     active_assignment_targets: HashSet<String>,
@@ -544,6 +556,8 @@ impl Checker {
     fn check_function(&mut self, function: &ast::FunctionDecl, receiver_class: Option<&str>) {
         let previous_receiver =
             std::mem::replace(&mut self.receiver_class, receiver_class.map(str::to_owned));
+        let previous_receiver_writable =
+            std::mem::replace(&mut self.receiver_writable, function.writable_this);
         let previous_return_borrow = self.current_return_borrow;
         self.current_return_borrow = function
             .return_type
@@ -591,6 +605,7 @@ impl Checker {
             && self.inferred_move_returns.contains(&function.span.start));
         self.check_block(&function.body, &mut scopes, return_move_type, false);
         self.current_return_borrow = previous_return_borrow;
+        self.receiver_writable = previous_receiver_writable;
         self.receiver_class = previous_receiver;
     }
 
@@ -1311,11 +1326,11 @@ impl Checker {
                 for element in elements {
                     if let Some(key) = &element.key {
                         if self.use_owned_expression(key, scopes) == UseMode::Read {
-                            self.activate_property_place_borrow(key, scopes);
+                            self.activate_property_place_borrows(key, scopes);
                         }
                     }
                     if self.use_owned_expression(&element.value, scopes) == UseMode::Read {
-                        self.activate_property_place_borrow(&element.value, scopes);
+                        self.activate_property_place_borrows(&element.value, scopes);
                     }
                 }
                 self.active_borrows.truncate(borrow_depth);
@@ -1406,7 +1421,7 @@ impl Checker {
                     .get(index)
                     .is_some_and(|param| !param.class_type)
             {
-                self.check_writable_move_argument_property(arg, scopes);
+                self.check_writable_move_argument(arg, scopes);
             }
             if mode == UseMode::Give {
                 if self.expr_returns_borrow(arg, scopes) {
@@ -1444,7 +1459,15 @@ impl Checker {
             }
             self.use_expr(arg, scopes, mode);
             if matches!(mode, UseMode::Read | UseMode::Write) {
-                self.activate_call_borrow(arg, mode, scopes);
+                if mode == UseMode::Read {
+                    let borrow_count = self.active_borrows.len();
+                    self.activate_property_place_borrows(arg, scopes);
+                    if self.active_borrows.len() == borrow_count {
+                        self.activate_call_borrow(arg, mode, scopes);
+                    }
+                } else {
+                    self.activate_call_borrow(arg, mode, scopes);
+                }
             }
         }
         self.active_borrows.truncate(borrow_depth);
@@ -1462,52 +1485,117 @@ impl Checker {
         });
     }
 
-    fn activate_property_place_borrow(&mut self, expr: &Expr, scopes: &Scopes) {
-        let mut expr = expr;
-        while let Expr::Grouped { expr: inner, .. } = expr {
-            expr = inner;
-        }
-        if matches!(expr, Expr::PropertyAccess { .. })
-            && self
-                .borrow_root_key(expr, scopes)
-                .is_some_and(|root| !self.active_assignment_writes.contains(&root))
-        {
-            self.activate_call_borrow(expr, UseMode::Read, scopes);
+    fn activate_property_place_borrows(&mut self, expr: &Expr, scopes: &Scopes) {
+        match expr {
+            Expr::PropertyAccess { .. } => {
+                if self
+                    .borrow_root_key(expr, scopes)
+                    .is_some_and(|root| !self.active_assignment_writes.contains(&root))
+                {
+                    self.activate_call_borrow(expr, UseMode::Read, scopes);
+                }
+            }
+            Expr::Grouped { expr, .. } | Expr::Unary { expr, .. } => {
+                self.activate_property_place_borrows(expr, scopes);
+            }
+            Expr::Binary { left, right, .. } => {
+                self.activate_property_place_borrows(left, scopes);
+                self.activate_property_place_borrows(right, scopes);
+            }
+            Expr::Range { start, end, .. } => {
+                self.activate_property_place_borrows(start, scopes);
+                self.activate_property_place_borrows(end, scopes);
+            }
+            Expr::InterpolatedString { parts, .. } => {
+                for part in parts {
+                    if let ast::InterpolatedStringPart::Expr(expr) = part {
+                        self.activate_property_place_borrows(expr, scopes);
+                    }
+                }
+            }
+            Expr::Array { elements, .. } => {
+                for element in elements {
+                    if let Some(key) = &element.key {
+                        self.activate_property_place_borrows(key, scopes);
+                    }
+                    self.activate_property_place_borrows(&element.value, scopes);
+                }
+            }
+            _ => {}
         }
     }
 
     fn use_read_with_place_borrow(&mut self, expr: &Expr, scopes: &mut Scopes) {
         self.use_expr(expr, scopes, UseMode::Read);
-        self.activate_property_place_borrow(expr, scopes);
+        self.activate_property_place_borrows(expr, scopes);
     }
 
-    fn check_writable_move_argument_property(&mut self, expr: &Expr, scopes: &Scopes) {
-        let mut expr = expr;
-        while let Expr::Grouped { expr: inner, .. } = expr {
-            expr = inner;
-        }
-        let Expr::PropertyAccess {
-            object,
-            property,
-            span,
-        } = expr
-        else {
-            return;
-        };
-        let readonly = self
-            .expr_class(object, scopes)
-            .and_then(|class| self.properties.get(&(class, property.clone())))
-            .is_some_and(|property| !property.writable);
-        if readonly {
+    fn check_writable_move_argument(&mut self, expr: &Expr, scopes: &Scopes) {
+        if let Some((subject, span)) = self.readonly_writable_path(expr, scopes) {
             self.diagnostics.push(
                 Diagnostic::new(
                     "E0479",
-                    format!("readonly property `${property}` cannot be used as writable"),
-                    *span,
+                    format!("readonly {subject} cannot be used as writable"),
+                    span,
                 )
-                .with_help("declare the property `writable` before passing it for mutation"),
+                .with_help("make every borrowed binding and property in the path `writable` before passing it for mutation"),
             );
         }
+    }
+
+    fn readonly_writable_path(&self, expr: &Expr, scopes: &Scopes) -> Option<(String, Span)> {
+        match expr {
+            Expr::Grouped { expr, .. } => self.readonly_writable_path(expr, scopes),
+            // Direct bindings are checked by `use_expr` in write mode. This
+            // helper supplies the path-sensitive checks that mode cannot see.
+            Expr::Variable { .. } => None,
+            Expr::This { span } if !self.receiver_writable => Some(("`$this`".to_string(), *span)),
+            Expr::This { .. } => None,
+            Expr::PropertyAccess {
+                object,
+                property,
+                span,
+            } => self.readonly_writable_path(object, scopes).or_else(|| {
+                self.expr_class(object, scopes)
+                    .and_then(|class| self.properties.get(&(class, property.clone())))
+                    .is_some_and(|property| !property.writable)
+                    .then(|| (format!("property `${property}`"), *span))
+            }),
+            Expr::FunctionCall { name, span, .. } => self
+                .signatures
+                .get(name)
+                .and_then(|signature| self.readonly_return_borrow_path(signature, *span)),
+            Expr::MethodCall {
+                object,
+                method,
+                span,
+                ..
+            } => self.expr_class(object, scopes).and_then(|class| {
+                self.methods
+                    .get(&(class, method.clone()))
+                    .and_then(|signature| self.readonly_return_borrow_path(signature, *span))
+            }),
+            Expr::StaticCall {
+                qualifier,
+                method,
+                span,
+                ..
+            } => self.qualifier_class(qualifier).and_then(|class| {
+                self.methods
+                    .get(&(class, method.clone()))
+                    .and_then(|signature| self.readonly_return_borrow_path(signature, *span))
+            }),
+            _ => None,
+        }
+    }
+
+    fn readonly_return_borrow_path(
+        &self,
+        signature: &Signature,
+        span: Span,
+    ) -> Option<(String, Span)> {
+        let borrow = signature.return_borrow?;
+        (!borrow.writable).then(|| ("returned borrow".to_string(), span))
     }
 
     fn check_assignment_write_conflict(&mut self, root: &str, mode: UseMode, span: Span) -> bool {

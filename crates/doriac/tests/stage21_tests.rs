@@ -771,3 +771,111 @@ function main(): void {}
 "#,
     );
 }
+
+#[test]
+fn nested_property_reads_remain_live_for_the_enclosing_operation() {
+    for source in [
+        r#"
+class Box { int $value = 0; }
+function update(writable Box $box): int { return 1; }
+function observe(int $left, int $right): void {}
+function route(writable Box $box): void
+{
+    observe(($box->value + 1) * 2, update($box));
+}
+"#,
+        r#"
+class Box { int $value = 0; }
+function update(writable Box $box): int { return 1; }
+function route(writable Box $box): int
+{
+    return (($box->value + 1) * 2) + update($box);
+}
+"#,
+    ] {
+        assert_diagnostic(source, "E0477");
+    }
+}
+
+#[test]
+fn writable_mixed_requires_every_property_path_segment_to_be_writable() {
+    assert_diagnostic(
+        r#"
+class Child { writable mixed $payload = 1; }
+class Box { Child $child = new Child(); }
+function update(writable mixed $value): void {}
+function route(writable Box $box): void { update($box->child->payload); }
+"#,
+        "E0479",
+    );
+
+    doriac::check_source(
+        "stage21-writable-mixed-property-path.doria",
+        r#"
+class Child { writable mixed $payload = 1; }
+class Box { writable Child $child = new Child(); }
+function update(writable mixed $value): void {}
+function route(writable Box $box): void { update($box->child->payload); }
+"#,
+    )
+    .expect("a fully writable property path should satisfy writable mixed");
+}
+
+#[test]
+fn readonly_returned_borrows_cannot_satisfy_writable_mixed() {
+    assert_diagnostic(
+        r#"
+class Guard {}
+function identity(Guard $guard): Guard { return $guard; }
+function update(writable mixed $value): void {}
+function route(writable Guard $guard): void { update(identity($guard)); }
+"#,
+        "E0479",
+    );
+}
+
+#[test]
+fn readonly_this_cannot_satisfy_writable_mixed() {
+    assert_diagnostic(
+        r#"
+function update(writable mixed $value): void {}
+class Guard
+{
+    function route(): void { update($this); }
+}
+"#,
+        "E0479",
+    );
+
+    doriac::check_source(
+        "stage21-writable-this-as-mixed.doria",
+        r#"
+function update(writable mixed $value): void {}
+class Guard
+{
+    writable function route(): void { update($this); }
+}
+"#,
+    )
+    .expect("a writable receiver should satisfy writable mixed");
+}
+
+#[test]
+fn parameter_return_elision_requires_one_borrowed_class_parameter() {
+    assert_diagnostic(
+        r#"
+class Guard {}
+function first(Guard $left, Guard $right): Guard { return $left; }
+"#,
+        "E0474",
+    );
+
+    doriac::check_source(
+        "stage21-elision-with-copy-parameter.doria",
+        r#"
+class Guard {}
+function choose(Guard $guard, bool $alternate): Guard { return $guard; }
+"#,
+    )
+    .expect("copy-scalar parameters should not count as borrowed return sources");
+}
