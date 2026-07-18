@@ -397,6 +397,18 @@ function route(Guard $guard): void
 }
 
 #[test]
+fn borrowed_results_cannot_initialize_owning_properties() {
+    assert_diagnostic(
+        r#"
+class Child {}
+function identity(Child $child): Child { return $child; }
+class Box { Child $child = identity(new Child()); }
+"#,
+        "E0478",
+    );
+}
+
+#[test]
 fn shadowed_parameters_do_not_define_returned_borrow_provenance() {
     assert_valid_mir(
         r#"
@@ -619,6 +631,36 @@ function route(take Box $box): int { return $box->value + consume($box); }
 }
 
 #[test]
+fn property_place_reads_remain_live_across_interpolation_parts() {
+    assert_diagnostic(
+        r#"
+class Box { int $value = 0; }
+function update(writable Box $box): int { return 1; }
+function render(writable Box $box): string
+{
+    return "{$box->value}{update($box)}";
+}
+"#,
+        "E0477",
+    );
+}
+
+#[test]
+fn property_place_reads_remain_live_across_collection_elements() {
+    assert_diagnostic(
+        r#"
+class Box { int $value = 0; }
+function update(writable Box $box): int { return 1; }
+function collect(writable Box $box): int[]
+{
+    return [$box->value, update($box)];
+}
+"#,
+        "E0477",
+    );
+}
+
+#[test]
 fn nested_exact_assignment_target_reads_remain_accepted() {
     doriac::check_source(
         "stage21-nested-exact-target.doria",
@@ -684,6 +726,30 @@ function route(writable Box $box): void { update($box->payload); }
 "#,
     )
     .expect("a writable move property remains a valid writable argument");
+}
+
+#[test]
+fn readonly_class_properties_cannot_be_passed_as_writable_mixed() {
+    assert_diagnostic(
+        r#"
+class Child {}
+class Box { Child $child = new Child(); }
+function update(writable mixed $value): void {}
+function route(writable Box $box): void { update($box->child); }
+"#,
+        "E0479",
+    );
+
+    doriac::check_source(
+        "stage21-writable-class-property-as-mixed.doria",
+        r#"
+class Child {}
+class Box { writable Child $child = new Child(); }
+function update(writable mixed $value): void {}
+function route(writable Box $box): void { update($box->child); }
+"#,
+    )
+    .expect("a writable class property remains a writable mixed argument");
 }
 
 #[test]

@@ -14,6 +14,7 @@ use crate::symbols::{BorrowSource, ReturnBorrow};
 #[derive(Debug, Clone)]
 struct Parameter {
     move_type: bool,
+    class_type: bool,
     take: bool,
     writable: bool,
 }
@@ -242,6 +243,18 @@ pub(crate) fn check_program_with_inferred_move_returns(
                         ClassMember::Property(property) => {
                             if let Some(initializer) = &property.initializer {
                                 let mut scopes = Scopes::new();
+                                if type_ref_is_move_type(
+                                    &property.ty,
+                                    &checker.classes,
+                                    Some(&class.name),
+                                ) {
+                                    checker.reject_borrowed_result(
+                                        initializer,
+                                        &scopes,
+                                        "borrowed result cannot initialize an owning property",
+                                        "initialize the property with an independently owned value",
+                                    );
+                                }
                                 checker.use_expr(initializer, &mut scopes, UseMode::Give);
                             }
                         }
@@ -441,6 +454,7 @@ fn signature(
             .iter()
             .map(|param| Parameter {
                 move_type: type_ref_is_move_type(&param.ty, classes, receiver_class),
+                class_type: type_ref_class_name(&param.ty, classes, receiver_class).is_some(),
                 take: param.take,
                 writable: param.writable,
             })
@@ -1208,11 +1222,7 @@ impl Checker {
                 }
             }
             Expr::Grouped { expr, .. } => self.use_expr(expr, scopes, mode),
-            Expr::PropertyAccess {
-                object,
-                property,
-                span,
-            } => {
+            Expr::PropertyAccess { object, span, .. } => {
                 if mode == UseMode::Give && self.expr_is_move_value(expr, scopes) {
                     self.diagnostics.push(
                         Diagnostic::new(
@@ -1224,26 +1234,6 @@ impl Checker {
                             "use the property without transferring it until writable-path move rules are specified",
                         ),
                     );
-                }
-                if mode == UseMode::Write {
-                    let readonly_move_property = self
-                        .expr_class(object, scopes)
-                        .and_then(|class| self.properties.get(&(class, property.clone())))
-                        .is_some_and(|property| property.class.is_none() && !property.writable);
-                    if readonly_move_property {
-                        self.diagnostics.push(
-                            Diagnostic::new(
-                                "E0479",
-                                format!(
-                                    "readonly property `${property}` cannot be used as writable"
-                                ),
-                                *span,
-                            )
-                            .with_help(
-                                "declare the property `writable` before passing it for mutation",
-                            ),
-                        );
-                    }
                 }
                 let assignment_root = (mode == UseMode::Read
                     && self
@@ -1308,19 +1298,27 @@ impl Checker {
                 self.use_call_args(None, args, &signature, scopes);
             }
             Expr::InterpolatedString { parts, .. } => {
+                let borrow_depth = self.active_borrows.len();
                 for part in parts {
                     if let ast::InterpolatedStringPart::Expr(expr) = part {
-                        self.use_expr(expr, scopes, UseMode::Read);
+                        self.use_read_with_place_borrow(expr, scopes);
                     }
                 }
+                self.active_borrows.truncate(borrow_depth);
             }
             Expr::Array { elements, .. } => {
+                let borrow_depth = self.active_borrows.len();
                 for element in elements {
                     if let Some(key) = &element.key {
-                        self.use_owned_expression(key, scopes);
+                        if self.use_owned_expression(key, scopes) == UseMode::Read {
+                            self.activate_property_place_borrow(key, scopes);
+                        }
                     }
-                    self.use_owned_expression(&element.value, scopes);
+                    if self.use_owned_expression(&element.value, scopes) == UseMode::Read {
+                        self.activate_property_place_borrow(&element.value, scopes);
+                    }
                 }
+                self.active_borrows.truncate(borrow_depth);
             }
             Expr::Unary { expr, .. } => self.use_expr(expr, scopes, UseMode::Read),
             Expr::Binary {
@@ -1330,8 +1328,7 @@ impl Checker {
                 ..
             } => {
                 let borrow_depth = self.active_borrows.len();
-                self.use_expr(left, scopes, UseMode::Read);
-                self.activate_property_place_borrow(left, scopes);
+                self.use_read_with_place_borrow(left, scopes);
                 match (op, constant_bool(left)) {
                     (BinaryOp::And, Some(false)) | (BinaryOp::Or, Some(true)) => {}
                     (BinaryOp::And, Some(true)) | (BinaryOp::Or, Some(false)) => {
@@ -1353,8 +1350,7 @@ impl Checker {
                 ..
             } => {
                 let borrow_depth = self.active_borrows.len();
-                self.use_expr(left, scopes, UseMode::Read);
-                self.activate_property_place_borrow(left, scopes);
+                self.use_read_with_place_borrow(left, scopes);
                 self.use_expr(right, scopes, UseMode::Read);
                 self.active_borrows.truncate(borrow_depth);
             }
@@ -1404,6 +1400,14 @@ impl Checker {
         }
         for (index, arg) in args.iter().enumerate() {
             let mode = call_arg_mode(signature, index);
+            if mode == UseMode::Write
+                && signature
+                    .params
+                    .get(index)
+                    .is_some_and(|param| !param.class_type)
+            {
+                self.check_writable_move_argument_property(arg, scopes);
+            }
             if mode == UseMode::Give {
                 if self.expr_returns_borrow(arg, scopes) {
                     self.diagnostics.push(
@@ -1469,6 +1473,40 @@ impl Checker {
                 .is_some_and(|root| !self.active_assignment_writes.contains(&root))
         {
             self.activate_call_borrow(expr, UseMode::Read, scopes);
+        }
+    }
+
+    fn use_read_with_place_borrow(&mut self, expr: &Expr, scopes: &mut Scopes) {
+        self.use_expr(expr, scopes, UseMode::Read);
+        self.activate_property_place_borrow(expr, scopes);
+    }
+
+    fn check_writable_move_argument_property(&mut self, expr: &Expr, scopes: &Scopes) {
+        let mut expr = expr;
+        while let Expr::Grouped { expr: inner, .. } = expr {
+            expr = inner;
+        }
+        let Expr::PropertyAccess {
+            object,
+            property,
+            span,
+        } = expr
+        else {
+            return;
+        };
+        let readonly = self
+            .expr_class(object, scopes)
+            .and_then(|class| self.properties.get(&(class, property.clone())))
+            .is_some_and(|property| !property.writable);
+        if readonly {
+            self.diagnostics.push(
+                Diagnostic::new(
+                    "E0479",
+                    format!("readonly property `${property}` cannot be used as writable"),
+                    *span,
+                )
+                .with_help("declare the property `writable` before passing it for mutation"),
+            );
         }
     }
 
@@ -1646,18 +1684,15 @@ impl Checker {
         }
     }
 
-    fn use_owned_expression(&mut self, expr: &Expr, scopes: &mut Scopes) {
-        if self.expr_returns_borrow(expr, scopes) {
-            self.diagnostics.push(
-                Diagnostic::new(
-                    "E0478",
-                    "borrowed result cannot be stored in an owning collection",
-                    expr.span(),
-                )
-                .with_help("store an independently owned value in the collection"),
-            );
+    fn use_owned_expression(&mut self, expr: &Expr, scopes: &mut Scopes) -> UseMode {
+        if self.reject_borrowed_result(
+            expr,
+            scopes,
+            "borrowed result cannot be stored in an owning collection",
+            "store an independently owned value in the collection",
+        ) {
             self.use_expr(expr, scopes, UseMode::Read);
-            return;
+            return UseMode::Read;
         }
         let mode = if self.expr_is_move_value(expr, scopes) {
             UseMode::Give
@@ -1665,6 +1700,22 @@ impl Checker {
             UseMode::Read
         };
         self.use_expr(expr, scopes, mode);
+        mode
+    }
+
+    fn reject_borrowed_result(
+        &mut self,
+        expr: &Expr,
+        scopes: &Scopes,
+        message: impl Into<String>,
+        help: impl Into<String>,
+    ) -> bool {
+        if !self.expr_returns_borrow(expr, scopes) {
+            return false;
+        }
+        self.diagnostics
+            .push(Diagnostic::new("E0478", message, expr.span()).with_help(help));
+        true
     }
 
     fn expr_is_move_value(&self, expr: &Expr, scopes: &Scopes) -> bool {
