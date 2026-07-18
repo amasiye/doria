@@ -524,6 +524,12 @@ class Guard
         if (false) { return new Guard(); }
         return $this;
     }
+
+    function looping(): self
+    {
+        while (true) { return $this; }
+        return new Guard();
+    }
 }
 
 function observe(Guard $guard): void {}
@@ -533,6 +539,7 @@ function main(): void
     let $guard = new Guard();
     observe($guard->direct());
     observe($guard->conditional());
+    observe($guard->looping());
 }
 "#,
     );
@@ -726,6 +733,25 @@ function route(writable Box $box): void { update($box->payload); }
 "#,
     )
     .expect("a writable move property remains a valid writable argument");
+
+    assert_diagnostic(
+        r#"
+class Store { static int $payload = 1; }
+function update(writable mixed $payload): void {}
+function main(): void { update(Store::payload); }
+"#,
+        "E0479",
+    );
+
+    doriac::check_source(
+        "stage21-writable-static-property.doria",
+        r#"
+class Store { static writable int $payload = 1; }
+function update(writable mixed $payload): void {}
+function main(): void { update(Store::payload); }
+"#,
+    )
+    .expect("a writable static property remains a valid writable argument");
 }
 
 #[test]

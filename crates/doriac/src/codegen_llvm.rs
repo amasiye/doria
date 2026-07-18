@@ -1423,7 +1423,9 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
 
         if spec.conversion == FormatConversion::Display {
             let string = match argument {
-                mir::FormatArgument::String(value) => self.lower_string_expression(value)?,
+                mir::FormatArgument::String(value) | mir::FormatArgument::ClassDisplay(value) => {
+                    self.lower_string_expression(value)?
+                }
                 mir::FormatArgument::Value(value) => {
                     self.lower_string_expression(&mir::StringExpression::Display(value.clone()))?
                 }

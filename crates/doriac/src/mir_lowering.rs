@@ -2610,7 +2610,12 @@ fn lower_format_expression(
         .zip(specs)
         .map(|(argument, spec)| {
             if spec.conversion == FormatConversion::Display {
-                lower_display_string_expression(argument, context).map(mir::FormatArgument::String)
+                let lowered = lower_display_string_expression(argument, context)?;
+                if inferred_class_type(argument, context).is_some() {
+                    Ok(mir::FormatArgument::ClassDisplay(lowered))
+                } else {
+                    Ok(mir::FormatArgument::String(lowered))
+                }
             } else if is_string_local_initializer(argument, context) {
                 lower_string_expression(argument, context).map(mir::FormatArgument::String)
             } else {

@@ -717,7 +717,8 @@ impl Interpreter<'_> {
                         mir::FormatArgument::Value(value) => {
                             frame.tasks.push(EvaluationTask::Value(value));
                         }
-                        mir::FormatArgument::String(value) => {
+                        mir::FormatArgument::String(value)
+                        | mir::FormatArgument::ClassDisplay(value) => {
                             frame.tasks.push(EvaluationTask::String(value));
                         }
                     }

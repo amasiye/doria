@@ -148,6 +148,7 @@ pub(crate) fn check_program_with_inferred_move_returns(
     let mut constructors = HashMap::new();
     let mut methods = HashMap::new();
     let mut properties = HashMap::new();
+    let mut static_properties = HashMap::new();
 
     for item in &program.items {
         match item {
@@ -160,7 +161,13 @@ pub(crate) fn check_program_with_inferred_move_returns(
             Item::Class(class) => {
                 for member in &class.members {
                     match member {
-                        ClassMember::Property(property) if !property.is_static => {
+                        ClassMember::Property(property) if property.is_static => {
+                            static_properties.insert(
+                                (class.name.clone(), property.name.clone()),
+                                property.writable,
+                            );
+                        }
+                        ClassMember::Property(property) => {
                             let property_class =
                                 type_ref_class_name(&property.ty, &classes, Some(&class.name));
                             let move_type =
@@ -176,7 +183,7 @@ pub(crate) fn check_program_with_inferred_move_returns(
                                 );
                             }
                         }
-                        ClassMember::Property(_) | ClassMember::Constant(_) => {}
+                        ClassMember::Constant(_) => {}
                         ClassMember::Method(method) => {
                             let method_signature = signature(
                                 method,
@@ -224,6 +231,7 @@ pub(crate) fn check_program_with_inferred_move_returns(
         constructors,
         methods,
         properties,
+        static_properties,
         inferred_move_returns: inferred_move_returns.clone(),
         receiver_class: None,
         receiver_writable: false,
@@ -350,7 +358,9 @@ fn statement_return_borrow(
             if constant_bool(&statement.condition) != Some(false) {
                 block_return_borrow(&statement.body, function, shadowed, borrow)?;
             }
-            Some(true)
+            Some(crate::return_analysis::statement_falls_through(
+                &Stmt::While(statement.clone()),
+            ))
         }
         Stmt::For(statement) => {
             let mut loop_shadowed = shadowed.clone();
@@ -364,7 +374,9 @@ fn statement_return_borrow(
             {
                 block_return_borrow(&statement.body, function, &loop_shadowed, borrow)?;
             }
-            Some(true)
+            Some(crate::return_analysis::statement_falls_through(&Stmt::For(
+                statement.clone(),
+            )))
         }
         Stmt::Foreach(statement) => {
             let mut loop_shadowed = shadowed.clone();
@@ -373,7 +385,9 @@ fn statement_return_borrow(
             }
             loop_shadowed.insert(statement.value.name.clone());
             block_return_borrow(&statement.body, function, &loop_shadowed, borrow)?;
-            Some(true)
+            Some(crate::return_analysis::statement_falls_through(
+                &Stmt::Foreach(statement.clone()),
+            ))
         }
         Stmt::VarDecl(decl) => {
             shadowed.insert(decl.name.clone());
@@ -549,6 +563,7 @@ struct Checker {
     constructors: HashMap<String, Signature>,
     methods: HashMap<(String, String), Signature>,
     properties: HashMap<(String, String), PropertyInfo>,
+    static_properties: HashMap<(String, String), bool>,
     inferred_move_returns: HashSet<usize>,
     receiver_class: Option<String>,
     receiver_writable: bool,
@@ -1647,6 +1662,17 @@ impl Checker {
                     .and_then(|class| self.properties.get(&(class, property.clone())))
                     .is_some_and(|property| !property.writable)
                     .then(|| (format!("property `${property}`"), *span))
+            }),
+            Expr::StaticMember {
+                qualifier,
+                member,
+                span,
+                ..
+            } => self.qualifier_class(qualifier).and_then(|class| {
+                self.static_properties
+                    .get(&(class.clone(), member.clone()))
+                    .is_some_and(|writable| !writable)
+                    .then(|| (format!("static property `{class}::{member}`"), *span))
             }),
             Expr::FunctionCall { name, span, .. } => self
                 .signatures

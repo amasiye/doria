@@ -1528,7 +1528,7 @@ fn lower_format_argument(
     let flags = builder.ins().iconst(types::I8, i64::from(flags_value));
     if spec.conversion == FormatConversion::Display {
         let string = match argument {
-            mir::FormatArgument::String(value) => {
+            mir::FormatArgument::String(value) | mir::FormatArgument::ClassDisplay(value) => {
                 lower_string_expression(builder, value, resources)?
             }
             mir::FormatArgument::Value(value) => lower_string_expression(

@@ -449,6 +449,7 @@ pub enum NullableStringExpression {
 pub enum FormatArgument {
     Value(ValueExpression),
     String(StringExpression),
+    ClassDisplay(StringExpression),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -737,7 +738,9 @@ fn format_class_temporary_capacity(format: &FormatExpression) -> usize {
         .iter()
         .map(|argument| match argument {
             FormatArgument::Value(value) => value_class_temporary_capacity(value),
-            FormatArgument::String(value) => string_class_temporary_capacity(value),
+            FormatArgument::String(value) | FormatArgument::ClassDisplay(value) => {
+                string_class_temporary_capacity(value)
+            }
         })
         .sum()
 }
@@ -1085,6 +1088,7 @@ impl fmt::Display for FormatArgument {
         match self {
             Self::Value(value) => write!(formatter, "{value}"),
             Self::String(value) => write!(formatter, "{value}"),
+            Self::ClassDisplay(value) => write!(formatter, "class-display({value})"),
         }
     }
 }

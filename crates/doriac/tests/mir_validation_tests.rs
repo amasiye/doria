@@ -171,6 +171,105 @@ fn shared_validator_rejects_invalid_format_index_and_argument_type() {
 }
 
 #[test]
+fn shared_validator_preserves_implicit_display_borrows_across_format_arguments() {
+    let mut program = class_program();
+    let mut receiver = class_local(0, ClassId(0));
+    receiver.writable = true;
+    program.functions[0].locals.push(receiver);
+    let receiver_argument = || {
+        Rvalue::Class(ClassExpression::Local {
+            class: ClassId(0),
+            local: LocalId(0),
+            transfer: false,
+        })
+    };
+    let display_call = StringExpression::Call {
+        function: FunctionId(1),
+        args: vec![receiver_argument()],
+    };
+    let update_call = StringExpression::Call {
+        function: FunctionId(2),
+        args: vec![receiver_argument()],
+    };
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::Printf(FormatExpression {
+            pieces: vec![
+                FormatPiece::Argument {
+                    index: 0,
+                    spec: display_spec(),
+                },
+                FormatPiece::Argument {
+                    index: 1,
+                    spec: display_spec(),
+                },
+            ],
+            arguments: vec![
+                FormatArgument::ClassDisplay(display_call.clone()),
+                FormatArgument::String(update_call),
+            ],
+        }));
+    for (id, name, writable) in [
+        (FunctionId(1), "display", false),
+        (FunctionId(2), "update", true),
+    ] {
+        let mut parameter = borrowed_class_local(0, ClassId(0));
+        parameter.writable = writable;
+        program.functions.push(Function {
+            id,
+            name: name.to_string(),
+            method: None,
+            receiver_mode: None,
+            params: vec![LocalId(0)],
+            return_type: ReturnType::Value(Type::String),
+            locals: vec![parameter],
+            blocks: vec![BasicBlock {
+                id: BlockId(0),
+                statements: vec![],
+                terminator: Terminator::Return(Rvalue::String(StringExpression::Literal(
+                    name.to_string(),
+                ))),
+            }],
+            entry_block: BlockId(0),
+        });
+    }
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("class display must remain borrowed through later format arguments");
+    assert!(error
+        .message
+        .contains("takes overlapping writable borrows of class local local0"));
+
+    program.functions[2].locals[0].writable = false;
+    doriac::mir_validation::validate_program(&program)
+        .expect("multiple readonly format borrows do not conflict");
+
+    program.functions[2].locals[0].writable = true;
+    let Statement::Printf(format) = &mut program.functions[0].blocks[0].statements[0] else {
+        unreachable!()
+    };
+    format.arguments[0] = FormatArgument::String(display_call);
+    doriac::mir_validation::validate_program(&program).expect(
+        "an explicit string-producing call ends its receiver borrow before the next argument",
+    );
+
+    let Statement::Printf(format) = &mut program.functions[0].blocks[0].statements[0] else {
+        unreachable!()
+    };
+    format.arguments[0] = FormatArgument::ClassDisplay(StringExpression::Call {
+        function: FunctionId(1),
+        args: vec![Rvalue::Class(ClassExpression::New {
+            class: ClassId(0),
+            properties: vec![],
+            constructor: None,
+            args: vec![],
+        })],
+    });
+    doriac::mir_validation::validate_program(&program)
+        .expect("displaying an owned temporary does not borrow the later argument's owner");
+}
+
+#[test]
 fn shared_validator_requires_class_calls_to_return_the_declared_class() {
     let mut program = class_program();
     program.functions[0].locals.push(class_local(0, ClassId(0)));
@@ -1425,6 +1524,104 @@ fn shared_validator_rejects_property_assignments_that_transfer_the_receiver() {
 }
 
 #[test]
+fn shared_validator_rejects_property_assignment_receiver_borrows_except_the_target() {
+    let mut program = class_program();
+    let target = PropertyId {
+        class: ClassId(0),
+        index: 0,
+    };
+    let other = PropertyId {
+        class: ClassId(0),
+        index: 1,
+    };
+    program.classes[0].properties = vec![
+        Property {
+            id: target,
+            name: "target".to_string(),
+            ty: Type::String,
+            writable: true,
+            promoted: false,
+        },
+        Property {
+            id: other,
+            name: "other".to_string(),
+            ty: Type::String,
+            writable: false,
+            promoted: false,
+        },
+    ];
+    program.classes[0].layout = compute_class_layout(
+        ClassId(0),
+        [(target, FieldType::String), (other, FieldType::String)],
+        8,
+    );
+    let mut receiver = class_local(0, ClassId(0));
+    receiver.writable = true;
+    program.functions[0].locals.push(receiver);
+    program.functions[0].blocks[0]
+        .statements
+        .push(Statement::AssignProperty {
+            object: LocalId(0),
+            property: target,
+            value: Rvalue::String(StringExpression::Property {
+                object: LocalId(0),
+                property: other,
+            }),
+        });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("a property write cannot read another property on its receiver");
+    assert!(error.message.contains("borrows its receiver local0"));
+
+    let Statement::AssignProperty { value, .. } = &mut program.functions[0].blocks[0].statements[0]
+    else {
+        unreachable!("the fixture contains a property assignment")
+    };
+    *value = Rvalue::String(StringExpression::Property {
+        object: LocalId(0),
+        property: target,
+    });
+    doriac::mir_validation::validate_program(&program)
+        .expect("an exact-target read remains valid for read-modify-write lowering");
+
+    let mut parameter = borrowed_class_local(0, ClassId(0));
+    parameter.writable = true;
+    program.functions.push(Function {
+        id: FunctionId(1),
+        name: "update".to_string(),
+        method: None,
+        receiver_mode: None,
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Value(Type::String),
+        locals: vec![parameter],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::Return(Rvalue::String(StringExpression::Literal(
+                "updated".to_string(),
+            ))),
+        }],
+        entry_block: BlockId(0),
+    });
+    let Statement::AssignProperty { value, .. } = &mut program.functions[0].blocks[0].statements[0]
+    else {
+        unreachable!("the fixture contains a property assignment")
+    };
+    *value = Rvalue::String(StringExpression::Call {
+        function: FunctionId(1),
+        args: vec![Rvalue::Class(ClassExpression::Local {
+            class: ClassId(0),
+            local: LocalId(0),
+            transfer: false,
+        })],
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("a property write cannot borrow its receiver through a call");
+    assert!(error.message.contains("borrows its receiver local0"));
+}
+
+#[test]
 fn shared_validator_enforces_property_and_receiver_mutability() {
     for (property_writable, receiver_writable, expected) in [
         (false, true, "mutates readonly property0"),
@@ -2016,6 +2213,16 @@ fn shared_validator_rejects_cleanup_and_assignment_of_borrowed_class_locals() {
 fn decimal_spec() -> FormatSpec {
     FormatSpec {
         conversion: FormatConversion::Decimal,
+        width: None,
+        precision: None,
+        left_align: false,
+        zero_pad: false,
+    }
+}
+
+fn display_spec() -> FormatSpec {
+    FormatSpec {
+        conversion: FormatConversion::Display,
         width: None,
         precision: None,
         left_align: false,
