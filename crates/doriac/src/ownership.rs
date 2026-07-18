@@ -14,6 +14,7 @@ use crate::source::Span;
 struct Parameter {
     move_type: bool,
     take: bool,
+    writable: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -21,6 +22,7 @@ struct Signature {
     params: Vec<Parameter>,
     returns: Option<String>,
     returns_move_type: bool,
+    receiver: Option<UseMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +221,7 @@ pub(crate) fn check_program_with_inferred_move_returns(
         inferred_move_returns: inferred_move_returns.clone(),
         receiver_class: None,
         active_assignment_receivers: HashSet::new(),
+        active_borrows: Vec::new(),
         diagnostics: Vec::new(),
     };
     let mut top_level_scopes = Scopes::new();
@@ -268,6 +271,7 @@ fn signature(
             .map(|param| Parameter {
                 move_type: type_ref_is_move_type(&param.ty, classes, receiver_class),
                 take: param.take,
+                writable: param.writable,
             })
             .collect(),
         returns: function
@@ -279,13 +283,28 @@ fn signature(
             .as_ref()
             .is_some_and(|ty| type_ref_is_move_type(ty, classes, receiver_class))
             || inferred_move_returns.contains(&function.span.start),
+        receiver: receiver_class.map(|_| {
+            if function.writable_this {
+                UseMode::Write
+            } else {
+                UseMode::Read
+            }
+        }),
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UseMode {
-    Borrow,
+    Read,
+    Write,
     Give,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveBorrow {
+    root: String,
+    mode: UseMode,
+    span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -330,6 +349,7 @@ struct Checker {
     inferred_move_returns: HashSet<usize>,
     receiver_class: Option<String>,
     active_assignment_receivers: HashSet<String>,
+    active_borrows: Vec<ActiveBorrow>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -424,7 +444,7 @@ impl Checker {
                     if initializer_moves || class.is_some() || mixed || declared_move_type {
                         UseMode::Give
                     } else {
-                        UseMode::Borrow
+                        UseMode::Read
                     },
                 );
                 if class.is_some() || mixed || declared_move_type {
@@ -443,8 +463,8 @@ impl Checker {
             }
             Stmt::Assignment(assignment) => {
                 if assignment.op != AssignOp::Assign {
-                    self.use_expr(&assignment.target, scopes, UseMode::Borrow);
-                    self.use_expr(&assignment.value, scopes, UseMode::Borrow);
+                    self.use_expr(&assignment.target, scopes, UseMode::Read);
+                    self.use_expr(&assignment.value, scopes, UseMode::Read);
                     return Flow::fallthrough();
                 }
                 if let Expr::Variable { name, span } = &assignment.target {
@@ -491,7 +511,7 @@ impl Checker {
                             if value_moves || class_assignment {
                                 UseMode::Give
                             } else {
-                                UseMode::Borrow
+                                UseMode::Read
                             },
                         );
                         if let Some(binding) = scopes.get_mut(name) {
@@ -505,7 +525,7 @@ impl Checker {
                             }
                         }
                     } else {
-                        self.use_expr(&assignment.value, scopes, UseMode::Borrow);
+                        self.use_expr(&assignment.value, scopes, UseMode::Read);
                     }
                 } else {
                     if self.expr_is_move_value(&assignment.value, scopes) {
@@ -520,14 +540,14 @@ impl Checker {
                             ),
                         );
                     }
-                    self.use_expr(&assignment.target, scopes, UseMode::Borrow);
+                    self.use_expr(&assignment.target, scopes, UseMode::Read);
                     let receiver = ownership_root_name(&assignment.target)
                         .filter(|name| scopes.get(name).is_some())
                         .map(str::to_owned);
                     let inserted = receiver
                         .as_ref()
                         .is_some_and(|name| self.active_assignment_receivers.insert(name.clone()));
-                    self.use_expr(&assignment.value, scopes, UseMode::Borrow);
+                    self.use_expr(&assignment.value, scopes, UseMode::Read);
                     if inserted {
                         self.active_assignment_receivers
                             .remove(receiver.as_deref().expect("inserted receiver"));
@@ -536,11 +556,11 @@ impl Checker {
                 Flow::fallthrough()
             }
             Stmt::Echo { expr, .. } => {
-                self.use_expr(expr, scopes, UseMode::Borrow);
+                self.use_expr(expr, scopes, UseMode::Read);
                 Flow::fallthrough()
             }
             Stmt::Expr { expr, .. } => {
-                self.use_expr(expr, scopes, UseMode::Borrow);
+                self.use_expr(expr, scopes, UseMode::Read);
                 if is_panic_expr(expr) {
                     Flow::stops()
                 } else {
@@ -555,14 +575,14 @@ impl Checker {
                         if return_move_type {
                             UseMode::Give
                         } else {
-                            UseMode::Borrow
+                            UseMode::Read
                         },
                     );
                 }
                 Flow::stops()
             }
             Stmt::If(statement) => {
-                self.use_expr(&statement.condition, scopes, UseMode::Borrow);
+                self.use_expr(&statement.condition, scopes, UseMode::Read);
                 if let Some(condition) = constant_bool(&statement.condition) {
                     if condition {
                         return self.check_block(
@@ -625,7 +645,7 @@ impl Checker {
                 }
             }
             Stmt::While(statement) => {
-                self.use_expr(&statement.condition, scopes, UseMode::Borrow);
+                self.use_expr(&statement.condition, scopes, UseMode::Read);
                 if constant_bool(&statement.condition) == Some(false) {
                     return Flow::fallthrough();
                 }
@@ -637,7 +657,7 @@ impl Checker {
                     body_flow.backedges.push(body);
                 }
                 for repeat in &mut body_flow.backedges {
-                    self.use_expr(&statement.condition, repeat, UseMode::Borrow);
+                    self.use_expr(&statement.condition, repeat, UseMode::Read);
                 }
                 self.check_second_iteration(
                     &statement.body,
@@ -670,7 +690,7 @@ impl Checker {
                     }
                 }
                 if let Some(condition) = &statement.condition {
-                    self.use_expr(condition, scopes, UseMode::Borrow);
+                    self.use_expr(condition, scopes, UseMode::Read);
                     if constant_bool(condition) == Some(false) {
                         scopes.pop();
                         return Flow::fallthrough();
@@ -694,7 +714,7 @@ impl Checker {
                 Flow::fallthrough()
             }
             Stmt::Foreach(statement) => {
-                self.use_expr(&statement.iterable, scopes, UseMode::Borrow);
+                self.use_expr(&statement.iterable, scopes, UseMode::Read);
                 let before = scopes.clone();
                 let mut body = before.clone();
                 let mut body_flow =
@@ -713,7 +733,7 @@ impl Checker {
                 Flow::fallthrough()
             }
             Stmt::Increment(increment) => {
-                self.use_expr(&increment.target, scopes, UseMode::Borrow);
+                self.use_expr(&increment.target, scopes, UseMode::Read);
                 Flow::fallthrough()
             }
             Stmt::Break { .. } => Flow::breaks(scopes),
@@ -836,12 +856,12 @@ impl Checker {
                     );
                 }
                 ast::ForIncrement::Increment(increment) => {
-                    self.use_expr(&increment.target, scopes, UseMode::Borrow);
+                    self.use_expr(&increment.target, scopes, UseMode::Read);
                 }
             }
         }
         if let Some(condition) = &statement.condition {
-            self.use_expr(condition, scopes, UseMode::Borrow);
+            self.use_expr(condition, scopes, UseMode::Read);
         }
     }
 
@@ -860,6 +880,11 @@ impl Checker {
     fn use_expr(&mut self, expr: &Expr, scopes: &mut Scopes, mode: UseMode) {
         match expr {
             Expr::Variable { name, span } => {
+                if matches!(mode, UseMode::Read | UseMode::Write) {
+                    self.check_active_borrow_conflict(name, mode, *span);
+                } else if mode == UseMode::Give {
+                    self.check_give_against_active_borrows(name, *span);
+                }
                 if mode == UseMode::Give && self.active_assignment_receivers.contains(name) {
                     self.diagnostics.push(
                         Diagnostic::new(
@@ -938,7 +963,7 @@ impl Checker {
                         ),
                     );
                 }
-                self.use_expr(object, scopes, UseMode::Borrow);
+                self.use_expr(object, scopes, UseMode::Read);
             }
             Expr::FunctionCall { name, args, .. } => {
                 let signature = self.signatures.get(name).cloned().unwrap_or_default();
@@ -982,7 +1007,7 @@ impl Checker {
             Expr::InterpolatedString { parts, .. } => {
                 for part in parts {
                     if let ast::InterpolatedStringPart::Expr(expr) = part {
-                        self.use_expr(expr, scopes, UseMode::Borrow);
+                        self.use_expr(expr, scopes, UseMode::Read);
                     }
                 }
             }
@@ -994,23 +1019,23 @@ impl Checker {
                     self.use_owned_expression(&element.value, scopes);
                 }
             }
-            Expr::Unary { expr, .. } => self.use_expr(expr, scopes, UseMode::Borrow),
+            Expr::Unary { expr, .. } => self.use_expr(expr, scopes, UseMode::Read),
             Expr::Binary {
                 left,
                 op: op @ (BinaryOp::And | BinaryOp::Or),
                 right,
                 ..
             } => {
-                self.use_expr(left, scopes, UseMode::Borrow);
+                self.use_expr(left, scopes, UseMode::Read);
                 match (op, constant_bool(left)) {
                     (BinaryOp::And, Some(false)) | (BinaryOp::Or, Some(true)) => {}
                     (BinaryOp::And, Some(true)) | (BinaryOp::Or, Some(false)) => {
-                        self.use_expr(right, scopes, UseMode::Borrow);
+                        self.use_expr(right, scopes, UseMode::Read);
                     }
                     _ => {
                         let without_right = scopes.clone();
                         let mut with_right = without_right.clone();
-                        self.use_expr(right, &mut with_right, UseMode::Borrow);
+                        self.use_expr(right, &mut with_right, UseMode::Read);
                         scopes.merge_from(&without_right, &with_right);
                     }
                 }
@@ -1021,10 +1046,15 @@ impl Checker {
                 end: right,
                 ..
             } => {
-                self.use_expr(left, scopes, UseMode::Borrow);
-                self.use_expr(right, scopes, UseMode::Borrow);
+                self.use_expr(left, scopes, UseMode::Read);
+                self.use_expr(right, scopes, UseMode::Read);
             }
             Expr::This { span } => {
+                if matches!(mode, UseMode::Read | UseMode::Write) {
+                    self.check_active_borrow_conflict("$this", mode, *span);
+                } else if mode == UseMode::Give {
+                    self.check_give_against_active_borrows("$this", *span);
+                }
                 if mode == UseMode::Give {
                     self.diagnostics.push(
                         Diagnostic::new("E0474", "borrowed `$this` cannot be given away", *span)
@@ -1051,31 +1081,22 @@ impl Checker {
         signature: &Signature,
         scopes: &mut Scopes,
     ) {
-        let mut borrowed = HashSet::new();
-        if let Some(name) = receiver.and_then(ownership_root_name) {
-            if scopes.get(name).is_some() {
-                borrowed.insert(name);
-            }
-        }
-        for (index, arg) in args.iter().enumerate() {
-            let mode = call_arg_mode(signature, index);
-            if mode == UseMode::Borrow {
-                if let Some(name) = ownership_root_name(arg) {
-                    if scopes.get(name).is_some() {
-                        borrowed.insert(name);
-                    }
-                }
-            }
-        }
-
+        let borrow_depth = self.active_borrows.len();
         if let Some(receiver) = receiver {
-            self.use_expr(receiver, scopes, UseMode::Borrow);
+            self.use_expr(receiver, scopes, UseMode::Read);
+            if let Some(mode) = signature.receiver {
+                self.activate_call_borrow(receiver, mode, scopes);
+            }
         }
         for (index, arg) in args.iter().enumerate() {
             let mode = call_arg_mode(signature, index);
             if mode == UseMode::Give {
-                if let Some(name) = ownership_root_name(arg).filter(|name| borrowed.contains(name))
-                {
+                if let Some(name) = ownership_root_name(arg).filter(|name| {
+                    self.active_borrows
+                        .iter()
+                        .skip(borrow_depth)
+                        .any(|borrow| borrow.root == *name)
+                }) {
                     self.diagnostics.push(
                         Diagnostic::new(
                             "E0471",
@@ -1085,8 +1106,94 @@ impl Checker {
                         .with_help("pass distinct owners for borrowed and ownership-taking inputs"),
                     );
                 }
+                if let Some(name) = ownership_root_name(arg) {
+                    self.check_give_against_active_borrows(name, arg.span());
+                }
             }
             self.use_expr(arg, scopes, mode);
+            if matches!(mode, UseMode::Read | UseMode::Write) {
+                self.activate_call_borrow(arg, mode, scopes);
+            }
+        }
+        self.active_borrows.truncate(borrow_depth);
+    }
+
+    fn activate_call_borrow(&mut self, expr: &Expr, mode: UseMode, scopes: &Scopes) {
+        let Some(root) = borrow_root_key(expr, scopes, self.receiver_class.is_some()) else {
+            return;
+        };
+        self.check_active_borrow_conflict(&root, mode, expr.span());
+        self.active_borrows.push(ActiveBorrow {
+            root,
+            mode,
+            span: expr.span(),
+        });
+    }
+
+    fn check_active_borrow_conflict(&mut self, root: &str, mode: UseMode, span: Span) {
+        if mode == UseMode::Give {
+            self.check_give_against_active_borrows(root, span);
+            return;
+        }
+        let Some(existing) = self
+            .active_borrows
+            .iter()
+            .rev()
+            .find(|borrow| borrow.root == root && borrow_modes_conflict(borrow.mode, mode))
+            .cloned()
+        else {
+            return;
+        };
+        let existing_span = existing.span;
+        let requested = match mode {
+            UseMode::Read => "readonly",
+            UseMode::Write => "writable",
+            UseMode::Give => unreachable!("handled above"),
+        };
+        let existing = match existing.mode {
+            UseMode::Read => "readonly",
+            UseMode::Write => "writable",
+            UseMode::Give => unreachable!("active borrow cannot be a give"),
+        };
+        let root_display = display_borrow_root(root);
+        self.diagnostics.push(
+            Diagnostic::new(
+                "E0477",
+                format!(
+                    "`{root_display}` cannot be used as {requested} here because it is already used as {existing} in this call"
+                ),
+                span,
+            )
+            .with_help(format!(
+                "finish the earlier use at bytes {}..{} before taking the conflicting writable access",
+                existing_span.start,
+                existing_span.end
+            )),
+        );
+    }
+
+    fn check_give_against_active_borrows(&mut self, root: &str, span: Span) {
+        if let Some(existing) = self
+            .active_borrows
+            .iter()
+            .rev()
+            .find(|borrow| borrow.root == root)
+            .cloned()
+        {
+            self.diagnostics.push(
+                Diagnostic::new(
+                    "E0471",
+                    format!(
+                        "`{}` cannot be borrowed and given away in the same call",
+                        display_borrow_root(root)
+                    ),
+                    span,
+                )
+                .with_help(format!(
+                    "the earlier use at bytes {}..{} must finish before ownership is given away",
+                    existing.span.start, existing.span.end
+                )),
+            );
         }
     }
 
@@ -1094,7 +1201,7 @@ impl Checker {
         let mode = if self.expr_is_move_value(expr, scopes) {
             UseMode::Give
         } else {
-            UseMode::Borrow
+            UseMode::Read
         };
         self.use_expr(expr, scopes, mode);
     }
@@ -1203,6 +1310,34 @@ fn ownership_root_name(expr: &Expr) -> Option<&str> {
     }
 }
 
+fn borrow_root_key(expr: &Expr, scopes: &Scopes, this_available: bool) -> Option<String> {
+    match expr {
+        Expr::This { .. } if this_available => Some("$this".to_string()),
+        Expr::Variable { name, .. } if scopes.get(name).is_some() => Some(name.clone()),
+        Expr::PropertyAccess { object, .. } | Expr::Grouped { expr: object, .. } => {
+            borrow_root_key(object, scopes, this_available)
+        }
+        _ => None,
+    }
+}
+
+fn borrow_modes_conflict(existing: UseMode, requested: UseMode) -> bool {
+    matches!(
+        (existing, requested),
+        (UseMode::Write, UseMode::Read)
+            | (UseMode::Read, UseMode::Write)
+            | (UseMode::Write, UseMode::Write)
+    )
+}
+
+fn display_borrow_root(root: &str) -> String {
+    if root == "$this" {
+        root.to_string()
+    } else {
+        format!("${root}")
+    }
+}
+
 fn type_ref_class_name(
     ty: &crate::types::TypeRef,
     classes: &HashSet<String>,
@@ -1229,11 +1364,16 @@ fn type_ref_is_move_type(
 }
 
 fn call_arg_mode(signature: &Signature, index: usize) -> UseMode {
-    signature
-        .params
-        .get(index)
-        .filter(|param| param.take && param.move_type)
-        .map_or(UseMode::Borrow, |_| UseMode::Give)
+    let Some(param) = signature.params.get(index) else {
+        return UseMode::Read;
+    };
+    if param.take && param.move_type {
+        UseMode::Give
+    } else if param.writable && param.move_type {
+        UseMode::Write
+    } else {
+        UseMode::Read
+    }
 }
 
 fn constant_bool(expr: &Expr) -> Option<bool> {
