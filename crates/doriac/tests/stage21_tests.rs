@@ -304,6 +304,43 @@ function main(): void
 }
 
 #[test]
+fn borrowed_return_calls_are_evaluated_before_local_cleanup() {
+    let source = r#"
+class Guard
+{
+    function __destruct() { echo "drop\n"; }
+}
+
+function identity(Guard $guard): Guard
+{
+    echo "identity\n";
+    return $guard;
+}
+
+function forward(Guard $guard): Guard
+{
+    let $temporary = new Guard();
+    return identity($guard);
+}
+
+function main(): void
+{
+    let $owner = new Guard();
+    forward($owner);
+    echo "done\n";
+}
+"#;
+    let program = doriac::lower_source_to_mir("stage21-borrowed-return-cleanup.doria", source)
+        .expect("borrowed return calls should lower to MIR");
+    doriac::mir_validation::validate_program(&program).expect("MIR should validate");
+    let output = doriac::mir_interpreter::interpret(&program).expect("MIR should interpret");
+    assert_eq!(output.stdout, b"identity\ndrop\ndone\ndrop\n");
+    assert!(!doriac::codegen_cranelift::lower_mir_to_object(&program)
+        .expect("borrowed return cleanup should lower through Cranelift")
+        .is_empty());
+}
+
+#[test]
 fn returned_self_borrows_lower_and_validate_in_native_mir() {
     assert_valid_mir(
         r#"
@@ -1116,6 +1153,42 @@ function route(writable Box $box): void
     ] {
         assert_diagnostic(source, "E0477");
     }
+}
+
+#[test]
+fn nested_calls_preserve_writable_borrows() {
+    for later_argument in ["$box->value", "update($box)"] {
+        assert_diagnostic(
+            &format!(
+                r#"
+class Box {{ int $value = 1; }}
+function update(writable Box $box): int {{ return 1; }}
+function observe(int $left, int $right): void {{}}
+function route(writable Box $box): void
+{{
+    observe(update($box), {later_argument});
+}}
+"#
+            ),
+            "E0477",
+        );
+    }
+
+    assert_diagnostic(
+        r#"
+class Box
+{
+    int $value = 1;
+    writable function update(): int { return 1; }
+}
+function observe(int $left, int $right): void {}
+function route(writable Box $box): void
+{
+    observe($box->update(), $box->value);
+}
+"#,
+        "E0477",
+    );
 }
 
 #[test]

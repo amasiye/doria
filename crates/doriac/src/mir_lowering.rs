@@ -3027,7 +3027,15 @@ fn lower_return(
                 )]);
             }
             if context.has_cleanup_obligations() {
-                if borrowed_class {
+                let borrowed_call = borrowed_class
+                    && matches!(
+                        &value,
+                        mir::Rvalue::Class(mir::ClassExpression::Call {
+                            return_borrow: Some(_),
+                            ..
+                        })
+                    );
+                if borrowed_class && !borrowed_call {
                     context.cleanup_scopes_from(0);
                     return Ok(mir::Terminator::Return(value));
                 }

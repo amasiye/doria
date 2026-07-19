@@ -1741,14 +1741,19 @@ impl Checker {
     ) {
         if let Some(receiver) = receiver {
             self.activate_place_input_borrows(receiver, scopes);
-            if signature.receiver == Some(UseMode::Read) {
-                self.activate_call_borrow(receiver, UseMode::Read, scopes);
+            let result_continues_receiver_borrow = signature
+                .return_borrow
+                .is_some_and(|borrow| borrow.source == BorrowSource::Receiver);
+            if !result_continues_receiver_borrow {
+                if let Some(mode @ (UseMode::Read | UseMode::Write)) = signature.receiver {
+                    self.activate_call_borrow(receiver, mode, scopes);
+                }
             }
         }
         for (index, arg) in args.iter().enumerate() {
             let mode = call_arg_mode(signature, index);
             self.activate_place_input_borrows(arg, scopes);
-            if mode == UseMode::Read {
+            if matches!(mode, UseMode::Read | UseMode::Write) {
                 self.activate_call_borrow(arg, mode, scopes);
             }
         }

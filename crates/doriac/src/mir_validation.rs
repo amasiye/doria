@@ -312,10 +312,27 @@ fn validate_statement(
                     if expression.class() == expected =>
                 {
                     if !local.owned {
-                        return Err(malformed_mir(format!(
-                            "class assignment targets borrowed local local{}",
-                            target.0
-                        )));
+                        if !local.synthetic {
+                            return Err(malformed_mir(format!(
+                                "class assignment targets borrowed local local{}",
+                                target.0
+                            )));
+                        }
+                        if class_expression_accesses_local(expression, *target) {
+                            return Err(malformed_mir(format!(
+                                "borrowed class temporary local{} reads its own uninitialized value",
+                                target.0
+                            )));
+                        }
+                        validate_class_expression(program, function, expression)?;
+                        if infer_expression_return_borrow(program, function, expression)?.is_none()
+                        {
+                            return Err(malformed_mir(format!(
+                                "borrowed class temporary local{} receives an owning value",
+                                target.0
+                            )));
+                        }
+                        return Ok(());
                     }
                     validate_class_expression(program, function, expression)?;
                     require_owned_class_expression(
@@ -720,7 +737,10 @@ fn infer_expression_return_borrow(
             local,
             transfer: false,
             ..
-        } => Ok(borrow_from_parameter(function, *local)),
+        } => match borrow_from_parameter(function, *local) {
+            Some(borrow) => Ok(Some(borrow)),
+            None => infer_synthetic_local_return_borrow(program, function, *local),
+        },
         mir::ClassExpression::Property { object, .. } => Ok(borrow_from_parameter(
             function, *object,
         )
@@ -750,6 +770,51 @@ fn infer_expression_return_borrow(
             ..
         }
         | mir::ClassExpression::New { .. } => Ok(None),
+    }
+}
+
+fn infer_synthetic_local_return_borrow(
+    program: &mir::Program,
+    function: &mir::Function,
+    local: mir::LocalId,
+) -> Result<Option<mir::ReturnBorrow>, BackendError> {
+    let definition = local_in(function, local)?;
+    if definition.owned || !definition.synthetic {
+        return Ok(None);
+    }
+
+    let (reachable, _) = reachable_blocks_and_predecessors(function, true)?;
+    let mut inferred = None;
+    for block in function.blocks.iter().filter(|block| reachable[block.id.0]) {
+        for statement in &block.statements {
+            let mir::Statement::AssignLocal {
+                target,
+                value: mir::Rvalue::Class(expression),
+            } = statement
+            else {
+                continue;
+            };
+            if *target != local {
+                continue;
+            }
+            if inferred.is_some() || class_expression_accesses_local(expression, local) {
+                return Err(malformed_mir(format!(
+                    "borrowed class temporary local{} must have one non-recursive assignment",
+                    local.0
+                )));
+            }
+            inferred = Some(infer_expression_return_borrow(
+                program, function, expression,
+            )?);
+        }
+    }
+    match inferred {
+        Some(Some(borrow)) => Ok(Some(borrow)),
+        Some(None) => Err(malformed_mir(format!(
+            "borrowed class temporary local{} receives an owning value",
+            local.0
+        ))),
+        None => Ok(None),
     }
 }
 
@@ -1128,6 +1193,18 @@ fn collect_class_expression_local_accesses<'a>(
             }
         }
     }
+}
+
+fn class_expression_accesses_local(expression: &mir::ClassExpression, local: mir::LocalId) -> bool {
+    let mut accesses = ClassLocalAccesses::default();
+    collect_class_expression_local_accesses(expression, &mut accesses);
+    let accesses_local = accesses.iter().any(|access| match access {
+        ClassLocalAccess::Borrow(accessed)
+        | ClassLocalAccess::Transfer(accessed)
+        | ClassLocalAccess::PropertyBorrow(accessed, _) => accessed == local,
+        ClassLocalAccess::BeginCall | ClassLocalAccess::Call(_, _, _) => false,
+    });
+    accesses_local
 }
 
 fn collect_bool_class_local_accesses<'a>(
