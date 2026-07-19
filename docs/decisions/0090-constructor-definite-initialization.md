@@ -140,8 +140,8 @@ destructor output. New diagnostics require coordinated no-false-diagnostics
 coverage in the separate `dorialang/doria-language-server` repository.
 
 This decision does not settle or implement `Shared<T>`, `Weak<T>`, or
-`SharedMut<T>`. Their public API remains a separately unauthored decision subject,
-so the complete Stage 21 acceptance criterion cannot yet be claimed.
+`SharedMut<T>`. Their public API remains a separately unauthored decision subject
+rescheduled to Stage 25a, so it is outside the Stage 21 acceptance criterion.
 
 ## Invalidated elsewhere
 
