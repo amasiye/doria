@@ -172,16 +172,14 @@ pub(crate) fn check_program_with_inferred_move_returns(
                                 type_ref_class_name(&property.ty, &classes, Some(&class.name));
                             let move_type =
                                 type_ref_is_move_type(&property.ty, &classes, Some(&class.name));
-                            if move_type {
-                                properties.insert(
-                                    (class.name.clone(), property.name.clone()),
-                                    PropertyInfo {
-                                        class: property_class,
-                                        move_type,
-                                        writable: property.writable,
-                                    },
-                                );
-                            }
+                            properties.insert(
+                                (class.name.clone(), property.name.clone()),
+                                PropertyInfo {
+                                    class: property_class,
+                                    move_type,
+                                    writable: property.writable,
+                                },
+                            );
                         }
                         ClassMember::Constant(_) => {}
                         ClassMember::Method(method) => {
@@ -205,7 +203,7 @@ pub(crate) fn check_program_with_inferred_move_returns(
                                         &classes,
                                         Some(&class.name),
                                     );
-                                    if param.promoted_access.is_some() && move_type {
+                                    if param.promoted_access.is_some() {
                                         properties.insert(
                                             (class.name.clone(), param.name.clone()),
                                             PropertyInfo {
@@ -251,6 +249,8 @@ pub(crate) fn check_program_with_inferred_move_returns(
                     match member {
                         ClassMember::Property(property) => {
                             if let Some(initializer) = &property.initializer {
+                                let previous_receiver =
+                                    checker.receiver_class.replace(class.name.clone());
                                 let mut scopes = Scopes::new();
                                 if type_ref_is_move_type(
                                     &property.ty,
@@ -265,6 +265,7 @@ pub(crate) fn check_program_with_inferred_move_returns(
                                     );
                                 }
                                 checker.use_expr(initializer, &mut scopes, UseMode::Give);
+                                checker.receiver_class = previous_receiver;
                             }
                         }
                         ClassMember::Method(method) => {

@@ -108,5 +108,7 @@ deferred consuming self-return convention.
 - Uniform `E0203` rejection of writable calls on owned temporaries.
 - Any documentation claiming `(new X())->mutate()` or readonly/writable fluent
   self-return chaining is permanently unsupported.
+- `SPEC.md` supported-subset descriptions that list non-lexical borrowing as
+  unsupported.
 - The Stage 19 temporary native-eligibility gate once constructor
   definite-initialization analysis lands.

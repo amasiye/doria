@@ -755,6 +755,43 @@ function main(): void { update(Store::payload); }
 }
 
 #[test]
+fn readonly_scalar_properties_cannot_be_passed_as_writable_mixed() {
+    assert_diagnostic(
+        r#"
+class Box { int $value = 0; }
+function update(writable mixed $value): void {}
+function route(writable Box $box): void { update($box->value); }
+"#,
+        "E0479",
+    );
+
+    doriac::check_source(
+        "stage21-writable-scalar-property.doria",
+        r#"
+class Box { writable int $value = 0; }
+function update(writable mixed $value): void {}
+function route(writable Box $box): void { update($box->value); }
+"#,
+    )
+    .expect("a writable scalar property remains a valid writable argument");
+}
+
+#[test]
+fn property_initializers_resolve_self_qualified_borrow_returns() {
+    assert_diagnostic(
+        r#"
+class Child {}
+class Box
+{
+    static function identity(Child $child): Child { return $child; }
+    Child $child = self::identity(new Child());
+}
+"#,
+        "E0478",
+    );
+}
+
+#[test]
 fn readonly_class_properties_cannot_be_passed_as_writable_mixed() {
     assert_diagnostic(
         r#"

@@ -173,6 +173,18 @@ fn shared_validator_rejects_invalid_format_index_and_argument_type() {
 #[test]
 fn shared_validator_preserves_implicit_display_borrows_across_format_arguments() {
     let mut program = class_program();
+    let label = PropertyId {
+        class: ClassId(0),
+        index: 0,
+    };
+    program.classes[0].properties.push(Property {
+        id: label,
+        name: "label".to_string(),
+        ty: Type::String,
+        writable: false,
+        promoted: false,
+    });
+    program.classes[0].layout = compute_class_layout(ClassId(0), [(label, FieldType::String)], 8);
     let mut receiver = class_local(0, ClassId(0));
     receiver.writable = true;
     program.functions[0].locals.push(receiver);
@@ -260,13 +272,39 @@ fn shared_validator_preserves_implicit_display_borrows_across_format_arguments()
         function: FunctionId(1),
         args: vec![Rvalue::Class(ClassExpression::New {
             class: ClassId(0),
-            properties: vec![],
+            properties: vec![PropertyValue {
+                property: label,
+                source: PropertyValueSource::Expression(Rvalue::String(StringExpression::Literal(
+                    "temporary".to_string(),
+                ))),
+            }],
             constructor: None,
             args: vec![],
         })],
     });
     doriac::mir_validation::validate_program(&program)
         .expect("displaying an owned temporary does not borrow the later argument's owner");
+
+    let Statement::Printf(format) = &mut program.functions[0].blocks[0].statements[0] else {
+        unreachable!()
+    };
+    format.arguments[0] = FormatArgument::String(StringExpression::Property {
+        object: LocalId(0),
+        property: label,
+    });
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("a format property read must remain live through later arguments");
+    assert!(error
+        .message
+        .contains("takes overlapping writable borrows of class local local0"));
+
+    let Statement::Printf(format) = &mut program.functions[0].blocks[0].statements[0] else {
+        unreachable!()
+    };
+    format.pieces.swap(0, 1);
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("noncanonical format evaluation order must be rejected");
+    assert!(error.message.contains("canonical evaluation order"));
 }
 
 #[test]
@@ -804,11 +842,15 @@ fn shared_validator_tracks_property_borrows_across_outer_call_arguments() {
     program.classes[0].properties.push(Property {
         id: label,
         name: "label".to_string(),
-        ty: Type::String,
+        ty: Type::Scalar(ScalarType::Integer(IntegerType::Int64)),
         writable: false,
         promoted: false,
     });
-    program.classes[0].layout = compute_class_layout(ClassId(0), [(label, FieldType::String)], 8);
+    program.classes[0].layout = compute_class_layout(
+        ClassId(0),
+        [(label, FieldType::Integer(IntegerType::Int64))],
+        8,
+    );
     program.functions[0].locals.push(class_local(0, ClassId(0)));
     program.functions[0].blocks[0]
         .statements
@@ -820,10 +862,15 @@ fn shared_validator_tracks_property_borrows_across_outer_call_arguments() {
                     local: LocalId(0),
                     transfer: true,
                 }),
-                Rvalue::String(StringExpression::Property {
-                    object: LocalId(0),
-                    property: label,
-                }),
+                Rvalue::Value(ValueExpression::Integer(
+                    doriac::mir::IntegerExpression::Use {
+                        ty: IntegerType::Int64,
+                        operand: Operand::Property {
+                            object: LocalId(0),
+                            property: label,
+                        },
+                    },
+                )),
             ],
         });
     program.functions.push(Function {
@@ -838,7 +885,7 @@ fn shared_validator_tracks_property_borrows_across_outer_call_arguments() {
             Local {
                 id: LocalId(1),
                 name: "label".to_string(),
-                ty: Type::String,
+                ty: Type::Scalar(ScalarType::Integer(IntegerType::Int64)),
                 writable: false,
                 synthetic: false,
                 owned: false,
@@ -871,7 +918,7 @@ fn shared_validator_tracks_property_borrows_across_outer_call_arguments() {
         Local {
             id: LocalId(0),
             name: "label".to_string(),
-            ty: Type::String,
+            ty: Type::Scalar(ScalarType::Integer(IntegerType::Int64)),
             writable: false,
             synthetic: false,
             owned: false,
@@ -889,6 +936,64 @@ fn shared_validator_tracks_property_borrows_across_outer_call_arguments() {
     program.functions[1].locals[1].writable = false;
     doriac::mir_validation::validate_program(&program)
         .expect("a property read may overlap a later readonly borrow");
+
+    let property_read = doriac::mir::IntegerExpression::Use {
+        ty: IntegerType::Int64,
+        operand: Operand::Property {
+            object: LocalId(0),
+            property: label,
+        },
+    };
+    let writable_call = doriac::mir::IntegerExpression::Call {
+        ty: IntegerType::Int64,
+        function: FunctionId(2),
+        args: vec![Rvalue::Class(ClassExpression::Local {
+            class: ClassId(0),
+            local: LocalId(0),
+            transfer: false,
+        })],
+    };
+    program.functions[0].blocks[0].statements[0] = Statement::CallVoid {
+        function: FunctionId(1),
+        args: vec![Rvalue::Value(ValueExpression::Integer(
+            doriac::mir::IntegerExpression::Binary {
+                ty: IntegerType::Int64,
+                op: doriac::mir::IntegerBinaryOp::Add,
+                left: Box::new(property_read),
+                right: Box::new(writable_call),
+            },
+        ))],
+    };
+    program.functions[1].params = vec![LocalId(0)];
+    program.functions[1].locals.truncate(1);
+    let mut writable = borrowed_class_local(0, ClassId(0));
+    writable.writable = true;
+    program.functions.push(Function {
+        id: FunctionId(2),
+        name: "update".to_string(),
+        method: None,
+        receiver_mode: None,
+        params: vec![LocalId(0)],
+        return_type: ReturnType::Value(Type::Scalar(ScalarType::Integer(IntegerType::Int64))),
+        locals: vec![writable],
+        blocks: vec![BasicBlock {
+            id: BlockId(0),
+            statements: vec![],
+            terminator: Terminator::Return(Rvalue::Value(ValueExpression::Integer(
+                doriac::mir::IntegerExpression::constant(IntegerValue::from_bits(
+                    IntegerType::Int64,
+                    1,
+                )),
+            ))),
+        }],
+        entry_block: BlockId(0),
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("a nested writable call cannot overlap an earlier property read");
+    assert!(error
+        .message
+        .contains("takes overlapping writable borrows of class local local0"));
 }
 
 #[test]
