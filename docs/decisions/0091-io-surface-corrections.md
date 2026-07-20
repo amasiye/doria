@@ -55,8 +55,9 @@ sibling is reserved as `append_file_bytes` so the text and `Bytes` tiers mirror
 one another.
 
 This record settles names and contracts only. `append_file` and
-`append_file_bytes` are both implemented in Stage 23; neither is added to the
-compiler, MIR, backends, or runtime by this decision pass.
+`append_file_bytes` are both implemented in Stage 23. Their names are reserved
+against user declarations, but neither is callable or lowered through MIR,
+backends, or the runtime before Stage 23.
 
 ## Alternatives considered
 
