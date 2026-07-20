@@ -848,7 +848,26 @@ impl Parser {
     fn parse_binary(&mut self, min_prec: u8) -> Option<Expr> {
         let mut left = self.parse_unary()?;
 
-        while let Some((op, prec)) = self.current_binary_op() {
+        loop {
+            if self.check(&TokenKind::Is) {
+                const IS_PRECEDENCE: u8 = 8;
+                if IS_PRECEDENCE < min_prec {
+                    break;
+                }
+                self.advance();
+                let ty = self.parse_type_ref()?;
+                let span = left.span().merge(self.previous().span);
+                left = Expr::IsType {
+                    expr: Box::new(left),
+                    ty,
+                    span,
+                };
+                continue;
+            }
+
+            let Some((op, prec)) = self.current_binary_op() else {
+                break;
+            };
             if prec < min_prec {
                 break;
             }
@@ -945,9 +964,16 @@ impl Parser {
         let mut expr = self.parse_primary()?;
 
         loop {
-            if self.match_kind(&TokenKind::Arrow) {
+            let null_safe = if self.match_kind(&TokenKind::Arrow) {
+                Some(false)
+            } else if self.match_kind(&TokenKind::QuestionArrow) {
+                Some(true)
+            } else {
+                None
+            };
+            if let Some(null_safe) = null_safe {
                 let property =
-                    self.expect_identifier("expected property or method name after `->`")?;
+                    self.expect_identifier("expected property or method name after member access")?;
                 if self.match_kind(&TokenKind::LeftParen) {
                     let args = self.parse_argument_list_after_open()?;
                     let span = expr.span().merge(self.previous().span);
@@ -955,6 +981,7 @@ impl Parser {
                         object: Box::new(expr),
                         method: property,
                         args,
+                        null_safe,
                         span,
                     };
                 } else {
@@ -962,6 +989,7 @@ impl Parser {
                     expr = Expr::PropertyAccess {
                         object: Box::new(expr),
                         property,
+                        null_safe,
                         span,
                     };
                 }
@@ -1302,6 +1330,7 @@ impl Parser {
             Expr::Grouped { expr, .. } | Expr::Unary { expr, .. } => {
                 Self::contains_bare_identifier(expr)
             }
+            Expr::IsType { expr, .. } => Self::contains_bare_identifier(expr),
             Expr::Binary { left, right, .. } => {
                 Self::contains_bare_identifier(left) || Self::contains_bare_identifier(right)
             }
@@ -1431,6 +1460,8 @@ impl Parser {
             TokenKind::StringType => "string".to_string(),
             TokenKind::BoolType => "bool".to_string(),
             TokenKind::Null => "null".to_string(),
+            TokenKind::Object => "object".to_string(),
+            TokenKind::Resource => "resource".to_string(),
             TokenKind::SelfType => "self".to_string(),
             TokenKind::Identifier(name) => self.finish_qualified_name(
                 name,
@@ -1565,6 +1596,7 @@ impl Parser {
         matches!(
             self.peek().kind,
             TokenKind::Writable
+                | TokenKind::Question
                 | TokenKind::Void
                 | TokenKind::IntType
                 | TokenKind::Int8Type
@@ -1581,6 +1613,8 @@ impl Parser {
                 | TokenKind::StringType
                 | TokenKind::BoolType
                 | TokenKind::Null
+                | TokenKind::Object
+                | TokenKind::Resource
                 | TokenKind::SelfType
                 | TokenKind::Identifier(_)
         )
@@ -1755,6 +1789,9 @@ fn token_name(kind: &TokenKind) -> &'static str {
         TokenKind::True => "true",
         TokenKind::False => "false",
         TokenKind::Null => "null",
+        TokenKind::Is => "is",
+        TokenKind::Object => "object",
+        TokenKind::Resource => "resource",
         TokenKind::Void => "void",
         TokenKind::IntType => "int",
         TokenKind::Int8Type => "int8",
@@ -1821,6 +1858,7 @@ fn token_name(kind: &TokenKind) -> &'static str {
         TokenKind::Xor => "xor",
         TokenKind::Question => "?",
         TokenKind::QuestionQuestion => "??",
+        TokenKind::QuestionArrow => "?->",
         TokenKind::FatArrow => "=>",
         TokenKind::LeftParen => "(",
         TokenKind::RightParen => ")",

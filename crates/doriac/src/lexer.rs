@@ -48,6 +48,9 @@ pub enum TokenKind {
     True,
     False,
     Null,
+    Is,
+    Object,
+    Resource,
     Void,
     IntType,
     Int8Type,
@@ -118,6 +121,7 @@ pub enum TokenKind {
     Xor,
     Question,
     QuestionQuestion,
+    QuestionArrow,
     FatArrow,
     LeftParen,
     RightParen,
@@ -307,6 +311,13 @@ impl<'source> Lexer<'source> {
                 b'?' => {
                     if self.match_byte(b'?') {
                         self.token(TokenKind::QuestionQuestion, start)
+                    } else if self.match_byte(b'-') {
+                        if self.match_byte(b'>') {
+                            self.token(TokenKind::QuestionArrow, start)
+                        } else {
+                            self.error("expected `>` after `?-`", start, self.index);
+                            continue;
+                        }
                     } else {
                         self.token(TokenKind::Question, start)
                     }
@@ -412,6 +423,9 @@ impl<'source> Lexer<'source> {
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             "null" => TokenKind::Null,
+            "is" => TokenKind::Is,
+            "object" => TokenKind::Object,
+            "resource" => TokenKind::Resource,
             "void" => TokenKind::Void,
             "int" => TokenKind::IntType,
             "int8" => TokenKind::Int8Type,

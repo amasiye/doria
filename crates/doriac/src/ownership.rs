@@ -1468,6 +1468,7 @@ impl Checker {
                 self.active_borrows.truncate(borrow_depth);
             }
             Expr::Unary { expr, .. } => self.use_expr(expr, scopes, UseMode::Read),
+            Expr::IsType { expr, .. } => self.use_expr(expr, scopes, UseMode::Read),
             Expr::Binary {
                 left,
                 op: op @ (BinaryOp::And | BinaryOp::Or),
@@ -1790,6 +1791,7 @@ impl Checker {
                 object,
                 property,
                 span,
+                ..
             } => self.readonly_writable_path(object, scopes).or_else(|| {
                 self.expr_class(object, scopes)
                     .and_then(|class| self.properties.get(&(class, property.clone())))

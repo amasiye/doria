@@ -553,6 +553,7 @@ fn validate_expr(expr: &Expr, semantic_info: &SemanticInfo) -> Result<(), Backen
         }
         Expr::StaticMember { .. } => Ok(()),
         Expr::Grouped { expr, .. } => validate_expr(expr, semantic_info),
+        Expr::IsType { expr, .. } => validate_expr(expr, semantic_info),
         Expr::Unary { op, expr, span } => {
             if *op == UnaryOp::Negate {
                 if let Some(magnitude) = integer_literal_magnitude(expr) {
@@ -761,6 +762,7 @@ fn unsupported_php_property_default(
         Expr::Range { span, .. } => {
             Some((*span, "range expressions in instance property initializers"))
         }
+        Expr::IsType { span, .. } => Some((*span, "type tests in instance property initializers")),
         Expr::Identifier { .. }
         | Expr::String { .. }
         | Expr::Int { .. }
@@ -1586,16 +1588,25 @@ fn emit_expr(expr: &Expr, scopes: &PhpNameScopes) -> String {
             format!("[{inner}]")
         }
         Expr::PropertyAccess {
-            object, property, ..
-        } => format!("{}->{property}", emit_expr(object, scopes)),
+            object,
+            property,
+            null_safe,
+            ..
+        } => format!(
+            "{}{}{property}",
+            emit_expr(object, scopes),
+            if *null_safe { "?->" } else { "->" }
+        ),
         Expr::MethodCall {
             object,
             method,
             args,
+            null_safe,
             ..
         } => format!(
-            "{}->{method}({})",
+            "{}{}{method}({})",
             emit_expr(object, scopes),
+            if *null_safe { "?->" } else { "->" },
             args.iter()
                 .map(|arg| emit_expr(arg, scopes))
                 .collect::<Vec<_>>()
@@ -1632,6 +1643,19 @@ fn emit_expr(expr: &Expr, scopes: &PhpNameScopes) -> String {
                 .join(", ")
         ),
         Expr::Grouped { expr, .. } => format!("({})", emit_expr(expr, scopes)),
+        Expr::IsType { expr, ty, .. } => {
+            let value = emit_expr(expr, scopes);
+            match ty.name.as_str() {
+                "int" | "int8" | "int16" | "int32" | "int64" | "uint8" | "uint16" | "uint32"
+                | "uint64" => format!("get_debug_type({value}) === 'int'"),
+                "float" | "float32" | "float64" => {
+                    format!("get_debug_type({value}) === 'float'")
+                }
+                "string" => format!("get_debug_type({value}) === 'string'"),
+                "bool" => format!("get_debug_type({value}) === 'bool'"),
+                class_name => format!("get_debug_type({value}) === {class_name}::class"),
+            }
+        }
         Expr::Unary { op, expr, .. } => match op {
             UnaryOp::Not => format!("!({})", emit_expr(expr, scopes)),
             UnaryOp::Negate if integer_literal_magnitude(expr) == Some((i64::MAX as u128) + 1) => {

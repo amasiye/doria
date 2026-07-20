@@ -26,6 +26,20 @@ Dictionary<string, int> $items = ["apples" => 5];"#,
 }
 
 #[test]
+fn lexes_stage22_nullable_and_type_test_operators() {
+    let kinds = token_kinds("?Label $label = null; $label?->name ?? ($value is string);");
+
+    assert!(matches!(kinds[0], TokenKind::Question));
+    assert!(kinds
+        .iter()
+        .any(|kind| matches!(kind, TokenKind::QuestionArrow)));
+    assert!(kinds
+        .iter()
+        .any(|kind| matches!(kind, TokenKind::QuestionQuestion)));
+    assert!(kinds.iter().any(|kind| matches!(kind, TokenKind::Is)));
+}
+
+#[test]
 fn lexes_namespace_and_inheritance_grammar() {
     let kinds = token_kinds(
         r#"namespace Vendor\App;

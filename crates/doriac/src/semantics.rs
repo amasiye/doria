@@ -12,7 +12,7 @@ use crate::symbols::{
     MethodInfo, ParamInfo, PropertyInfo, PropertyInitState, ReceiverMode, ReturnBorrow, ScopeStack,
     StaticPropertyInfo,
 };
-use crate::types::{TypeId, TypeKind, TypeRef, TypeRegistry};
+use crate::types::{ResolvedType, TypeId, TypeKind, TypeRef, TypeRegistry};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SemanticInfo {
@@ -24,6 +24,8 @@ pub struct SemanticInfo {
     pub integer_expression_types: HashMap<(usize, usize), IntegerType>,
     /// Canonical width for every floating-point-valued source expression.
     pub float_expression_types: HashMap<(usize, usize), FloatType>,
+    /// Resolved semantic type for checked expressions, independent of backend layout.
+    pub expression_types: HashMap<(usize, usize), ResolvedType>,
     /// Stable nominal class identities and the total Stage 19 property order.
     pub classes: Vec<ClassSemanticInfo>,
     /// Values produced by the bounded Stage 20 constant evaluator.
@@ -63,6 +65,10 @@ impl SemanticInfo {
         self.float_expression_types
             .get(&(span.start, span.end))
             .copied()
+    }
+
+    pub fn expression_type(&self, span: Span) -> Option<&ResolvedType> {
+        self.expression_types.get(&(span.start, span.end))
     }
 }
 
@@ -106,6 +112,7 @@ pub fn analyze_program(program: &Program) -> DiagnosticResult<SemanticInfo> {
         Ok(SemanticInfo {
             integer_expression_types: checker.integer_expression_types,
             float_expression_types: checker.float_expression_types,
+            expression_types: checker.expression_types,
             classes: collect_ordered_class_semantics(program),
             const_evaluation: checker.const_evaluation,
             parameter_defaults: checker.parameter_defaults,
@@ -230,12 +237,14 @@ struct Checker<'program> {
     diagnostics: Vec<Diagnostic>,
     integer_expression_types: HashMap<(usize, usize), IntegerType>,
     float_expression_types: HashMap<(usize, usize), FloatType>,
+    expression_types: HashMap<(usize, usize), ResolvedType>,
     integer_literals: HashMap<(usize, usize), u128>,
     negative_integer_literals: HashMap<(usize, usize), u128>,
     negated_integer_literal_operands: HashSet<(usize, usize)>,
     const_evaluation: crate::const_eval::Evaluation,
     parameter_defaults:
         HashMap<crate::const_eval::ParameterDefaultKey, crate::const_eval::ConstValue>,
+    flow_facts: crate::narrowing::FactsByUse,
 }
 
 #[derive(Debug, Clone)]
@@ -384,11 +393,13 @@ impl<'program> Checker<'program> {
             diagnostics: Vec::new(),
             integer_expression_types: HashMap::new(),
             float_expression_types: HashMap::new(),
+            expression_types: HashMap::new(),
             integer_literals: HashMap::new(),
             negative_integer_literals: HashMap::new(),
             negated_integer_literal_operands: HashSet::new(),
             const_evaluation,
             parameter_defaults: HashMap::new(),
+            flow_facts: crate::narrowing::analyze_program(program),
         }
     }
 
@@ -1587,10 +1598,13 @@ impl<'program> Checker<'program> {
 
     fn resolve_type_ref_for_return_inference(&mut self, ty: &TypeRef) -> TypeId {
         if ty.nullable {
-            return if ty.name == "string" && ty.args.is_empty() {
-                self.types.intern(TypeKind::NullableString)
-            } else {
+            let mut inner = ty.clone();
+            inner.nullable = false;
+            let inner = self.resolve_type_ref_for_return_inference(&inner);
+            return if matches!(self.types.kind(inner), TypeKind::Unknown | TypeKind::Void) {
                 self.types.unknown()
+            } else {
+                self.types.intern(TypeKind::Nullable(inner))
             };
         }
         if ty.args.is_empty() {
@@ -2016,7 +2030,7 @@ impl<'program> Checker<'program> {
             return;
         }
 
-        if matches!(kind, TypeKind::NullableString) {
+        if matches!(kind, TypeKind::Nullable(_)) {
             self.diagnostics.push(Diagnostic::new(
                 "E0498",
                 "default values for nullable string parameters are not yet supported",
@@ -2273,7 +2287,6 @@ impl<'program> Checker<'program> {
             Stmt::If(if_stmt) => {
                 self.check_condition(&if_stmt.condition, scopes, method_context);
                 let mut then_scopes = scopes.clone();
-                self.apply_non_null_narrowing(&if_stmt.condition, &mut then_scopes);
                 let mut then_constructor_init_context = constructor_init_context
                     .as_deref()
                     .map(ConstructorInitContext::nested);
@@ -2299,7 +2312,6 @@ impl<'program> Checker<'program> {
             Stmt::While(while_stmt) => {
                 self.check_condition(&while_stmt.condition, scopes, method_context);
                 let mut body_scopes = scopes.clone();
-                self.apply_non_null_narrowing(&while_stmt.condition, &mut body_scopes);
                 let mut loop_constructor_init_context = constructor_init_context
                     .as_deref()
                     .map(ConstructorInitContext::repeatable);
@@ -2489,32 +2501,6 @@ impl<'program> Checker<'program> {
                     constructor_init_context,
                 );
             }
-        }
-    }
-
-    fn apply_non_null_narrowing(&mut self, condition: &Expr, scopes: &mut ScopeStack) {
-        let Expr::Binary {
-            left, op, right, ..
-        } = condition
-        else {
-            if let Expr::Grouped { expr, .. } = condition {
-                self.apply_non_null_narrowing(expr, scopes);
-            }
-            return;
-        };
-        if *op != BinaryOp::NotEqual {
-            return;
-        }
-        let name = match (&**left, &**right) {
-            (Expr::Variable { name, .. }, Expr::Null { .. })
-            | (Expr::Null { .. }, Expr::Variable { name, .. }) => name,
-            _ => return,
-        };
-        let Some(binding) = scopes.lookup_mut(name) else {
-            return;
-        };
-        if matches!(self.types.kind(binding.ty), TypeKind::NullableString) {
-            binding.ty = self.types.intern(TypeKind::String);
         }
     }
 
@@ -3019,10 +3005,18 @@ impl<'program> Checker<'program> {
             Expr::PropertyAccess {
                 object,
                 property,
+                null_safe,
                 span,
             } => {
                 self.check_expr(object, scopes, method_context);
                 self.check_mixed_operation(object, "property access", scopes, method_context);
+                self.check_nullable_member_access(
+                    object,
+                    *null_safe,
+                    "property access",
+                    scopes,
+                    method_context,
+                );
                 self.lookup_property(object, property, *span, scopes, method_context);
             }
             Expr::MethodCall {
@@ -3030,13 +3024,25 @@ impl<'program> Checker<'program> {
                 method,
                 span,
                 args,
+                null_safe,
             } => {
                 self.check_expr(object, scopes, method_context);
                 for arg in args {
                     self.check_expr(arg, scopes, method_context);
                 }
                 self.check_mixed_operation(object, "method call", scopes, method_context);
+                self.check_nullable_member_access(
+                    object,
+                    *null_safe,
+                    "method call",
+                    scopes,
+                    method_context,
+                );
                 self.check_method_call(object, method, args, *span, scopes, method_context);
+            }
+            Expr::IsType { expr, ty, span } => {
+                self.check_expr(expr, scopes, method_context);
+                self.check_is_type(expr, ty, *span, scopes, method_context);
             }
             Expr::FunctionCall { name, args, span } => {
                 for arg in args {
@@ -3883,6 +3889,7 @@ impl<'program> Checker<'program> {
     fn type_contains_mixed(&self, ty: TypeId) -> bool {
         match self.types.kind(ty) {
             TypeKind::Mixed => true,
+            TypeKind::Nullable(inner) => self.type_contains_mixed(*inner),
             TypeKind::TypedArray(element) | TypeKind::List(element) | TypeKind::Set(element) => {
                 self.type_contains_mixed(*element)
             }
@@ -3894,17 +3901,18 @@ impl<'program> Checker<'program> {
     }
 
     fn type_is_move_type(&self, ty: TypeId) -> bool {
-        matches!(
-            self.types.kind(ty),
+        match self.types.kind(ty) {
+            TypeKind::Nullable(inner) => self.type_is_move_type(*inner),
             TypeKind::Class(_)
-                | TypeKind::Mixed
-                | TypeKind::TypedArray(_)
-                | TypeKind::List(_)
-                | TypeKind::Dictionary(_, _)
-                | TypeKind::Set(_)
-                | TypeKind::EmptyCollection
-                | TypeKind::Heterogeneous
-        )
+            | TypeKind::Mixed
+            | TypeKind::TypedArray(_)
+            | TypeKind::List(_)
+            | TypeKind::Dictionary(_, _)
+            | TypeKind::Set(_)
+            | TypeKind::EmptyCollection
+            | TypeKind::Heterogeneous => true,
+            _ => false,
+        }
     }
 
     fn report_mixed_operation(&mut self, span: Span, operation: &'static str) {
@@ -3914,9 +3922,7 @@ impl<'program> Checker<'program> {
                 format!("cannot use `mixed` value in {operation} before narrowing"),
                 span,
             )
-            .with_help(
-                "mixed-value operations are unsupported until narrowing syntax is implemented",
-            ),
+            .with_help("narrow the value with `is` before using it"),
         );
     }
 
@@ -4111,10 +4117,8 @@ impl<'program> Checker<'program> {
                         );
                     }
                     Some(AssignmentTarget {
-                        ty: if matches!(
-                            self.types.kind(binding.declared_ty),
-                            TypeKind::NullableString
-                        ) {
+                        ty: if matches!(self.types.kind(binding.declared_ty), TypeKind::Nullable(_))
+                        {
                             binding.declared_ty
                         } else {
                             binding.ty
@@ -4131,6 +4135,7 @@ impl<'program> Checker<'program> {
                 object,
                 property,
                 span,
+                ..
             } => {
                 self.check_expr(object, scopes, method_context);
                 self.check_mixed_operation(object, "property write", scopes, method_context);
@@ -5395,7 +5400,10 @@ impl<'program> Checker<'program> {
             crate::const_eval::ConstType::String => TypeKind::String,
             crate::const_eval::ConstType::Bool => TypeKind::Bool,
             crate::const_eval::ConstType::Null => TypeKind::Null,
-            crate::const_eval::ConstType::NullableString => TypeKind::NullableString,
+            crate::const_eval::ConstType::NullableString => {
+                let string = self.types.intern(TypeKind::String);
+                TypeKind::Nullable(string)
+            }
         };
         self.types.intern(kind)
     }
@@ -5424,16 +5432,25 @@ impl<'program> Checker<'program> {
             return self.types.unknown();
         }
         if ty.nullable {
-            if ty.name == "string" && ty.args.is_empty() {
-                return self.types.intern(TypeKind::NullableString);
-            }
-            return self.reject_type_ref_with_help(
-                ty,
+            let mut inner = ty.clone();
+            inner.nullable = false;
+            let inner = self.resolve_type_ref_in_position(
+                &inner,
                 span,
-                "E0454",
-                format!("nullable type `{ty}` is not supported by this compiler"),
-                "only `?string` is currently available as a nullable type",
+                TypePosition::Value,
+                declaring_class,
             );
+            return match self.types.kind(inner) {
+                TypeKind::Void | TypeKind::Null | TypeKind::Mixed | TypeKind::Unknown => self
+                    .reject_type_ref_with_help(
+                        ty,
+                        span,
+                        "E0454",
+                        format!("`{ty}` is not a valid nullable type"),
+                        "write `?T` where `T` is a concrete value type",
+                    ),
+                _ => self.types.intern(TypeKind::Nullable(inner)),
+            };
         }
         if let Some(integer) = IntegerType::from_source_name(&ty.name) {
             return self.resolve_zero_arg_type(ty, span, TypeKind::Integer(integer));
@@ -5466,15 +5483,15 @@ impl<'program> Checker<'program> {
                 span,
                 "E0431",
                 "`null` is a literal, not a type name",
-                "nullable type syntax like `?T` is planned but not implemented yet; use a supported non-null type or `mixed` for now",
+                "write `?T` with a concrete type, such as `?string` or `?Person`",
             ),
             "mixed" => self.resolve_zero_arg_type(ty, span, TypeKind::Mixed),
             "object" => self.reject_type_ref_with_help(
                 ty,
                 span,
                 "E0401",
-                "unknown type `object`",
-                "Doria has no `object` type; use `mixed` for dynamic boundaries until narrowing syntax is implemented",
+                "`object` does not exist as a Doria type",
+                "use a concrete class type, or `mixed` at a dynamic boundary and narrow it with `is`",
             ),
             "array" => self.reject_type_ref_with_help(
                 ty,
@@ -5487,7 +5504,7 @@ impl<'program> Checker<'program> {
                 ty,
                 span,
                 "E0432",
-                "`resource` is reserved for PHP interop and is not available yet",
+                "`resource` is reserved for PHP interop through the future Phase I bridge and is not a Doria value type",
             ),
             "uint" => self.reject_type_ref_with_help(
                 ty,
@@ -5734,13 +5751,10 @@ impl<'program> Checker<'program> {
         let Some(binding) = scopes.lookup_mut(name) else {
             return;
         };
-        if !matches!(
-            self.types.kind(binding.declared_ty),
-            TypeKind::NullableString
-        ) {
+        let TypeKind::Nullable(inner) = *self.types.kind(binding.declared_ty) else {
             return;
-        }
-        binding.ty = if matches!(self.types.kind(value_ty), TypeKind::String) {
+        };
+        binding.ty = if value_ty == inner {
             value_ty
         } else {
             binding.declared_ty
@@ -5862,7 +5876,11 @@ impl<'program> Checker<'program> {
             (TypeKind::Mixed, _) => true,
             (_, TypeKind::Mixed) => false,
             (TypeKind::Unknown, _) | (_, TypeKind::Unknown) => true,
-            (TypeKind::NullableString, TypeKind::String | TypeKind::Null) => true,
+            (TypeKind::Nullable(_), TypeKind::Null) => true,
+            (TypeKind::Nullable(target), TypeKind::Nullable(value)) => {
+                self.is_assignable(target, value)
+            }
+            (TypeKind::Nullable(target), _) => self.is_assignable(target, value),
             (
                 TypeKind::TypedArray(_)
                 | TypeKind::List(_)
@@ -5912,6 +5930,10 @@ impl<'program> Checker<'program> {
             }
             _ => {}
         }
+        self.expression_types.insert(
+            (expr.span().start, expr.span().end),
+            self.types.resolved(ty),
+        );
         ty
     }
 
@@ -5951,10 +5973,26 @@ impl<'program> Checker<'program> {
                 }
             }
             Expr::Array { elements, .. } => self.infer_array_type(elements, scopes, method_context),
-            Expr::Variable { name, .. } => scopes
-                .lookup(name)
-                .map(|binding| binding.ty)
-                .unwrap_or_else(|| self.types.unknown()),
+            Expr::Variable { name, span } => {
+                let Some(binding) = scopes.lookup(name) else {
+                    return self.types.unknown();
+                };
+                match self.flow_facts.get(&(span.start, span.end)).cloned() {
+                    Some(crate::narrowing::Fact::NonNull) => {
+                        match self.types.kind(binding.declared_ty) {
+                            TypeKind::Nullable(inner) => *inner,
+                            _ => binding.ty,
+                        }
+                    }
+                    Some(crate::narrowing::Fact::Null) => self.types.intern(TypeKind::Null),
+                    Some(crate::narrowing::Fact::Exact(ty)) => self.resolve_type_ref_with_class(
+                        &ty,
+                        *span,
+                        method_context.map(|context| context.class_name.as_str()),
+                    ),
+                    None => binding.ty,
+                }
+            }
             Expr::Identifier { name, .. } => {
                 let key = crate::const_eval::ConstKey::TopLevel(name.clone());
                 let ty = self.const_evaluation.values.get(&key).map(|value| value.ty);
@@ -5969,31 +6007,67 @@ impl<'program> Checker<'program> {
                 })
                 .unwrap_or_else(|| self.types.unknown()),
             Expr::PropertyAccess {
-                object, property, ..
+                object,
+                property,
+                null_safe,
+                ..
             } => {
                 let Some(class_name) = self.expr_class_name(object, scopes, method_context) else {
                     return self.types.unknown();
                 };
-                self.classes
+                let result = self
+                    .classes
                     .get(&class_name)
                     .and_then(|class_info| class_info.properties.get(property))
                     .map(|property| property.ty)
-                    .unwrap_or_else(|| self.types.unknown())
+                    .unwrap_or_else(|| self.types.unknown());
+                if *null_safe
+                    && !matches!(self.types.kind(result), TypeKind::Void | TypeKind::Unknown)
+                {
+                    if matches!(self.types.kind(result), TypeKind::Nullable(_)) {
+                        result
+                    } else {
+                        self.types.intern(TypeKind::Nullable(result))
+                    }
+                } else {
+                    result
+                }
             }
-            Expr::MethodCall { object, method, .. } => {
+            Expr::MethodCall {
+                object,
+                method,
+                null_safe,
+                ..
+            } => {
                 let Some(class_name) = self.expr_class_name(object, scopes, method_context) else {
                     return self.types.unknown();
                 };
-                self.classes
+                let result = self
+                    .classes
                     .get(&class_name)
                     .and_then(|class_info| class_info.methods.get(method))
                     .map(|method| method.return_ty)
-                    .unwrap_or_else(|| self.types.unknown())
+                    .unwrap_or_else(|| self.types.unknown());
+                if *null_safe
+                    && !matches!(self.types.kind(result), TypeKind::Void | TypeKind::Unknown)
+                {
+                    if matches!(self.types.kind(result), TypeKind::Nullable(_)) {
+                        result
+                    } else {
+                        self.types.intern(TypeKind::Nullable(result))
+                    }
+                } else {
+                    result
+                }
             }
+            Expr::IsType { .. } => self.types.intern(TypeKind::Bool),
             Expr::FunctionCall { name, .. } => {
                 if let Some(builtin) = Builtin::from_name(name) {
                     match builtin {
-                        Builtin::ReadLine => self.types.intern(TypeKind::NullableString),
+                        Builtin::ReadLine => {
+                            let string = self.types.intern(TypeKind::String);
+                            self.types.intern(TypeKind::Nullable(string))
+                        }
                         Builtin::Sprintf | Builtin::ReadFile => self.types.intern(TypeKind::String),
                         Builtin::Printf
                         | Builtin::WriteFile
@@ -6301,6 +6375,7 @@ impl<'program> Checker<'program> {
         let left_kind = self.types.kind(left).clone();
         let right_kind = self.types.kind(right).clone();
         match (left_kind, right_kind) {
+            (TypeKind::Nullable(inner), _) if self.is_assignable(inner, right) => inner,
             (TypeKind::Null, _) => right,
             (_, TypeKind::Null) => left,
             _ if left == right => left,
@@ -6487,7 +6562,121 @@ impl<'program> Checker<'program> {
         method_context: Option<&MethodContext>,
     ) -> Option<String> {
         let ty = self.infer_expr_type(expr, scopes, method_context);
-        self.types.class_name(ty).map(ToOwned::to_owned)
+        match self.types.kind(ty) {
+            TypeKind::Class(name) => Some(name.clone()),
+            TypeKind::Nullable(inner) => self.types.class_name(*inner).map(ToOwned::to_owned),
+            _ => None,
+        }
+    }
+
+    fn check_nullable_member_access(
+        &mut self,
+        object: &Expr,
+        null_safe: bool,
+        operation: &'static str,
+        scopes: &ScopeStack,
+        method_context: Option<&MethodContext>,
+    ) {
+        let ty = self.infer_expr_type(object, scopes, method_context);
+        match self.types.kind(ty) {
+            TypeKind::Nullable(inner) => {
+                if !matches!(self.types.kind(*inner), TypeKind::Class(_)) {
+                    self.diagnostics.push(Diagnostic::new(
+                        "E0507",
+                        format!("{operation} requires a class value"),
+                        object.span(),
+                    ));
+                } else if !null_safe {
+                    self.diagnostics.push(
+                        Diagnostic::new(
+                            "E0506",
+                            format!("cannot use {operation} on a possibly-null value"),
+                            object.span(),
+                        )
+                        .with_help("narrow it with a null check or use `?->`"),
+                    );
+                }
+            }
+            TypeKind::Unknown | TypeKind::Mixed => {}
+            _ if null_safe => self.diagnostics.push(
+                Diagnostic::new(
+                    "E0507",
+                    "null-safe access requires a nullable class receiver",
+                    object.span(),
+                )
+                .with_help("use `->` after the value has been narrowed to a non-null class"),
+            ),
+            _ => {}
+        }
+    }
+
+    fn check_is_type(
+        &mut self,
+        value: &Expr,
+        ty: &TypeRef,
+        span: Span,
+        scopes: &ScopeStack,
+        method_context: Option<&MethodContext>,
+    ) {
+        if ty.name == "Displayable"
+            || self
+                .program
+                .items
+                .iter()
+                .any(|item| matches!(item, Item::Interface(interface) if interface.name == ty.name))
+        {
+            self.diagnostics.push(Diagnostic::unsupported_stage(
+                "E0510",
+                "interface `is` tests are accepted syntax; interface conformance tests land in Stage 35",
+                span,
+            ));
+            return;
+        }
+
+        if self.program.items.iter().any(|item| {
+            matches!(
+                item,
+                Item::Class(class)
+                    if (class.name == ty.name && class.parent.is_some())
+                        || class.parent.as_deref() == Some(ty.name.as_str())
+            )
+        }) {
+            self.diagnostics.push(Diagnostic::unsupported_stage(
+                "E0509",
+                "class-hierarchy `is` tests are accepted syntax; subtype tests land in Stage 34",
+                span,
+            ));
+            return;
+        }
+
+        let tested = self.resolve_type_ref(ty, span);
+        if ty.nullable
+            || !matches!(
+                self.types.kind(tested),
+                TypeKind::Integer(_)
+                    | TypeKind::Float(_)
+                    | TypeKind::String
+                    | TypeKind::Bool
+                    | TypeKind::Class(_)
+                    | TypeKind::Unknown
+            )
+        {
+            self.diagnostics.push(Diagnostic::new(
+                "E0508",
+                format!("`{ty}` is not a concrete type that can be tested with `is`"),
+                span,
+            ));
+        }
+
+        let value_ty = self.infer_expr_type(value, scopes, method_context);
+        if !matches!(
+            self.types.kind(value_ty),
+            TypeKind::Mixed | TypeKind::Nullable(_)
+        ) && !self.is_unknown_type(value_ty)
+        {
+            // Exact tests over already-concrete values are valid. An always-true lint is a
+            // separate diagnostics-quality follow-up and does not affect semantics.
+        }
     }
 
     fn undeclared_variable(&mut self, name: &str, span: Span) {

@@ -211,8 +211,14 @@ fn field_type(ty: mir::Type) -> FieldType {
         mir::Type::Scalar(mir::ScalarType::Float(float)) => FieldType::Float(float),
         mir::Type::Scalar(mir::ScalarType::Bool) => FieldType::Bool,
         mir::Type::String => FieldType::String,
+        mir::Type::NullableScalar(mir::ScalarType::Integer(integer)) => {
+            FieldType::NullableInteger(integer)
+        }
+        mir::Type::NullableScalar(mir::ScalarType::Float(float)) => FieldType::NullableFloat(float),
+        mir::Type::NullableScalar(mir::ScalarType::Bool) => FieldType::NullableBool,
         mir::Type::NullableString => FieldType::NullableString,
         mir::Type::Class(class) => FieldType::Class(class),
+        mir::Type::NullableClass(class) => FieldType::NullableClass(class),
     }
 }
 
@@ -253,7 +259,7 @@ fn validate_function(program: &mir::Program, function: &mir::Function) -> Result
 }
 
 fn validate_type(program: &mir::Program, ty: mir::Type) -> Result<(), BackendError> {
-    if let mir::Type::Class(class) = ty {
+    if let mir::Type::Class(class) | mir::Type::NullableClass(class) = ty {
         class_in(program, class)?;
     }
     Ok(())
@@ -282,6 +288,16 @@ fn validate_statement(
                 ))),
                 (mir::Type::NullableString, mir::Rvalue::NullableString(expression)) => {
                     validate_nullable_string_expression(program, function, expression)
+                }
+                (mir::Type::NullableScalar(expected), mir::Rvalue::NullableScalar(expression))
+                    if expression.ty() == expected =>
+                {
+                    validate_nullable_scalar_expression(program, function, expression)
+                }
+                (mir::Type::NullableClass(expected), mir::Rvalue::NullableClass(expression))
+                    if expression.class() == expected =>
+                {
+                    validate_nullable_class_expression(program, function, expression)
                 }
                 (mir::Type::NullableString, mir::Rvalue::Class(_)) => Err(malformed_mir(format!(
                     "nullable-string local local{} receives a class rvalue",
@@ -350,6 +366,19 @@ fn validate_statement(
                         target.0
                     )))
                 }
+                (mir::Type::NullableScalar(_) | mir::Type::NullableClass(_), _) => {
+                    Err(malformed_mir(format!(
+                        "nullable local local{} receives a mismatched rvalue",
+                        target.0
+                    )))
+                }
+                (
+                    mir::Type::String | mir::Type::Scalar(_),
+                    mir::Rvalue::NullableScalar(_) | mir::Rvalue::NullableClass(_),
+                ) => Err(malformed_mir(format!(
+                    "non-nullable local local{} receives a nullable rvalue",
+                    target.0
+                ))),
             }
         }
         mir::Statement::EchoStringLiteral(_) => Ok(()),
@@ -469,7 +498,10 @@ fn validate_statement(
         }
         mir::Statement::DropClass { local, class } => {
             let definition = local_in(function, *local)?;
-            if definition.ty != mir::Type::Class(*class) {
+            if !matches!(
+                definition.ty,
+                mir::Type::Class(found) | mir::Type::NullableClass(found) if found == *class
+            ) {
                 return Err(malformed_mir(format!(
                     "drop class#{} references local{} with type {}",
                     class.0, local.0, definition.ty
@@ -612,6 +644,13 @@ fn validate_integer_expression(
             }
             validate_call_args(program, function, callee, args)
         }
+        mir::IntegerExpression::Coalesce { ty, left, right } => {
+            if left.ty() != mir::ScalarType::Integer(*ty) || right.ty() != *ty {
+                return Err(malformed_mir("integer coalesce has incompatible operands"));
+            }
+            validate_nullable_scalar_expression(program, function, left)?;
+            validate_integer_expression(program, function, right)
+        }
     }
 }
 
@@ -637,10 +676,16 @@ fn validate_rvalue(
     match expression {
         mir::Rvalue::Value(value) => validate_value_expression(program, function, value),
         mir::Rvalue::String(value) => validate_string_expression(program, function, value),
+        mir::Rvalue::NullableScalar(value) => {
+            validate_nullable_scalar_expression(program, function, value)
+        }
         mir::Rvalue::NullableString(value) => {
             validate_nullable_string_expression(program, function, value)
         }
         mir::Rvalue::Class(value) => validate_class_expression(program, function, value),
+        mir::Rvalue::NullableClass(value) => {
+            validate_nullable_class_expression(program, function, value)
+        }
     }?;
     let mut accesses = ClassLocalAccesses::default();
     collect_rvalue_class_local_accesses(expression, &mut accesses);
@@ -664,7 +709,8 @@ fn require_owned_class_expression(
             return_borrow: None,
             ..
         }
-        | mir::ClassExpression::New { .. } => Ok(()),
+        | mir::ClassExpression::New { .. }
+        | mir::ClassExpression::NullableLocalAssumeNonNull { transfer: true, .. } => Ok(()),
         mir::ClassExpression::Local {
             local,
             transfer: false,
@@ -682,6 +728,64 @@ fn require_owned_class_expression(
             ..
         } => Err(malformed_mir(format!(
             "{destination} receives a borrowed class call result"
+        ))),
+        mir::ClassExpression::NullableLocalAssumeNonNull {
+            local,
+            transfer: false,
+            ..
+        } => Err(malformed_mir(format!(
+            "{destination} receives borrowed nullable class local local{}",
+            local.0
+        ))),
+        mir::ClassExpression::Coalesce { left, right, .. } => {
+            require_owned_nullable_class_expression(left, destination)?;
+            require_owned_class_expression(right, destination)
+        }
+    }
+}
+
+fn require_owned_nullable_class_expression(
+    expression: &mir::NullableClassExpression,
+    destination: &str,
+) -> Result<(), BackendError> {
+    match expression {
+        mir::NullableClassExpression::Null(_) => Ok(()),
+        mir::NullableClassExpression::Class(value) => {
+            require_owned_class_expression(value, destination)
+        }
+        mir::NullableClassExpression::Call {
+            return_borrow: None,
+            ..
+        }
+        | mir::NullableClassExpression::NullSafeCall {
+            return_borrow: None,
+            ..
+        }
+        | mir::NullableClassExpression::Local { transfer: true, .. } => Ok(()),
+        mir::NullableClassExpression::Local {
+            local,
+            transfer: false,
+            ..
+        } => Err(malformed_mir(format!(
+            "{destination} receives borrowed nullable class local local{}",
+            local.0
+        ))),
+        mir::NullableClassExpression::Property { property, .. }
+        | mir::NullableClassExpression::NullSafeProperty { property, .. } => {
+            Err(malformed_mir(format!(
+                "{destination} receives borrowed nullable class property{}",
+                property.index
+            )))
+        }
+        mir::NullableClassExpression::Call {
+            return_borrow: Some(_),
+            ..
+        }
+        | mir::NullableClassExpression::NullSafeCall {
+            return_borrow: Some(_),
+            ..
+        } => Err(malformed_mir(format!(
+            "{destination} receives a borrowed nullable class call result"
         ))),
     }
 }
@@ -741,6 +845,14 @@ fn infer_expression_return_borrow(
             Some(borrow) => Ok(Some(borrow)),
             None => infer_synthetic_local_return_borrow(program, function, *local),
         },
+        mir::ClassExpression::NullableLocalAssumeNonNull {
+            local,
+            transfer: false,
+            ..
+        } => match borrow_from_parameter(function, *local) {
+            Some(borrow) => Ok(Some(borrow)),
+            None => infer_synthetic_local_return_borrow(program, function, *local),
+        },
         mir::ClassExpression::Property { object, .. } => Ok(borrow_from_parameter(
             function, *object,
         )
@@ -765,11 +877,13 @@ fn infer_expression_return_borrow(
             )
         }
         mir::ClassExpression::Local { transfer: true, .. }
+        | mir::ClassExpression::NullableLocalAssumeNonNull { transfer: true, .. }
         | mir::ClassExpression::Call {
             return_borrow: None,
             ..
         }
         | mir::ClassExpression::New { .. } => Ok(None),
+        mir::ClassExpression::Coalesce { .. } => Ok(None),
     }
 }
 
@@ -854,6 +968,11 @@ fn require_writable_class_expression(
             transfer: false,
             ..
         } => local_in(function, *local)?.writable,
+        mir::ClassExpression::NullableLocalAssumeNonNull {
+            local,
+            transfer: false,
+            ..
+        } => local_in(function, *local)?.writable,
         mir::ClassExpression::Property {
             object, property, ..
         } => {
@@ -866,11 +985,15 @@ fn require_writable_class_expression(
             };
             object.writable && property_in(program, class, *property)?.writable
         }
-        mir::ClassExpression::Local { transfer: true, .. } => false,
+        mir::ClassExpression::Local { transfer: true, .. }
+        | mir::ClassExpression::NullableLocalAssumeNonNull { transfer: true, .. } => false,
         mir::ClassExpression::Call { return_borrow, .. } => {
             return_borrow.is_none_or(|borrow| borrow.writable)
         }
         mir::ClassExpression::New { .. } => true,
+        mir::ClassExpression::Coalesce { left: _, right, .. } => {
+            require_writable_class_expression(program, function, right, destination).is_ok()
+        }
     };
     if writable {
         Ok(())
@@ -1002,10 +1125,14 @@ fn collect_rvalue_class_local_accesses<'a>(
     match value {
         mir::Rvalue::Value(value) => collect_value_class_local_accesses(value, accesses),
         mir::Rvalue::String(value) => collect_string_class_local_accesses(value, accesses),
+        mir::Rvalue::NullableScalar(value) => {
+            collect_nullable_scalar_class_local_accesses(value, accesses)
+        }
         mir::Rvalue::NullableString(value) => {
             collect_nullable_string_class_local_accesses(value, accesses)
         }
         mir::Rvalue::Class(value) => collect_class_expression_local_accesses(value, accesses),
+        mir::Rvalue::NullableClass(value) => collect_nullable_class_local_accesses(value, accesses),
     }
 }
 
@@ -1064,6 +1191,10 @@ fn collect_integer_class_local_accesses<'a>(
             collect_rvalue_args_class_local_accesses(args, accesses);
             accesses.call(*function, args);
         }
+        mir::IntegerExpression::Coalesce { left, right, .. } => {
+            collect_nullable_scalar_class_local_accesses(left, accesses);
+            collect_integer_class_local_accesses(right, accesses);
+        }
     }
 }
 
@@ -1089,6 +1220,10 @@ fn collect_float_class_local_accesses<'a>(
             accesses.begin_call();
             collect_rvalue_args_class_local_accesses(args, accesses);
             accesses.call(*function, args);
+        }
+        mir::FloatExpression::Coalesce { left, right, .. } => {
+            collect_nullable_scalar_class_local_accesses(left, accesses);
+            collect_float_class_local_accesses(right, accesses);
         }
     }
 }
@@ -1116,6 +1251,10 @@ fn collect_string_class_local_accesses<'a>(
         }
         mir::StringExpression::Format(format) => {
             collect_format_class_local_accesses(format, accesses);
+        }
+        mir::StringExpression::Coalesce { left, right } => {
+            collect_nullable_string_class_local_accesses(left, accesses);
+            collect_string_class_local_accesses(right, accesses);
         }
         mir::StringExpression::Literal(_)
         | mir::StringExpression::Local(_)
@@ -1147,6 +1286,19 @@ fn collect_nullable_string_class_local_accesses<'a>(
         mir::NullableStringExpression::Property { object, property } => {
             accesses.borrow_property(*object, *property);
         }
+        mir::NullableStringExpression::NullSafeProperty { object, .. } => {
+            collect_nullable_class_local_accesses(object, accesses);
+        }
+        mir::NullableStringExpression::NullSafeCall {
+            object,
+            function,
+            args,
+        } => {
+            collect_nullable_class_local_accesses(object, accesses);
+            accesses.begin_call();
+            collect_rvalue_args_class_local_accesses(args, accesses);
+            accesses.call(*function, args);
+        }
     }
 }
 
@@ -1161,6 +1313,16 @@ fn collect_class_expression_local_accesses<'a>(
             ..
         } => accesses.transfer(*local),
         mir::ClassExpression::Local {
+            local,
+            transfer: false,
+            ..
+        } => accesses.borrow(*local),
+        mir::ClassExpression::NullableLocalAssumeNonNull {
+            local,
+            transfer: true,
+            ..
+        } => accesses.transfer(*local),
+        mir::ClassExpression::NullableLocalAssumeNonNull {
             local,
             transfer: false,
             ..
@@ -1191,6 +1353,10 @@ fn collect_class_expression_local_accesses<'a>(
             if let Some(function) = constructor {
                 accesses.constructor_call(*function, args);
             }
+        }
+        mir::ClassExpression::Coalesce { left, right, .. } => {
+            collect_nullable_class_local_accesses(left, accesses);
+            collect_class_expression_local_accesses(right, accesses);
         }
     }
 }
@@ -1227,6 +1393,12 @@ fn collect_bool_class_local_accesses<'a>(
             collect_nullable_string_class_local_accesses(left, accesses);
             collect_nullable_string_class_local_accesses(right, accesses);
         }
+        mir::BoolExpression::NullableScalarIsPresent(value) => {
+            collect_nullable_scalar_class_local_accesses(value, accesses);
+        }
+        mir::BoolExpression::NullableClassIsPresent(value) => {
+            collect_nullable_class_local_accesses(value, accesses);
+        }
         mir::BoolExpression::Not(value) => {
             collect_bool_class_local_accesses(value, accesses);
         }
@@ -1244,6 +1416,90 @@ fn collect_bool_class_local_accesses<'a>(
             collect_rvalue_args_class_local_accesses(args, accesses);
             accesses.call(*function, args);
         }
+        mir::BoolExpression::Coalesce { left, right } => {
+            collect_nullable_scalar_class_local_accesses(left, accesses);
+            collect_bool_class_local_accesses(right, accesses);
+        }
+    }
+}
+
+fn collect_nullable_scalar_class_local_accesses<'a>(
+    value: &'a mir::NullableScalarExpression,
+    accesses: &mut ClassLocalAccesses<'a>,
+) {
+    match value {
+        mir::NullableScalarExpression::Value(value) => {
+            collect_value_class_local_accesses(value, accesses)
+        }
+        mir::NullableScalarExpression::Property {
+            object, property, ..
+        } => accesses.borrow_property(*object, *property),
+        mir::NullableScalarExpression::Call { function, args, .. } => {
+            accesses.begin_call();
+            collect_rvalue_args_class_local_accesses(args, accesses);
+            accesses.call(*function, args);
+        }
+        mir::NullableScalarExpression::NullSafeProperty { object, .. } => {
+            collect_nullable_class_local_accesses(object, accesses)
+        }
+        mir::NullableScalarExpression::NullSafeCall {
+            object,
+            function,
+            args,
+            ..
+        } => {
+            collect_nullable_class_local_accesses(object, accesses);
+            accesses.begin_call();
+            collect_rvalue_args_class_local_accesses(args, accesses);
+            accesses.call(*function, args);
+        }
+        mir::NullableScalarExpression::Null(_)
+        | mir::NullableScalarExpression::Local { .. }
+        | mir::NullableScalarExpression::Static { .. } => {}
+    }
+}
+
+fn collect_nullable_class_local_accesses<'a>(
+    value: &'a mir::NullableClassExpression,
+    accesses: &mut ClassLocalAccesses<'a>,
+) {
+    match value {
+        mir::NullableClassExpression::Class(value) => {
+            collect_class_expression_local_accesses(value, accesses)
+        }
+        mir::NullableClassExpression::Local {
+            local,
+            transfer: true,
+            ..
+        } => accesses.transfer(*local),
+        mir::NullableClassExpression::Local {
+            local,
+            transfer: false,
+            ..
+        } => accesses.borrow(*local),
+        mir::NullableClassExpression::Property {
+            object, property, ..
+        } => accesses.borrow_property(*object, *property),
+        mir::NullableClassExpression::Call { function, args, .. } => {
+            accesses.begin_call();
+            collect_rvalue_args_class_local_accesses(args, accesses);
+            accesses.call(*function, args);
+        }
+        mir::NullableClassExpression::NullSafeProperty { object, .. } => {
+            collect_nullable_class_local_accesses(object, accesses)
+        }
+        mir::NullableClassExpression::NullSafeCall {
+            object,
+            function,
+            args,
+            ..
+        } => {
+            collect_nullable_class_local_accesses(object, accesses);
+            accesses.begin_call();
+            collect_rvalue_args_class_local_accesses(args, accesses);
+            accesses.call(*function, args);
+        }
+        mir::NullableClassExpression::Null(_) => {}
     }
 }
 
@@ -1374,7 +1630,10 @@ fn apply_class_local_state(
     }
     match statement {
         mir::Statement::AssignLocal { target, .. }
-            if matches!(local_in(function, *target)?.ty, mir::Type::Class(_)) =>
+            if matches!(
+                local_in(function, *target)?.ty,
+                mir::Type::Class(_) | mir::Type::NullableClass(_)
+            ) =>
         {
             moved.remove(target);
         }
@@ -1501,6 +1760,22 @@ fn validate_class_expression(
                     "class rvalue transfers borrowed local local{}",
                     local.0
                 )));
+            }
+            Ok(())
+        }
+        mir::ClassExpression::NullableLocalAssumeNonNull {
+            local, transfer, ..
+        } => {
+            let definition = local_in(function, *local)?;
+            if definition.ty != mir::Type::NullableClass(class) {
+                return Err(malformed_mir(
+                    "nonnull class expression references another local type",
+                ));
+            }
+            if *transfer && !definition.owned {
+                return Err(malformed_mir(
+                    "nonnull class expression transfers a borrowed local",
+                ));
             }
             Ok(())
         }
@@ -1773,6 +2048,13 @@ fn validate_class_expression(
                 validate_class_local_lifetimes_with_aliases(constructor, &alias_invalidations)?;
             }
             Ok(())
+        }
+        mir::ClassExpression::Coalesce { left, right, .. } => {
+            if left.class() != class || right.class() != class {
+                return Err(malformed_mir("class coalesce has incompatible operands"));
+            }
+            validate_nullable_class_expression(program, function, left)?;
+            validate_class_expression(program, function, right)
         }
     }
 }
@@ -2052,10 +2334,16 @@ fn rvalue_observes_property(
     match value {
         mir::Rvalue::Value(value) => value_observes_property(value, receiver, property),
         mir::Rvalue::String(value) => string_observes_property(value, receiver, property),
+        mir::Rvalue::NullableScalar(value) => {
+            nullable_scalar_observes_property(value, receiver, property)
+        }
         mir::Rvalue::NullableString(value) => {
             nullable_string_observes_property(value, receiver, property)
         }
         mir::Rvalue::Class(value) => class_observes_property(value, receiver, property),
+        mir::Rvalue::NullableClass(value) => {
+            nullable_class_observes_property(value, receiver, property)
+        }
     }
 }
 
@@ -2110,6 +2398,10 @@ fn integer_observes_property(
         mir::IntegerExpression::Call { args, .. } => args
             .iter()
             .any(|value| rvalue_observes_property(value, receiver, property)),
+        mir::IntegerExpression::Coalesce { left, right, .. } => {
+            nullable_scalar_observes_property(left, receiver, property)
+                || integer_observes_property(right, receiver, property)
+        }
     }
 }
 
@@ -2135,6 +2427,10 @@ fn float_observes_property(
         mir::FloatExpression::Call { args, .. } => args
             .iter()
             .any(|value| rvalue_observes_property(value, receiver, property)),
+        mir::FloatExpression::Coalesce { left, right, .. } => {
+            nullable_scalar_observes_property(left, receiver, property)
+                || float_observes_property(right, receiver, property)
+        }
     }
 }
 
@@ -2159,6 +2455,10 @@ fn string_observes_property(
         mir::StringExpression::Format(format) => {
             format_observes_property(format, receiver, property)
         }
+        mir::StringExpression::Coalesce { left, right } => {
+            nullable_string_observes_property(left, receiver, property)
+                || string_observes_property(right, receiver, property)
+        }
         mir::StringExpression::Literal(_)
         | mir::StringExpression::Local(_)
         | mir::StringExpression::Static(_)
@@ -2182,6 +2482,15 @@ fn nullable_string_observes_property(
         mir::NullableStringExpression::Call { args, .. } => args
             .iter()
             .any(|value| rvalue_observes_property(value, receiver, property)),
+        mir::NullableStringExpression::NullSafeProperty { object, .. } => {
+            nullable_class_observes_property(object, receiver, property)
+        }
+        mir::NullableStringExpression::NullSafeCall { object, args, .. } => {
+            nullable_class_observes_property(object, receiver, property)
+                || args
+                    .iter()
+                    .any(|value| rvalue_observes_property(value, receiver, property))
+        }
         mir::NullableStringExpression::Null
         | mir::NullableStringExpression::Local(_)
         | mir::NullableStringExpression::Static(_)
@@ -2195,7 +2504,8 @@ fn class_observes_property(
     property: crate::class_layout::PropertyId,
 ) -> bool {
     match value {
-        mir::ClassExpression::Local { local, .. } => *local == receiver,
+        mir::ClassExpression::Local { local, .. }
+        | mir::ClassExpression::NullableLocalAssumeNonNull { local, .. } => *local == receiver,
         mir::ClassExpression::Property {
             object,
             property: observed,
@@ -2216,6 +2526,10 @@ fn class_observes_property(
             }) || args
                 .iter()
                 .any(|value| rvalue_observes_property(value, receiver, property))
+        }
+        mir::ClassExpression::Coalesce { left, right, .. } => {
+            nullable_class_observes_property(left, receiver, property)
+                || class_observes_property(right, receiver, property)
         }
     }
 }
@@ -2241,6 +2555,12 @@ fn bool_observes_property(
             nullable_string_observes_property(left, receiver, property)
                 || nullable_string_observes_property(right, receiver, property)
         }
+        mir::BoolExpression::NullableScalarIsPresent(value) => {
+            nullable_scalar_observes_property(value, receiver, property)
+        }
+        mir::BoolExpression::NullableClassIsPresent(value) => {
+            nullable_class_observes_property(value, receiver, property)
+        }
         mir::BoolExpression::Not(value) => bool_observes_property(value, receiver, property),
         mir::BoolExpression::Binary { left, right, .. } => {
             bool_observes_property(left, receiver, property)
@@ -2249,6 +2569,73 @@ fn bool_observes_property(
         mir::BoolExpression::Call { args, .. } => args
             .iter()
             .any(|value| rvalue_observes_property(value, receiver, property)),
+        mir::BoolExpression::Coalesce { left, right } => {
+            nullable_scalar_observes_property(left, receiver, property)
+                || bool_observes_property(right, receiver, property)
+        }
+    }
+}
+
+fn nullable_scalar_observes_property(
+    value: &mir::NullableScalarExpression,
+    receiver: mir::LocalId,
+    property: crate::class_layout::PropertyId,
+) -> bool {
+    match value {
+        mir::NullableScalarExpression::Value(value) => {
+            value_observes_property(value, receiver, property)
+        }
+        mir::NullableScalarExpression::Property {
+            object,
+            property: observed,
+            ..
+        } => *object == receiver && *observed == property,
+        mir::NullableScalarExpression::Call { args, .. } => args
+            .iter()
+            .any(|value| rvalue_observes_property(value, receiver, property)),
+        mir::NullableScalarExpression::NullSafeProperty { object, .. } => {
+            nullable_class_observes_property(object, receiver, property)
+        }
+        mir::NullableScalarExpression::NullSafeCall { object, args, .. } => {
+            nullable_class_observes_property(object, receiver, property)
+                || args
+                    .iter()
+                    .any(|value| rvalue_observes_property(value, receiver, property))
+        }
+        mir::NullableScalarExpression::Null(_)
+        | mir::NullableScalarExpression::Local { .. }
+        | mir::NullableScalarExpression::Static { .. } => false,
+    }
+}
+
+fn nullable_class_observes_property(
+    value: &mir::NullableClassExpression,
+    receiver: mir::LocalId,
+    property: crate::class_layout::PropertyId,
+) -> bool {
+    match value {
+        mir::NullableClassExpression::Class(value) => {
+            class_observes_property(value, receiver, property)
+        }
+        mir::NullableClassExpression::Local { local, .. } => *local == receiver,
+        mir::NullableClassExpression::Property {
+            object,
+            property: observed,
+            ..
+        } => *object == receiver && *observed == property,
+        mir::NullableClassExpression::Call { args, .. } => args
+            .iter()
+            .any(|value| rvalue_observes_property(value, receiver, property)),
+        mir::NullableClassExpression::NullSafeProperty { object, .. } => {
+            nullable_class_observes_property(object, receiver, property)
+        }
+        mir::NullableClassExpression::NullSafeCall { object, args, .. } => {
+            nullable_class_observes_property(object, receiver, property)
+                || args
+                    .iter()
+                    .any(|value| rvalue_observes_property(value, receiver, property))
+        }
+        mir::NullableClassExpression::Null(_) => false,
     }
 }
 
@@ -2276,6 +2663,12 @@ fn validate_float_expression(
             mir::Operand::Local(local)
                 if local_in(function, *local)?.ty
                     == mir::Type::Scalar(mir::ScalarType::Float(*ty)) =>
+            {
+                Ok(())
+            }
+            mir::Operand::NullablePayload(local)
+                if local_in(function, *local)?.ty
+                    == mir::Type::NullableScalar(mir::ScalarType::Float(*ty)) =>
             {
                 Ok(())
             }
@@ -2332,6 +2725,13 @@ fn validate_float_expression(
                 ));
             }
             validate_call_args(program, function, callee, args)
+        }
+        mir::FloatExpression::Coalesce { ty, left, right } => {
+            if left.ty() != mir::ScalarType::Float(*ty) || right.ty() != *ty {
+                return Err(malformed_mir("float coalesce has incompatible operands"));
+            }
+            validate_nullable_scalar_expression(program, function, left)?;
+            validate_float_expression(program, function, right)
         }
     }
 }
@@ -2627,6 +3027,11 @@ fn escaping_class_expression_local_borrow(
             transfer: false,
             ..
         }
+        | mir::ClassExpression::NullableLocalAssumeNonNull {
+            local,
+            transfer: false,
+            ..
+        }
         | mir::ClassExpression::Property { object: local, .. } => Ok(Some(*local)),
         mir::ClassExpression::Call {
             function,
@@ -2638,11 +3043,13 @@ fn escaping_class_expression_local_borrow(
             borrowed_call_source(program, *function, args, *return_borrow)?,
         ),
         mir::ClassExpression::Local { transfer: true, .. }
+        | mir::ClassExpression::NullableLocalAssumeNonNull { transfer: true, .. }
         | mir::ClassExpression::Call {
             return_borrow: None,
             ..
         }
-        | mir::ClassExpression::New { .. } => Ok(None),
+        | mir::ClassExpression::New { .. }
+        | mir::ClassExpression::Coalesce { .. } => Ok(None),
     }
 }
 
@@ -2676,6 +3083,12 @@ fn validate_condition(
             mir::Operand::Scalar(mir::ScalarValue::Bool(_)) => Ok(()),
             mir::Operand::Local(local)
                 if local_in(function, *local)?.ty == mir::Type::Scalar(mir::ScalarType::Bool) =>
+            {
+                Ok(())
+            }
+            mir::Operand::NullablePayload(local)
+                if local_in(function, *local)?.ty
+                    == mir::Type::NullableScalar(mir::ScalarType::Bool) =>
             {
                 Ok(())
             }
@@ -2717,6 +3130,12 @@ fn validate_condition(
             validate_nullable_string_expression(program, function, left)?;
             validate_nullable_string_expression(program, function, right)
         }
+        mir::BoolExpression::NullableScalarIsPresent(value) => {
+            validate_nullable_scalar_expression(program, function, value)
+        }
+        mir::BoolExpression::NullableClassIsPresent(value) => {
+            validate_nullable_class_expression(program, function, value)
+        }
         mir::BoolExpression::Not(condition) => validate_condition(program, function, condition),
         mir::BoolExpression::Binary { left, right, .. } => {
             validate_condition(program, function, left)?;
@@ -2733,6 +3152,13 @@ fn validate_condition(
                 return Err(malformed_mir("bool call targets a non-bool function"));
             }
             validate_call_args(program, function, callee, args)
+        }
+        mir::BoolExpression::Coalesce { left, right } => {
+            if left.ty() != mir::ScalarType::Bool {
+                return Err(malformed_mir("bool coalesce has a non-bool left operand"));
+            }
+            validate_nullable_scalar_expression(program, function, left)?;
+            validate_condition(program, function, right)
         }
     }
 }
@@ -2753,6 +3179,16 @@ fn validate_integer_operand(
             if definition.ty != mir::Type::Scalar(mir::ScalarType::Integer(ty)) {
                 return Err(malformed_mir(format!(
                     "{ty} expression uses local{} with type {}",
+                    local.0, definition.ty
+                )));
+            }
+            Ok(())
+        }
+        mir::Operand::NullablePayload(local) => {
+            let definition = local_in(function, *local)?;
+            if definition.ty != mir::Type::NullableScalar(mir::ScalarType::Integer(ty)) {
+                return Err(malformed_mir(format!(
+                    "{ty} expression uses nullable payload local{} with type {}",
                     local.0, definition.ty
                 )));
             }
@@ -2832,6 +3268,10 @@ fn validate_string_expression(
         mir::StringExpression::Format(format) => {
             validate_format_expression(program, function, format)
         }
+        mir::StringExpression::Coalesce { left, right } => {
+            validate_nullable_string_expression(program, function, left)?;
+            validate_string_expression(program, function, right)
+        }
     }
 }
 
@@ -2875,7 +3315,209 @@ fn validate_nullable_string_expression(
             }
             validate_call_args(program, function, callee, args)
         }
+        mir::NullableStringExpression::NullSafeProperty { object, property } => {
+            let class = object.class();
+            validate_nullable_class_expression(program, function, object)?;
+            property_in(program, class, *property).and_then(|definition| {
+                (definition.ty == mir::Type::String)
+                    .then_some(())
+                    .ok_or_else(|| malformed_mir("null-safe property has another type"))
+            })
+        }
+        mir::NullableStringExpression::NullSafeCall {
+            object,
+            function: callee,
+            args,
+        } => validate_null_safe_call(program, function, object, *callee, args, mir::Type::String),
     }
+}
+
+fn validate_nullable_scalar_expression(
+    program: &mir::Program,
+    function: &mir::Function,
+    expression: &mir::NullableScalarExpression,
+) -> Result<(), BackendError> {
+    let ty = expression.ty();
+    match expression {
+        mir::NullableScalarExpression::Null(_) => Ok(()),
+        mir::NullableScalarExpression::Value(value) if value.ty() == ty => {
+            validate_value_expression(program, function, value)
+        }
+        mir::NullableScalarExpression::Local { local, .. } => (local_in(function, *local)?.ty
+            == mir::Type::NullableScalar(ty))
+        .then_some(())
+        .ok_or_else(|| malformed_mir("nullable scalar references another local type")),
+        mir::NullableScalarExpression::Property {
+            object, property, ..
+        } => validate_property_operand(
+            program,
+            function,
+            *object,
+            *property,
+            mir::Type::NullableScalar(ty),
+        ),
+        mir::NullableScalarExpression::Static { id, .. } => {
+            validate_static_operand(program, *id, mir::Type::NullableScalar(ty))
+        }
+        mir::NullableScalarExpression::Call {
+            function: callee,
+            args,
+            ..
+        } => {
+            let callee = function_in(program, *callee)?;
+            if callee.return_type != mir::ReturnType::Value(mir::Type::NullableScalar(ty)) {
+                return Err(malformed_mir(
+                    "nullable scalar call has another return type",
+                ));
+            }
+            validate_call_args(program, function, callee, args)
+        }
+        mir::NullableScalarExpression::NullSafeProperty {
+            object, property, ..
+        } => {
+            let class = object.class();
+            validate_nullable_class_expression(program, function, object)?;
+            property_in(program, class, *property).and_then(|definition| {
+                (definition.ty == mir::Type::Scalar(ty))
+                    .then_some(())
+                    .ok_or_else(|| malformed_mir("null-safe property has another scalar type"))
+            })
+        }
+        mir::NullableScalarExpression::NullSafeCall {
+            object,
+            function: callee,
+            args,
+            ..
+        } => validate_null_safe_call(
+            program,
+            function,
+            object,
+            *callee,
+            args,
+            mir::Type::Scalar(ty),
+        ),
+        mir::NullableScalarExpression::Value(_) => {
+            Err(malformed_mir("nullable scalar wraps another scalar type"))
+        }
+    }
+}
+
+fn validate_nullable_class_expression(
+    program: &mir::Program,
+    function: &mir::Function,
+    expression: &mir::NullableClassExpression,
+) -> Result<(), BackendError> {
+    let class = expression.class();
+    class_in(program, class)?;
+    match expression {
+        mir::NullableClassExpression::Null(_) => Ok(()),
+        mir::NullableClassExpression::Class(value) if value.class() == class => {
+            validate_class_expression(program, function, value)
+        }
+        mir::NullableClassExpression::Local {
+            local, transfer, ..
+        } => {
+            let definition = local_in(function, *local)?;
+            if definition.ty != mir::Type::NullableClass(class) {
+                return Err(malformed_mir(
+                    "nullable class references another local type",
+                ));
+            }
+            if *transfer && !definition.owned {
+                return Err(malformed_mir("nullable class transfers a borrowed local"));
+            }
+            Ok(())
+        }
+        mir::NullableClassExpression::Property {
+            object, property, ..
+        } => validate_property_operand(
+            program,
+            function,
+            *object,
+            *property,
+            mir::Type::NullableClass(class),
+        ),
+        mir::NullableClassExpression::Call {
+            function: callee,
+            args,
+            return_borrow,
+            ..
+        } => {
+            let callee = function_in(program, *callee)?;
+            if callee.return_type != mir::ReturnType::Value(mir::Type::NullableClass(class)) {
+                return Err(malformed_mir("nullable class call has another return type"));
+            }
+            if *return_borrow != infer_function_return_borrow(program, callee)? {
+                return Err(malformed_mir(
+                    "nullable class call has inconsistent ownership",
+                ));
+            }
+            validate_call_args(program, function, callee, args)
+        }
+        mir::NullableClassExpression::NullSafeProperty {
+            object, property, ..
+        } => {
+            let receiver = object.class();
+            validate_nullable_class_expression(program, function, object)?;
+            property_in(program, receiver, *property).and_then(|definition| {
+                (definition.ty == mir::Type::Class(class))
+                    .then_some(())
+                    .ok_or_else(|| malformed_mir("null-safe property has another class type"))
+            })
+        }
+        mir::NullableClassExpression::NullSafeCall {
+            object,
+            function: callee,
+            args,
+            return_borrow,
+            ..
+        } => {
+            let callee_definition = function_in(program, *callee)?;
+            if *return_borrow != infer_function_return_borrow(program, callee_definition)? {
+                return Err(malformed_mir(
+                    "null-safe class call has inconsistent ownership",
+                ));
+            }
+            validate_null_safe_call(
+                program,
+                function,
+                object,
+                *callee,
+                args,
+                mir::Type::Class(class),
+            )
+        }
+        mir::NullableClassExpression::Class(_) => {
+            Err(malformed_mir("nullable class wraps another class type"))
+        }
+    }
+}
+
+fn validate_null_safe_call(
+    program: &mir::Program,
+    caller: &mir::Function,
+    object: &mir::NullableClassExpression,
+    callee: mir::FunctionId,
+    args: &[mir::Rvalue],
+    return_type: mir::Type,
+) -> Result<(), BackendError> {
+    validate_nullable_class_expression(program, caller, object)?;
+    let callee = function_in(program, callee)?;
+    let Some(method) = &callee.method else {
+        return Err(malformed_mir("null-safe call targets a free function"));
+    };
+    if method.class != object.class() || callee.return_type != mir::ReturnType::Value(return_type) {
+        return Err(malformed_mir(
+            "null-safe call has an incompatible signature",
+        ));
+    }
+    let Some((receiver, parameters)) = callee.params.split_first() else {
+        return Err(malformed_mir("null-safe method has no receiver"));
+    };
+    if local_in(callee, *receiver)?.ty != mir::Type::Class(object.class()) {
+        return Err(malformed_mir("null-safe method has another receiver type"));
+    }
+    validate_call_args_for_params(program, caller, callee, parameters, args, None)
 }
 
 fn validate_format_expression(
