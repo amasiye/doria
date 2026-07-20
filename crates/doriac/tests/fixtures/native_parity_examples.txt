@@ -1,5 +1,5 @@
 # Durable executable source of truth for accepted native behavior.
-# Highest completed stage: Stage 20b
+# Highest completed stage: Stage 21
 examples/native/main_add_overflow_panic.doria
 examples/native/main_arithmetic_42.doria
 examples/native/main_bitwise_42.doria

@@ -1927,6 +1927,28 @@ fn shared_validator_enforces_property_and_receiver_mutability() {
 }
 
 #[test]
+fn shared_validator_rejects_invalid_constructor_successors_without_panicking() {
+    let mut program = class_new_program();
+    let property = program.classes[0].properties[0].id;
+    let Statement::AssignLocal {
+        value: Rvalue::Class(ClassExpression::New { properties, .. }),
+        ..
+    } = &mut program.functions[0].blocks[0].statements[0]
+    else {
+        panic!("class new fixture");
+    };
+    properties.push(PropertyValue {
+        property,
+        source: PropertyValueSource::ConstructorBody,
+    });
+    program.functions[1].blocks[0].terminator = Terminator::Jump(BlockId(9));
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("an invalid constructor successor must be rejected as malformed MIR");
+    assert!(error.message.contains("BlockId block9 does not exist"));
+}
+
+#[test]
 fn shared_validator_requires_constructors_to_return_void() {
     let mut program = class_new_program();
     program.functions[1].return_type = ReturnType::Value(Type::String);

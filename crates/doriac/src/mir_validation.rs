@@ -1667,18 +1667,20 @@ fn validate_class_expression(
                 };
                 if !definition.writable
                     && !matches!(property.source, mir::PropertyValueSource::ConstructorBody)
-                    && constructor.is_some_and(|constructor| {
-                        constructor_property_assignment_count(
+                {
+                    if let Some(constructor) = constructor {
+                        if constructor_property_assignment_count(
                             constructor,
                             constructor.params[0],
                             property.property,
-                        ) > 0
-                    })
-                {
-                    return Err(malformed_mir(format!(
-                        "class#{} readonly property{} is initialized before its constructor assigns it",
-                        class.0, property.property.index
-                    )));
+                        )? > 0
+                        {
+                            return Err(malformed_mir(format!(
+                                "class#{} readonly property{} is initialized before its constructor assigns it",
+                                class.0, property.property.index
+                            )));
+                        }
+                    }
                 }
                 if source_type != definition.ty {
                     return Err(malformed_mir(format!(
@@ -1797,6 +1799,7 @@ fn validate_constructor_body_initializer(
         }
     }
 
+    let (reachable, _) = reachable_blocks_and_predecessors(constructor, true)?;
     let mut inputs = vec![None; constructor.blocks.len()];
     let mut outputs = vec![None; constructor.blocks.len()];
     inputs[constructor.entry_block.0] = Some(State::Uninitialized);
@@ -1805,7 +1808,7 @@ fn validate_constructor_body_initializer(
     queued[constructor.entry_block.0] = true;
     while let Some(block_id) = pending.pop_front() {
         queued[block_id.0] = false;
-        let block = &constructor.blocks[block_id.0];
+        let block = block_in(constructor, block_id)?;
         let mut state = inputs[block_id.0].expect("queued constructor block has input state");
         for statement in &block.statements {
             if matches!(
@@ -1833,6 +1836,9 @@ fn validate_constructor_body_initializer(
         }
         outputs[block_id.0] = Some(state);
         for successor in analysis_terminator_targets(&block.terminator, true) {
+            if !reachable[successor.0] {
+                continue;
+            }
             let changed = match inputs[successor.0] {
                 Some(current) => {
                     let joined = current.join(state);
@@ -1908,10 +1914,12 @@ fn constructor_property_assignment_count(
     constructor: &mir::Function,
     receiver: mir::LocalId,
     property: crate::class_layout::PropertyId,
-) -> usize {
-    constructor
+) -> Result<usize, BackendError> {
+    let (reachable, _) = reachable_blocks_and_predecessors(constructor, true)?;
+    Ok(constructor
         .blocks
         .iter()
+        .filter(|block| reachable[block.id.0])
         .flat_map(|block| block.statements.iter())
         .filter(|statement| {
             matches!(
@@ -1923,7 +1931,7 @@ fn constructor_property_assignment_count(
                 } if *object == receiver && *assigned == property
             )
         })
-        .count()
+        .count())
 }
 
 fn terminator_targets(terminator: &mir::Terminator) -> Vec<mir::BlockId> {

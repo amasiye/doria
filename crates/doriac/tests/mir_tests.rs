@@ -3496,6 +3496,33 @@ function main(): void
 }
 
 #[test]
+fn stage_21_ignores_unreachable_readonly_reassignment_in_a_constant_branch() {
+    let program = doriac::lower_source_to_mir(
+        "constructor-unreachable-reassignment.doria",
+        r#"class Message
+{
+    string $text = "ready";
+
+    function __construct()
+    {
+        if (false) {
+            $this->text = "unreachable";
+        }
+    }
+}
+
+function main(): void
+{
+    let $message = new Message();
+}
+"#,
+    )
+    .expect("an unreachable assignment cannot reinitialize a readonly property");
+    doriac::mir_validation::validate_program(&program)
+        .expect("source and MIR reachability must agree for readonly initialization");
+}
+
+#[test]
 fn stage_19_infers_string_property_loads_and_comparisons() {
     let source = r#"class Message
 {
