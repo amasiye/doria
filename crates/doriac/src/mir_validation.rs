@@ -1231,8 +1231,12 @@ fn require_writable_class_expression(
             return_borrow.is_none_or(|borrow| borrow.writable)
         }
         mir::ClassExpression::New { .. } => true,
-        mir::ClassExpression::Coalesce { left: _, right, .. } => {
-            require_writable_class_expression(program, function, right, destination).is_ok()
+        mir::ClassExpression::Coalesce { left, right, .. } => {
+            require_writable_nullable_class_expression(program, function, left, destination)
+                .and_then(|()| {
+                    require_writable_class_expression(program, function, right, destination)
+                })
+                .is_ok()
         }
     };
     if writable {
@@ -1240,6 +1244,62 @@ fn require_writable_class_expression(
     } else {
         Err(malformed_mir(format!(
             "{destination} requires a writable class value"
+        )))
+    }
+}
+
+fn require_writable_nullable_class_expression(
+    program: &mir::Program,
+    function: &mir::Function,
+    expression: &mir::NullableClassExpression,
+    destination: &str,
+) -> Result<(), BackendError> {
+    let writable = match expression {
+        mir::NullableClassExpression::Null(_) => false,
+        mir::NullableClassExpression::Class(value) => {
+            require_writable_class_expression(program, function, value, destination).is_ok()
+        }
+        mir::NullableClassExpression::Local {
+            local,
+            transfer: false,
+            ..
+        } => local_in(function, *local)?.writable,
+        mir::NullableClassExpression::Property {
+            object, property, ..
+        } => {
+            let object = local_in(function, *object)?;
+            let mir::Type::Class(class) = object.ty else {
+                return Err(malformed_mir(format!(
+                    "{destination} uses a property on non-class local local{}",
+                    object.id.0
+                )));
+            };
+            object.writable && property_in(program, class, *property)?.writable
+        }
+        mir::NullableClassExpression::Call { return_borrow, .. }
+        | mir::NullableClassExpression::NullSafeCall { return_borrow, .. } => {
+            return_borrow.is_none_or(|borrow| borrow.writable)
+        }
+        mir::NullableClassExpression::Coalesce { left, right, .. } => {
+            require_writable_nullable_class_expression(program, function, left, destination)
+                .and_then(|()| {
+                    require_writable_nullable_class_expression(
+                        program,
+                        function,
+                        right,
+                        destination,
+                    )
+                })
+                .is_ok()
+        }
+        mir::NullableClassExpression::Local { transfer: true, .. }
+        | mir::NullableClassExpression::NullSafeProperty { .. } => false,
+    };
+    if writable {
+        Ok(())
+    } else {
+        Err(malformed_mir(format!(
+            "{destination} requires a writable nullable class value"
         )))
     }
 }
@@ -3156,6 +3216,24 @@ fn validate_call_args_for_params(
             }
             if parameter_definition.writable {
                 require_writable_class_expression(
+                    program,
+                    caller,
+                    expression,
+                    &format!("call to {} argument {}", callee.name, index + 1),
+                )?;
+            }
+        } else if matches!(parameter_type, mir::Type::NullableClass(_)) {
+            let mir::Rvalue::NullableClass(expression) = argument else {
+                unreachable!("nullable class parameter type was checked against its argument")
+            };
+            if parameter_definition.owned || promoted_transfer {
+                require_owned_nullable_class_expression(
+                    expression,
+                    &format!("call to {} argument {}", callee.name, index + 1),
+                )?;
+            }
+            if parameter_definition.writable {
+                require_writable_nullable_class_expression(
                     program,
                     caller,
                     expression,

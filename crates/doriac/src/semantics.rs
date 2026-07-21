@@ -5167,12 +5167,13 @@ impl<'program> Checker<'program> {
 
         for (index, (arg, param)) in args.iter().zip(params.iter()).enumerate() {
             let got = self.infer_expr_type(arg, scopes, method_context);
+            let parameter_is_class_like = self.type_is_class_or_nullable_class(param.ty);
 
             if self.is_expr_assignable(param.ty, arg, scopes, method_context)
                 || self.is_assignable(param.ty, got)
             {
                 if param.writable
-                    && (matches!(self.types.kind(param.ty), TypeKind::Class(_))
+                    && (parameter_is_class_like
                         || matches!(self.types.kind(param.ty), TypeKind::Mixed)
                             && self.writable_mixed_requires_semantic_check(
                                 got,
@@ -5181,7 +5182,7 @@ impl<'program> Checker<'program> {
                             ))
                     && !self.is_writable_object_path(arg, scopes, method_context)
                 {
-                    let message = if matches!(self.types.kind(param.ty), TypeKind::Class(_)) {
+                    let message = if parameter_is_class_like {
                         format!(
                             "argument {} of {callee} must be a writable class value",
                             index + 1
@@ -5210,6 +5211,14 @@ impl<'program> Checker<'program> {
                 ),
                 arg.span(),
             ));
+        }
+    }
+
+    fn type_is_class_or_nullable_class(&self, ty: TypeId) -> bool {
+        match *self.types.kind(ty) {
+            TypeKind::Class(_) => true,
+            TypeKind::Nullable(inner) => matches!(self.types.kind(inner), TypeKind::Class(_)),
+            _ => false,
         }
     }
 
@@ -5263,6 +5272,9 @@ impl<'program> Checker<'program> {
                         && context.receiver_mode.is_some_and(ReceiverMode::is_writable)
                 })
                 .unwrap_or(false),
+            Expr::PropertyAccess {
+                null_safe: true, ..
+            } => false,
             Expr::PropertyAccess {
                 object, property, ..
             } => {
@@ -5393,7 +5405,7 @@ impl<'program> Checker<'program> {
         scopes: &ScopeStack,
         method_context: Option<&MethodContext>,
     ) -> bool {
-        if !matches!(self.types.kind(return_ty), TypeKind::Class(_)) {
+        if !self.type_is_class_or_nullable_class(return_ty) {
             return false;
         }
         let Some(return_borrow) = return_borrow else {

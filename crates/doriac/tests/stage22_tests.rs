@@ -621,6 +621,83 @@ function main(): void
 }
 
 #[test]
+fn nullable_class_call_arguments_enforce_ownership_and_writability() {
+    let owned = doriac::lower_source_to_mir(
+        "stage22-borrowed-nullable-take.doria",
+        r#"
+class Box {}
+
+function alias(?Box $value): ?Box { return $value; }
+function consume(take ?Box $value): void {}
+
+function main(): void
+{
+    let $owner = new Box();
+    consume(alias($owner) ?? null);
+}
+"#,
+    )
+    .expect("borrowed nullable calls should reach defensive MIR ownership validation");
+    let error = doriac::mir_validation::validate_program(&owned)
+        .expect_err("a borrowed nullable call cannot satisfy a take parameter");
+    assert!(error
+        .message
+        .contains("receives a borrowed nullable class call result"));
+
+    let diagnostics = diagnostics(
+        r#"
+class Box {}
+class Holder { writable ?Box $value = null; }
+function mutate(writable ?Box $value): void {}
+function invalid(?Box $value): void { mutate($value); }
+function invalidNullSafe(?Holder $holder): void { mutate($holder?->value); }
+"#,
+    );
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.code == "E0204"
+                    && diagnostic
+                        .message
+                        .contains("must be a writable class value")
+            })
+            .count(),
+        2,
+        "readonly and null-safe nullable class arguments must fail semantic checking: {diagnostics:#?}"
+    );
+
+    let mut writable = doriac::lower_source_to_mir(
+        "stage22-writable-nullable-argument.doria",
+        r#"
+class Box {}
+function mutate(writable ?Box $value): void {}
+function main(): void
+{
+    writable ?Box $value = null;
+    mutate($value);
+}
+"#,
+    )
+    .expect("a writable nullable class local should lower");
+    let main = writable
+        .functions
+        .iter_mut()
+        .find(|function| function.name == "main")
+        .expect("fixture should contain main");
+    main.locals
+        .iter_mut()
+        .find(|local| local.name == "value")
+        .expect("fixture should contain value")
+        .writable = false;
+    let error = doriac::mir_validation::validate_program(&writable)
+        .expect_err("defensive MIR validation must reject a readonly nullable class argument");
+    assert!(error
+        .message
+        .contains("requires a writable nullable class value"));
+}
+
+#[test]
 fn coalesce_borrows_all_possible_arms_across_call_arguments() {
     for (file, source) in [
         (
