@@ -6306,6 +6306,15 @@ impl<'program> Checker<'program> {
         scopes: &ScopeStack,
         method_context: Option<&MethodContext>,
     ) -> TypeId {
+        if *op == BinaryOp::Coalesce {
+            let left_ty = self.infer_expr_type(left, scopes, method_context);
+            if let TypeKind::Nullable(inner) = *self.types.kind(left_ty) {
+                self.contextualize_scalar_literals(inner, right);
+            }
+            let right_ty = self.infer_expr_type(right, scopes, method_context);
+            return self.infer_coalesce_binary_type(left_ty, right_ty);
+        }
+
         let (left_ty, right_ty) =
             self.infer_contextual_binary_operand_types(left, right, scopes, method_context);
 
@@ -6328,7 +6337,7 @@ impl<'program> Checker<'program> {
             BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => {
                 self.infer_logical_binary_type(left_ty, right_ty)
             }
-            BinaryOp::Coalesce => self.infer_coalesce_binary_type(left_ty, right_ty),
+            BinaryOp::Coalesce => unreachable!("coalesce is handled before numeric context"),
         }
     }
 

@@ -432,7 +432,7 @@ impl Evaluator {
                 right,
                 span,
             } => {
-                if Self::is_contextual_numeric_literal(left) {
+                if *op != BinaryOp::Coalesce && Self::is_contextual_numeric_literal(left) {
                     let right = self.evaluate_expr(right, expected, requester)?;
                     let left = self.evaluate_expr(left, Some(right.ty), requester)?;
                     return self.binary(op, left, right, *span).map(TypedValue::new);
@@ -444,6 +444,20 @@ impl Evaluator {
                     }
                     (BinaryOp::Or, ConstValue::Bool(true)) => {
                         return Some(TypedValue::new(ConstValue::Bool(true)));
+                    }
+                    (BinaryOp::Coalesce, ConstValue::Null) => {
+                        let expected = left
+                            .ty
+                            .nullable_payload()
+                            .or_else(|| expected.and_then(ConstType::nullable_payload))
+                            .or(expected);
+                        return self.evaluate_expr(right, expected, requester);
+                    }
+                    (BinaryOp::Coalesce, _) => {
+                        return Some(TypedValue {
+                            value: left.value,
+                            ty: left.ty.nullable_payload().unwrap_or(left.ty),
+                        });
                     }
                     _ => {}
                 }
@@ -892,6 +906,16 @@ impl ConstType {
                 | Self::NullableBool
                 | Self::NullableString
         )
+    }
+
+    const fn nullable_payload(self) -> Option<Self> {
+        match self {
+            Self::NullableInteger(ty) => Some(Self::Integer(ty)),
+            Self::NullableFloat(ty) => Some(Self::Float(ty)),
+            Self::NullableBool => Some(Self::Bool),
+            Self::NullableString => Some(Self::String),
+            _ => None,
+        }
     }
 
     fn integer(self) -> Option<IntegerType> {

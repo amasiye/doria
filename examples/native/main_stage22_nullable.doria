@@ -8,6 +8,14 @@ class Label
     {
         return $this->text;
     }
+
+    function __destruct()
+    {
+        echo "<" . $this->text . ">";
+        if ($this->text == "label") {
+            echo "\n";
+        }
+    }
 }
 
 function maybeInt(bool $present): ?int
@@ -68,5 +76,7 @@ function main(): void
     if ($label != null) {
         echo ":" . $label->read();
     }
+    let $fallbackLabel = maybeLabel(false) ?? new Label("fallback");
+    echo ":" . $fallbackLabel->read();
     echo "\n";
 }

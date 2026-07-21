@@ -303,6 +303,7 @@ pub enum ClassExpression {
         class: ClassId,
         left: Box<NullableClassExpression>,
         right: Box<ClassExpression>,
+        transfer: bool,
     },
 }
 
@@ -598,6 +599,7 @@ pub enum NullableClassExpression {
         class: ClassId,
         left: Box<NullableClassExpression>,
         right: Box<NullableClassExpression>,
+        transfer: bool,
     },
 }
 

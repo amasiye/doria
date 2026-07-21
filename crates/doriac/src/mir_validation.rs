@@ -305,7 +305,34 @@ fn validate_statement(
                 (mir::Type::NullableClass(expected), mir::Rvalue::NullableClass(expression))
                     if expression.class() == expected =>
                 {
-                    validate_nullable_class_expression(program, function, expression)
+                    validate_nullable_class_expression(program, function, expression)?;
+                    if !local.owned {
+                        if !local.synthetic {
+                            return Err(malformed_mir(format!(
+                                "nullable class assignment targets borrowed local local{}",
+                                target.0
+                            )));
+                        }
+                        if nullable_class_expression_accesses_local(expression, *target) {
+                            return Err(malformed_mir(format!(
+                                "borrowed nullable class temporary local{} reads its own uninitialized value",
+                                target.0
+                            )));
+                        }
+                        if infer_nullable_expression_return_borrow(program, function, expression)?
+                            .is_none()
+                        {
+                            return Err(malformed_mir(format!(
+                                "borrowed nullable class temporary local{} receives an owning value",
+                                target.0
+                            )));
+                        }
+                        return Ok(());
+                    }
+                    require_owned_nullable_class_expression(
+                        expression,
+                        &format!("nullable class assignment to local{}", target.0),
+                    )
                 }
                 (mir::Type::NullableString, mir::Rvalue::Class(_)) => Err(malformed_mir(format!(
                     "nullable-string local local{} receives a class rvalue",
@@ -767,10 +794,20 @@ fn require_owned_class_expression(
             "{destination} receives borrowed nullable class local local{}",
             local.0
         ))),
-        mir::ClassExpression::Coalesce { left, right, .. } => {
+        mir::ClassExpression::Coalesce {
+            left,
+            right,
+            transfer: true,
+            ..
+        } => {
             require_owned_nullable_class_expression(left, destination)?;
             require_owned_class_expression(right, destination)
         }
+        mir::ClassExpression::Coalesce {
+            transfer: false, ..
+        } => Err(malformed_mir(format!(
+            "{destination} receives a borrowed class coalesce result"
+        ))),
     }
 }
 
@@ -817,10 +854,20 @@ fn require_owned_nullable_class_expression(
         } => Err(malformed_mir(format!(
             "{destination} receives a borrowed nullable class call result"
         ))),
-        mir::NullableClassExpression::Coalesce { left, right, .. } => {
+        mir::NullableClassExpression::Coalesce {
+            left,
+            right,
+            transfer: true,
+            ..
+        } => {
             require_owned_nullable_class_expression(left, destination)?;
             require_owned_nullable_class_expression(right, destination)
         }
+        mir::NullableClassExpression::Coalesce {
+            transfer: false, ..
+        } => Err(malformed_mir(format!(
+            "{destination} receives a borrowed nullable class coalesce result"
+        ))),
     }
 }
 

@@ -131,11 +131,13 @@ enum EvaluationTask {
     AfterClassCoalesce {
         right: mir::ClassExpression,
         left_owned: bool,
+        transfer: bool,
     },
     FinishClassCoalesceRight(Option<crate::class_layout::ClassId>),
     AfterNullableClassCoalesce {
         right: mir::NullableClassExpression,
         left_owned: bool,
+        transfer: bool,
     },
     FinishNullableClassCoalesceRight(Option<crate::class_layout::ClassId>),
     AfterNullSafeProperty {
@@ -923,10 +925,14 @@ impl Interpreter<'_> {
                         .push(EvaluationTask::NullableString(right));
                 }
             }
-            EvaluationTask::AfterClassCoalesce { right, left_owned } => {
+            EvaluationTask::AfterClassCoalesce {
+                right,
+                left_owned,
+                transfer,
+            } => {
                 let (class, object) = self.pop_nullable_class()?;
                 if let Some(object) = object {
-                    if left_owned {
+                    if left_owned && !transfer {
                         self.current_frame_mut()?
                             .statement_temporary_drops
                             .push((object, class));
@@ -935,7 +941,7 @@ impl Interpreter<'_> {
                         .values
                         .push(EvaluationValue::Class { object, class });
                 } else {
-                    let owned = right.owned_temporary_class();
+                    let owned = (!transfer).then(|| right.owned_temporary_class()).flatten();
                     let frame = self.current_frame_mut()?;
                     frame
                         .tasks
@@ -958,17 +964,21 @@ impl Interpreter<'_> {
                     .values
                     .push(EvaluationValue::Class { object, class });
             }
-            EvaluationTask::AfterNullableClassCoalesce { right, left_owned } => {
+            EvaluationTask::AfterNullableClassCoalesce {
+                right,
+                left_owned,
+                transfer,
+            } => {
                 let (class, object) = self.pop_nullable_class()?;
                 if let Some(object) = object {
-                    if left_owned {
+                    if left_owned && !transfer {
                         self.current_frame_mut()?
                             .statement_temporary_drops
                             .push((object, class));
                     }
                     self.push_nullable_class(class, Some(object))?;
                 } else {
-                    let owned = right.owned_temporary_class();
+                    let owned = (!transfer).then(|| right.owned_temporary_class()).flatten();
                     let frame = self.current_frame_mut()?;
                     frame
                         .tasks
@@ -2065,12 +2075,18 @@ impl Interpreter<'_> {
                     .values
                     .push(EvaluationValue::Class { object, class });
             }
-            mir::ClassExpression::Coalesce { left, right, .. } => {
+            mir::ClassExpression::Coalesce {
+                left,
+                right,
+                transfer,
+                ..
+            } => {
                 let left_owned = left.owned_temporary_class().is_some();
                 let frame = self.current_frame_mut()?;
                 frame.tasks.push(EvaluationTask::AfterClassCoalesce {
                     right: *right,
                     left_owned,
+                    transfer,
                 });
                 frame.tasks.push(EvaluationTask::NullableClass(*left));
             }
@@ -2176,7 +2192,12 @@ impl Interpreter<'_> {
                 });
                 frame.tasks.push(EvaluationTask::NullableClass(*object));
             }
-            mir::NullableClassExpression::Coalesce { left, right, .. } => {
+            mir::NullableClassExpression::Coalesce {
+                left,
+                right,
+                transfer,
+                ..
+            } => {
                 let left_owned = left.owned_temporary_class().is_some();
                 let frame = self.current_frame_mut()?;
                 frame
@@ -2184,6 +2205,7 @@ impl Interpreter<'_> {
                     .push(EvaluationTask::AfterNullableClassCoalesce {
                         right: *right,
                         left_owned,
+                        transfer,
                     });
                 frame.tasks.push(EvaluationTask::NullableClass(*left));
             }

@@ -1395,7 +1395,12 @@ fn lower_class_expression(
             }
             Ok(object)
         }
-        mir::ClassExpression::Coalesce { left, right, .. } => {
+        mir::ClassExpression::Coalesce {
+            left,
+            right,
+            transfer,
+            ..
+        } => {
             let left_owned = left.owned_temporary_class().is_some();
             let right_owned = right.owned_temporary_class().is_some();
             let left = lower_nullable_class_expression(builder, left, resources)?;
@@ -1424,7 +1429,7 @@ fn lower_class_expression(
             );
             builder.switch_to_block(done);
             let result = builder.block_params(done)[0];
-            if left_owned || right_owned {
+            if !transfer && (left_owned || right_owned) {
                 defer_or_drop_class_temporary(
                     builder,
                     builder.block_params(done)[1],
@@ -1526,7 +1531,10 @@ fn lower_nullable_class_expression(
             )
         }
         mir::NullableClassExpression::Coalesce {
-            class, left, right, ..
+            class,
+            left,
+            right,
+            transfer,
         } => {
             let left_owned = left.owned_temporary_class().is_some();
             let right_owned = right.owned_temporary_class().is_some();
@@ -1556,7 +1564,7 @@ fn lower_nullable_class_expression(
             );
             builder.switch_to_block(done);
             let result = builder.block_params(done)[0];
-            if left_owned || right_owned {
+            if !transfer && (left_owned || right_owned) {
                 defer_or_drop_class_temporary(
                     builder,
                     builder.block_params(done)[1],

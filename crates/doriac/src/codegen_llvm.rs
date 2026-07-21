@@ -975,7 +975,12 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 }
                 Ok(object)
             }
-            mir::ClassExpression::Coalesce { left, right, .. } => {
+            mir::ClassExpression::Coalesce {
+                left,
+                right,
+                transfer,
+                ..
+            } => {
                 let left_owned = left.owned_temporary_class().is_some();
                 let right_owned = right.owned_temporary_class().is_some();
                 let left = self.lower_nullable_class_expression(left)?;
@@ -1011,7 +1016,7 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 let phi = build(self.builder.build_phi(pointer, "class.coalesce"))?;
                 phi.add_incoming(&[(&left, some_end), (&right, none_end)]);
                 let result = phi.as_basic_value().into_pointer_value();
-                if left_owned || right_owned {
+                if !transfer && (left_owned || right_owned) {
                     let temporary =
                         build(self.builder.build_phi(pointer, "class.coalesce.temporary"))?;
                     let null = pointer.const_null();
@@ -1093,7 +1098,10 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 })
             }
             mir::NullableClassExpression::Coalesce {
-                class, left, right, ..
+                class,
+                left,
+                right,
+                transfer,
             } => {
                 let left_owned = left.owned_temporary_class().is_some();
                 let right_owned = right.owned_temporary_class().is_some();
@@ -1129,7 +1137,7 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 self.builder.position_at_end(done);
                 let result = build(self.builder.build_phi(pointer, "nullable-class.coalesce"))?;
                 result.add_incoming(&[(&left, some_end), (&right, none_end)]);
-                if left_owned || right_owned {
+                if !transfer && (left_owned || right_owned) {
                     let temporary = build(
                         self.builder
                             .build_phi(pointer, "nullable-class.coalesce.temporary"),

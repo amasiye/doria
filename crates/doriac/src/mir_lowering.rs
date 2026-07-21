@@ -1681,6 +1681,13 @@ impl<'semantic> LoweringContext<'semantic> {
         })
     }
 
+    fn expression_is_null(&self, expr: &hir::Expr) -> bool {
+        matches!(
+            self.semantic_info.expression_type(expr.span()),
+            Some(crate::types::ResolvedType::Null)
+        )
+    }
+
     fn mir_resolved_type(&self, ty: &crate::types::ResolvedType) -> Option<mir::Type> {
         use crate::types::ResolvedType;
         match ty {
@@ -2779,6 +2786,7 @@ fn lower_nullable_class_expression(
             right: Box::new(lower_nullable_class_expression(
                 right, expected, transfer, context,
             )?),
+            transfer,
         }),
         hir::Expr::Variable { name, span } => {
             let local = context.lookup_local(name, *span)?;
@@ -3764,13 +3772,18 @@ fn lower_is_condition(
     tested_type: &crate::types::TypeRef,
     context: &LoweringContext,
 ) -> DiagnosticResult<mir::BoolExpression> {
-    let value_type = context.expression_type(expr)?;
     let Some(tested_type) = context.native_type_ref(tested_type) else {
         return Err(vec![unsupported(
             expr.span(),
             "type test does not name a native concrete type",
         )]);
     };
+    if context.expression_is_null(expr) {
+        return Ok(mir::BoolExpression::Use {
+            operand: mir::Operand::Scalar(mir::ScalarValue::Bool(false)),
+        });
+    }
+    let value_type = context.expression_type(expr)?;
     let result = match value_type {
         mir::Type::NullableScalar(ty) if tested_type == mir::Type::Scalar(ty) => {
             mir::BoolExpression::NullableScalarIsPresent(Box::new(
@@ -4130,6 +4143,7 @@ fn lower_class_expression(
                 left, expected, transfer, context,
             )?),
             right: Box::new(lower_class_expression(right, expected, transfer, context)?),
+            transfer,
         }),
         _ => Err(vec![unsupported(
             expr.span(),

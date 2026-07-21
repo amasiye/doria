@@ -464,7 +464,10 @@ fn nullable_native_fixture_lowers_to_valid_mir_and_interprets_exactly() {
     doriac::mir_validation::validate_program(&program).expect("Stage 22 MIR should validate");
     let output = doriac::mir_interpreter::interpret(&program)
         .expect("Stage 22 fixture should execute in the debug backend");
-    assert_eq!(output.stdout, b"42:7:typed:text:empty:label:none:label\n");
+    assert_eq!(
+        output.stdout,
+        b"42:7:typed:text:empty:label:none:label:fallback\n<fallback><label>\n"
+    );
     assert!(output.stderr.is_empty());
     assert_eq!(output.exit_status, 0);
 }
@@ -477,10 +480,16 @@ class Limits
     static ?int8 $small = 1;
     static ?float32 $ratio = 1.5;
     static ?bool $enabled = null;
+    static ?int8 $missing = null;
+    static ?int8 $coalesced = null ?? 4;
+    static int8 $smallFallback = self::small ?? 2;
+    static int8 $missingFallback = self::missing ?? 3;
     writable ?uint8 $count = 2;
 }
 
 function accept(?int16 $value): void {}
+function narrow(?int8 $value): int8 { return $value ?? 1; }
+function narrowRatio(?float32 $value): float32 { return $value ?? 2.5; }
 
 function main(): void
 {
@@ -488,7 +497,13 @@ function main(): void
     writable ?float32 $ratio = 1.5;
     $ratio = 2.5;
     accept(3);
-    echo "ok";
+    echo narrow(null);
+    echo ":";
+    echo narrowRatio(null);
+    echo ":";
+    echo Limits::smallFallback;
+    echo ":";
+    echo Limits::missingFallback;
 }
 "#;
     let program = doriac::lower_source_to_mir("stage22-nullable-scalars.doria", source)
@@ -504,7 +519,29 @@ function main(): void
         .is_empty());
     let output = doriac::mir_interpreter::interpret(&program)
         .expect("nullable scalar statics should execute");
-    assert_eq!(output.stdout, b"ok");
+    assert_eq!(output.stdout, b"1:2.5:1:3");
+}
+
+#[test]
+fn borrowed_nullable_coalesce_cannot_initialize_an_owner() {
+    let source = r#"
+class Box {}
+
+function alias(?Box $value): ?Box { return $value; }
+
+function main(): void
+{
+    let $owner = new Box();
+    ?Box $saved = alias($owner) ?? null;
+}
+"#;
+    let program = doriac::lower_source_to_mir("stage22-borrowed-coalesce.doria", source)
+        .expect("the source ownership pass leaves final ownership enforcement to MIR validation");
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("a borrowed nullable coalesce must not initialize an owning local");
+    assert!(error
+        .message
+        .contains("receives a borrowed nullable class call result"));
 }
 
 #[test]
@@ -617,6 +654,9 @@ function main(): void
     let $maybe = make(true, "chosen");
     let $chosen = $maybe ?? new Tracked("fallback");
     echo ":" . ($chosen->maybeName(true) ?? "none");
+
+    let $fallback = make(false, "missing") ?? new Tracked("owned-fallback");
+    echo ":" . ($fallback->maybeName(true) ?? "none");
 }
 "#;
     let program = doriac::lower_source_to_mir("stage22-nullable-ownership.doria", source)
@@ -634,7 +674,7 @@ function main(): void
         .expect("nullable ownership paths should execute");
     assert_eq!(
         output.stdout,
-        b"<method><static><temp>:value:empty:code:none:none:called<present>:value<chosen><owner>"
+        b"<method><static><temp>:value:empty:code:none:none:called<present>:value:value<owned-fallback><chosen><owner>"
     );
     assert!(output.stderr.is_empty());
     assert_eq!(output.exit_status, 0);
@@ -1080,6 +1120,7 @@ function main(): void
     if (make() is Tracked) { echo "true"; }
     if (make() is string) { echo "bad"; } else { echo "false"; }
     if (maybe() is string) { echo "bad"; } else { echo "false"; }
+    if (null is int) { echo "bad"; } else { echo "null"; }
 }
 "#;
     let program = doriac::lower_source_to_mir("stage22-is-effects.doria", source)
@@ -1094,5 +1135,8 @@ function main(): void
         .is_empty());
     let output = doriac::mir_interpreter::interpret(&program)
         .expect("effectful type tests should execute exactly once");
-    assert_eq!(output.stdout, b"make<drop>truemake<drop>falsemaybefalse");
+    assert_eq!(
+        output.stdout,
+        b"make<drop>truemake<drop>falsemaybefalsenull"
+    );
 }
