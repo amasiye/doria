@@ -4176,11 +4176,12 @@ impl<'program> Checker<'program> {
                         );
                     }
                     Some(AssignmentTarget {
-                        ty: if matches!(self.types.kind(binding.declared_ty), TypeKind::Nullable(_))
+                        ty: if matches!(op, AssignOp::Assign)
+                            && matches!(self.types.kind(binding.declared_ty), TypeKind::Nullable(_))
                         {
                             binding.declared_ty
                         } else {
-                            binding.ty
+                            self.infer_expr_type(target, scopes, method_context)
                         },
                         destination: AssignmentDestination::Type,
                     })

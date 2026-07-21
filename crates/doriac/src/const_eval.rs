@@ -619,29 +619,19 @@ impl Evaluator {
         span: Span,
     ) -> Option<ConstValue> {
         if matches!(op, BinaryOp::Equal | BinaryOp::NotEqual)
-            && (matches!(left.ty, ConstType::NullableString)
-                || matches!(right.ty, ConstType::NullableString))
+            && (left.ty.is_nullable() || right.ty.is_nullable())
+            && (left.ty.accepts(right.ty) || right.ty.accepts(left.ty))
+            && (matches!(left.value, ConstValue::Null) || matches!(right.value, ConstValue::Null))
         {
-            let nullable_operand = |ty: ConstType| {
-                matches!(
-                    ty,
-                    ConstType::String | ConstType::Null | ConstType::NullableString
-                )
-            };
-            if nullable_operand(left.ty) && nullable_operand(right.ty) {
-                let equal = match (&left.value, &right.value) {
-                    (ConstValue::String(left), ConstValue::String(right)) => left == right,
-                    (ConstValue::Null, ConstValue::Null) => true,
-                    (ConstValue::String(_), ConstValue::Null)
-                    | (ConstValue::Null, ConstValue::String(_)) => false,
-                    _ => unreachable!("nullable string types carry only string or null values"),
-                };
-                return Some(ConstValue::Bool(if *op == BinaryOp::Equal {
-                    equal
-                } else {
-                    !equal
-                }));
-            }
+            let equal = matches!(
+                (&left.value, &right.value),
+                (ConstValue::Null, ConstValue::Null)
+            );
+            return Some(ConstValue::Bool(if *op == BinaryOp::Equal {
+                equal
+            } else {
+                !equal
+            }));
         }
 
         let (left, right) = (left.value, right.value);
@@ -892,6 +882,16 @@ impl ConstType {
                 (Self::NullableFloat(expected), Self::Float(actual)) => expected == actual,
                 _ => false,
             }
+    }
+
+    const fn is_nullable(self) -> bool {
+        matches!(
+            self,
+            Self::NullableInteger(_)
+                | Self::NullableFloat(_)
+                | Self::NullableBool
+                | Self::NullableString
+        )
     }
 
     fn integer(self) -> Option<IntegerType> {

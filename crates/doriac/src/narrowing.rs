@@ -472,6 +472,7 @@ impl ForwardAnalysis for NarrowingAnalysis<'_> {
                 ),
                 ForInitializer::Assignment(assignment) => transfer_assignment(
                     &assignment.target,
+                    &assignment.op,
                     &assignment.value,
                     &mut output,
                     self.resolution,
@@ -482,6 +483,7 @@ impl ForwardAnalysis for NarrowingAnalysis<'_> {
             NodeAction::ForIncrement(increment) => match increment {
                 ForIncrement::Assignment(assignment) => transfer_assignment(
                     &assignment.target,
+                    &assignment.op,
                     &assignment.value,
                     &mut output,
                     self.resolution,
@@ -495,7 +497,7 @@ impl ForwardAnalysis for NarrowingAnalysis<'_> {
                         self.resolution,
                         self.mutations,
                     );
-                    kill_target(&increment.target, &mut output, self.resolution)
+                    mark_mutated_scalar_non_null(&increment.target, &mut output, self.resolution)
                 }
             },
             NodeAction::Expression(expression) => kill_mutated_call_arguments(
@@ -551,6 +553,7 @@ fn transfer_statement(
         ),
         Stmt::Assignment(assignment) => transfer_assignment(
             &assignment.target,
+            &assignment.op,
             &assignment.value,
             state,
             resolution,
@@ -559,7 +562,7 @@ fn transfer_statement(
         ),
         Stmt::Increment(increment) => {
             kill_mutated_call_arguments(&increment.target, state, resolution, mutations);
-            kill_target(&increment.target, state, resolution);
+            mark_mutated_scalar_non_null(&increment.target, state, resolution);
         }
         Stmt::Echo { expr, .. } | Stmt::Expr { expr, .. } => {
             kill_mutated_call_arguments(expr, state, resolution, mutations);
@@ -594,6 +597,7 @@ fn transfer_declaration(
 
 fn transfer_assignment(
     target: &Expr,
+    op: &crate::ast::AssignOp,
     value: &Expr,
     state: &mut State,
     resolution: &Resolution,
@@ -603,7 +607,17 @@ fn transfer_assignment(
     kill_mutated_call_arguments(target, state, resolution, mutations);
     kill_mutated_call_arguments(value, state, resolution, mutations);
     if let Some(binding) = variable_binding(target, resolution) {
-        set_from_value(binding, value, state, resolution, nullability);
+        if matches!(op, crate::ast::AssignOp::Assign) {
+            set_from_value(binding, value, state, resolution, nullability);
+        } else {
+            state.facts.insert(binding, Fact::NonNull);
+        }
+    }
+}
+
+fn mark_mutated_scalar_non_null(target: &Expr, state: &mut State, resolution: &Resolution) {
+    if let Some(binding) = variable_binding(target, resolution) {
+        state.facts.insert(binding, Fact::NonNull);
     }
 }
 
@@ -1229,9 +1243,15 @@ impl Resolver {
             .insert(name.to_string(), id);
         self.resolution.declarations.insert(span_start, id);
         if let Some(ty) = ty.as_ref().filter(|ty| ty.args.is_empty()) {
-            self.resolution
-                .declaration_classes
-                .insert(id, ty.name.clone());
+            let class_name = if ty.name == "self" {
+                self.resolution
+                    .current_class
+                    .clone()
+                    .unwrap_or_else(|| ty.name.clone())
+            } else {
+                ty.name.clone()
+            };
+            self.resolution.declaration_classes.insert(id, class_name);
         }
         self.resolution.declaration_types.insert(id, ty);
         id

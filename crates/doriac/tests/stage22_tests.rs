@@ -890,6 +890,144 @@ function keep(?int $value): int
 }
 
 #[test]
+fn self_typed_receivers_use_the_declaring_class_flow_contract() {
+    let diagnostics = doriac::check_source(
+        "stage22-self-method-flow.doria",
+        r#"
+class Writer
+{
+    function clear(writable ?int $value): void { $value = null; }
+
+    function read(self $other, writable ?int $value): int
+    {
+        if ($value == null) { return 0; }
+        $other->clear($value);
+        return $value + 1;
+    }
+}
+"#,
+    )
+    .expect_err("a self-typed mutating receiver call must invalidate nullable facts");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "E0441"),
+        "the nullable use after the self-typed receiver call should be rejected: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn narrowed_nullable_scalars_support_read_modify_write() {
+    let source = r#"
+function initialValue(): ?int { return 40; }
+
+function main(): void
+{
+    writable ?int $value = initialValue();
+    if ($value != null) {
+        $value += 1;
+        $value++;
+        echo $value;
+    }
+}
+"#;
+    let program = doriac::lower_source_to_mir("stage22-nullable-rmw.doria", source)
+        .expect("narrowed nullable scalar read-modify-write should lower");
+    doriac::mir_validation::validate_program(&program)
+        .expect("nullable scalar read-modify-write MIR should validate");
+    assert!(!doriac::codegen_cranelift::lower_mir_to_object(&program)
+        .expect("Cranelift should lower nullable scalar read-modify-write")
+        .is_empty());
+    #[cfg(feature = "llvm-backend")]
+    assert!(!doriac::codegen_llvm::lower_mir_to_object(&program)
+        .expect("LLVM should lower nullable scalar read-modify-write")
+        .is_empty());
+    let output = doriac::mir_interpreter::interpret(&program)
+        .expect("nullable scalar read-modify-write should execute");
+    assert_eq!(output.stdout, b"42");
+}
+
+#[test]
+fn nullable_scalar_static_null_checks_are_const_evaluable() {
+    let source = r#"
+class Values
+{
+    static ?int8 $number = 1;
+    static ?float32 $ratio = 1.5;
+    static ?bool $enabled = null;
+    static bool $hasNumber = self::number != null;
+    static bool $hasRatio = self::ratio != null;
+    static bool $hasEnabled = self::enabled != null;
+}
+
+function main(): void
+{
+    if (Values::hasNumber && Values::hasRatio && !Values::hasEnabled) {
+        echo "ok";
+    }
+}
+"#;
+    let program = doriac::lower_source_to_mir("stage22-nullable-static-null.doria", source)
+        .expect("nullable scalar static null checks should be const-evaluable");
+    doriac::mir_validation::validate_program(&program)
+        .expect("nullable scalar static null-check MIR should validate");
+    assert!(!doriac::codegen_cranelift::lower_mir_to_object(&program)
+        .expect("Cranelift should lower nullable scalar const null checks")
+        .is_empty());
+    #[cfg(feature = "llvm-backend")]
+    assert!(!doriac::codegen_llvm::lower_mir_to_object(&program)
+        .expect("LLVM should lower nullable scalar const null checks")
+        .is_empty());
+    let output = doriac::mir_interpreter::interpret(&program)
+        .expect("nullable scalar const null checks should execute");
+    assert_eq!(output.stdout, b"ok");
+}
+
+#[test]
+fn null_safe_string_comparisons_keep_nullable_semantics() {
+    let source = r#"
+class Label
+{
+    string $name = "x";
+    function text(): string { return "x"; }
+}
+
+function label(bool $present): ?Label
+{
+    if ($present) { return new Label(); }
+    return null;
+}
+
+function main(): void
+{
+    ?Label $none = label(false);
+    ?Label $some = label(true);
+    if ($none?->name != "x") { echo "none-property:"; }
+    if ($none?->text() != "x") { echo "none-method:"; }
+    if ($some?->name == "x") { echo "some-property:"; }
+    if ($some?->text() == "x") { echo "some-method"; }
+}
+"#;
+    let program = doriac::lower_source_to_mir("stage22-null-safe-string-compare.doria", source)
+        .expect("null-safe string comparisons should lower as nullable comparisons");
+    doriac::mir_validation::validate_program(&program)
+        .expect("null-safe string comparison MIR should validate");
+    assert!(!doriac::codegen_cranelift::lower_mir_to_object(&program)
+        .expect("Cranelift should lower null-safe string comparisons")
+        .is_empty());
+    #[cfg(feature = "llvm-backend")]
+    assert!(!doriac::codegen_llvm::lower_mir_to_object(&program)
+        .expect("LLVM should lower null-safe string comparisons")
+        .is_empty());
+    let output = doriac::mir_interpreter::interpret(&program)
+        .expect("null-safe string comparisons should execute");
+    assert_eq!(
+        output.stdout,
+        b"none-property:none-method:some-property:some-method"
+    );
+}
+
+#[test]
 fn concrete_is_tests_evaluate_their_operands_once() {
     let source = r#"
 class Tracked

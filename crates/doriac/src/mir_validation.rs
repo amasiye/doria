@@ -3335,6 +3335,9 @@ fn validate_condition(
             {
                 Ok(())
             }
+            mir::Operand::Static(id) => {
+                validate_static_operand(program, *id, mir::Type::Scalar(mir::ScalarType::Bool))
+            }
             mir::Operand::Property { object, property } => validate_property_operand(
                 program,
                 function,

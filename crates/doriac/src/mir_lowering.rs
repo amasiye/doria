@@ -1571,10 +1571,6 @@ impl<'semantic> LoweringContext<'semantic> {
         self.constant_decl(expr).map(|decl| &decl.value)
     }
 
-    fn constant_type(&self, expr: &hir::Expr) -> Option<crate::const_eval::ConstType> {
-        self.constant_decl(expr).map(|decl| decl.ty)
-    }
-
     fn static_property(
         &self,
         class_name: &str,
@@ -1840,61 +1836,10 @@ fn inferred_class_type(expr: &hir::Expr, context: &LoweringContext) -> Option<Cl
     }
 }
 
-fn is_nullable_string_initializer(expr: &hir::Expr, context: &LoweringContext) -> bool {
-    match expr {
-        hir::Expr::Null { .. } => true,
-        hir::Expr::Grouped { expr, .. } => is_nullable_string_initializer(expr, context),
-        _ if matches!(
-            context.constant_type(expr),
-            Some(crate::const_eval::ConstType::NullableString | crate::const_eval::ConstType::Null)
-        ) =>
-        {
-            true
-        }
-        hir::Expr::Variable { name, span } => context
-            .lookup_local(name, *span)
-            .is_ok_and(|local| context.local_type(local) == mir::Type::NullableString),
-        hir::Expr::PropertyAccess { .. } => lower_property_place(expr, context)
-            .is_ok_and(|(_, _, ty)| ty == mir::Type::NullableString),
-        hir::Expr::StaticMember {
-            class_name,
-            member,
-            span,
-        } => context
-            .static_property(class_name, member, *span)
-            .is_ok_and(|(_, ty)| ty == mir::Type::NullableString),
-        hir::Expr::FunctionCall { name, span, .. } if name == "read_line" => true,
-        hir::Expr::FunctionCall { name, span, .. } => {
-            context.lookup_function(name, *span).is_ok_and(|signature| {
-                signature.return_type == mir::ReturnType::Value(mir::Type::NullableString)
-            })
-        }
-        hir::Expr::MethodCall {
-            object,
-            method,
-            span,
-            ..
-        } => inferred_class_type(object, context).is_some_and(|class| {
-            context
-                .lookup_method(class, method, *span)
-                .is_ok_and(|signature| {
-                    signature.return_type == mir::ReturnType::Value(mir::Type::NullableString)
-                })
-        }),
-        hir::Expr::StaticCall {
-            class_name,
-            method,
-            span,
-            ..
-        } => context.class_id_for_name(class_name).is_some_and(|class| {
-            context
-                .lookup_method(class, method, *span)
-                .is_ok_and(|signature| {
-                    signature.return_type == mir::ReturnType::Value(mir::Type::NullableString)
-                })
-        }),
-        _ => false,
-    }
+fn is_nullable_string_expression(expr: &hir::Expr, context: &LoweringContext) -> bool {
+    context
+        .expression_type(expr)
+        .is_ok_and(|ty| ty == mir::Type::NullableString)
 }
 
 fn is_string_local_initializer(expr: &hir::Expr, context: &LoweringContext) -> bool {
@@ -1979,6 +1924,7 @@ fn lower_string_var_decl(
 #[derive(Clone, Copy)]
 enum ScalarPlace {
     Local(mir::LocalId),
+    NullableLocal(mir::LocalId),
     Property {
         object: mir::LocalId,
         property: crate::class_layout::PropertyId,
@@ -1990,20 +1936,31 @@ impl ScalarPlace {
     fn operand(self) -> mir::Operand {
         match self {
             Self::Local(local) => mir::Operand::Local(local),
+            Self::NullableLocal(local) => mir::Operand::NullablePayload(local),
             Self::Property { object, property } => mir::Operand::Property { object, property },
             Self::Static(id) => mir::Operand::Static(id),
         }
     }
 
-    fn assignment(self, value: mir::Rvalue) -> mir::Statement {
+    fn assignment(self, value: mir::ValueExpression) -> mir::Statement {
         match self {
-            Self::Local(target) => mir::Statement::AssignLocal { target, value },
+            Self::Local(target) => mir::Statement::AssignLocal {
+                target,
+                value: mir::Rvalue::Value(value),
+            },
+            Self::NullableLocal(target) => mir::Statement::AssignLocal {
+                target,
+                value: mir::Rvalue::NullableScalar(mir::NullableScalarExpression::Value(value)),
+            },
             Self::Property { object, property } => mir::Statement::AssignProperty {
                 object,
                 property,
-                value,
+                value: mir::Rvalue::Value(value),
             },
-            Self::Static(target) => mir::Statement::AssignStatic { target, value },
+            Self::Static(target) => mir::Statement::AssignStatic {
+                target,
+                value: mir::Rvalue::Value(value),
+            },
         }
     }
 }
@@ -2022,7 +1979,14 @@ fn lower_scalar_place(
     match unparenthesized_place(expr) {
         hir::Expr::Variable { name, span } => {
             let local = context.lookup_local(name, *span)?;
-            Ok((ScalarPlace::Local(local), context.local_scalar_type(local)?))
+            match context.local_type(local) {
+                mir::Type::Scalar(ty) => Ok((ScalarPlace::Local(local), ty)),
+                mir::Type::NullableScalar(ty) => Ok((ScalarPlace::NullableLocal(local), ty)),
+                _ => Err(vec![unsupported(
+                    *span,
+                    "local is not a scalar mutation place",
+                )]),
+            }
         }
         hir::Expr::PropertyAccess { .. } => {
             let (object, property, ty) = lower_property_place(expr, context)?;
@@ -2068,7 +2032,7 @@ fn lower_assignment(
             &assignment.value,
             context,
         )?;
-        context.push_statement(place.assignment(mir::Rvalue::Value(value)));
+        context.push_statement(place.assignment(value));
         return Ok(());
     }
 
@@ -2181,7 +2145,7 @@ fn lower_increment(
 ) -> DiagnosticResult<()> {
     let (place, scalar_type) = lower_scalar_place(&increment.target, context)?;
     let value = lower_increment_value(place.operand(), scalar_type, &increment.op, increment.span)?;
-    context.push_statement(place.assignment(mir::Rvalue::Value(value)));
+    context.push_statement(place.assignment(value));
     Ok(())
 }
 
@@ -3654,8 +3618,8 @@ fn lower_condition(
                     || matches!(unparenthesized_place(right), hir::Expr::Null { .. })
                 {
                     lower_null_comparison(left, op, right, context)
-                } else if is_nullable_string_initializer(left, context)
-                    || is_nullable_string_initializer(right, context)
+                } else if is_nullable_string_expression(left, context)
+                    || is_nullable_string_expression(right, context)
                 {
                     Ok(mir::BoolExpression::NullableStringCompare {
                         op: lower_compare_op(op),
