@@ -55,6 +55,15 @@ a redundant second spelling — the `print`/`echo` redundancy Doria bans.
   through the element's own ordering (wrap the payload with a comparable key).
 - `Deque<T>` preserves insertion order at both ends.
 
+**Primitive key/element conformance (added post-acceptance).** This record
+depends on primitives satisfying `Hashable`/`Comparable` — `int` and `string`
+are the common keys — which decision 0096 settles: primitives conform to the core
+value interfaces by compiler-known conformance and satisfy generic constraints
+with no boxing. One consequence binds here: **`float` is neither `Hashable` nor
+totally `Comparable`** (`NaN`, signed zero, per 0087), so a float cannot key a
+`Dictionary` or `SortedDictionary`, nor be a `SortedSet` or `PriorityQueue`
+element.
+
 ### Deferred to the collections-runtime decision (not decided here)
 
 - Method surfaces, iteration machinery, and literal forms for the new types

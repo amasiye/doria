@@ -727,6 +727,7 @@ Authored subjects cite their actual record numbers:
 - Decision 0093: nullable types and narrowing — general `?T`, `??`, `?->`, exact `is`, shared forward dataflow facts, nullable runtime representation, and payload-derived ownership classification.
 - Decision 0094: ternary and compound-assignment operators — full `? :` (strict-`bool` condition, no Elvis, desugars to a two-arm `match`), plus `.=` (string concat-assign) and `??=` (null-coalescing assign) completing the compound-assignment family.
 - Decision 0095: operator surface completeness — `**`/`**=` and `<=>` are rejected as operators in favor of `Int::pow`/`Float::pow` and `Comparable::compare(): Ordering` (a core `Ordering { Less, Equal, Greater }` enum); `@`, backtick execution, and PHP `&`-references are rejected with fixits; spread/variadic user parameters defer to the named-arguments slice.
+- Decision 0096: primitives and interface conformance — primitives conform to the core value interfaces (`Equatable`/`Comparable`/`Hashable`) by compiler-known conformance and satisfy generic constraints with no boxing, `float` is neither `Hashable` nor totally `Comparable`, interface-typed slots stay class-only (a dynamically held primitive goes through `mixed`), and retroactive user-interface conformance for primitives is out of scope for v1.0.
 
 Subjects awaiting decision records are deliberately unnumbered:
 
