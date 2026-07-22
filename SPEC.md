@@ -1025,6 +1025,8 @@ For declared non-`void` return types, no reachable path may fall through the fun
 
 The program entrypoint may be `main(): int` or `main(): void`. `main(): int` returns an explicit process status. `main(): void` may fall through or use `return;` and maps normal completion to successful status `0`. Returning a value from `main(): void` is the same semantic error as returning a value from any other `void` function.
 
+`main` may also take command-line arguments through an optional parameter: `main(List<string> $args): int` (and the `: void` variant), per decision 0099. `$args` is the program's arguments, populated by the entry glue; `$args->count` is the argument count and there is no separate `argc`. This form depends on `List` and lands with the collections tier; the current compiler accepts only the parameterless forms.
+
 Calls are checked against declared parameter lists:
 
 ```doria
