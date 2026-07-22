@@ -50,9 +50,11 @@ Conditions are `bool`. Doria applies no truthiness, exactly as for `if`.
 
 `when` produces a value and appears wherever a value of its result type is expected — assignment right-hand side (`let $x = when ...`), `return` operand (`return when ...`), and call arguments. This resolves 0009's open "expression or statement" question: **`when` is an expression.** A `when` whose value is discarded in pure statement position is a "result discarded" lint, the same as any unused value — use `if` when no value is needed.
 
-### `given ... when` routes a false predicate to `else`
+### `given` predicates gate every branch
 
-The `given` prelude behaves exactly as with `if` (record 0020): scoped declarations, void setup actions, and `bool` predicates implicitly AND-ed in source order with the head condition. The single adaptation forced by "always yields a value": when a `given` predicate — or the head condition — is false, control falls to the next `else when` / `else`, never skipping the construct. A `when` can never be short-circuited away, because a value is owed. So `given ... if` skips its body on a false predicate; `given ... when` selects its `else`.
+The `given` prelude runs its scoped declarations and void setup statements **once**, then its `bool` predicates are **AND-ed with each `when` and `else when` condition** — not only the head. This extends record 0020's single-condition rule to the chain (and the same holds for `if` / `else if` by the mirror). So a conditional branch is selected only when the `given` predicates **and** that branch's own condition are all true; branches are tried in source order, and the effective condition of branch *i* is `(given predicates) && (cond_i)`.
+
+If no such conjunction holds — a `given` predicate is false, or every branch condition is false — the **`else`** value is returned. A false `given` predicate therefore does not fall through to the next `else when`; it disqualifies every conditional branch at once and selects `else`. This is also why `else` is mandatory: a `given ... when` must still yield a value when the predicates fail. (Contrast `given ... if`, which owes no value and simply skips its body.)
 
 ### `finally`
 
