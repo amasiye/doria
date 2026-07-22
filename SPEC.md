@@ -529,7 +529,9 @@ uint8  uint16  uint32  uint64
 
 Stage 14 implements `float32` as IEEE 754 binary32 and canonical `float`/`float64` as IEEE 754 binary64. `float` and `float64` are one semantic/runtime type; `float32` remains distinct, with no implicit width or integer conversion. Decision 0072 defines arithmetic, comparisons, special values, literal rounding, bool runtime values, and backend behavior.
 
-An unconstrained decimal integer literal defaults to `int`. A literal may instead adopt an expected integer type from a declaration, parameter, return, assignment, or typed binary operand when its mathematical value fits that type. Contextual literal typing is not an implicit conversion. Out-of-range literals are compile-time errors. Stage 13 adds no numeric suffixes and no hexadecimal, octal, or binary literal syntax.
+An unconstrained decimal integer literal defaults to `int`. A literal may instead adopt an expected integer type from a declaration, parameter, return, assignment, or typed binary operand when its mathematical value fits that type. Contextual literal typing is not an implicit conversion. Out-of-range literals are compile-time errors.
+
+Beyond decimal, Doria accepts hexadecimal (`0x`), octal (`0o`), and binary (`0b`) integer literals, and `_` digit separators for readability (`1_000_000`, `0xFF_FF`). There are **no typed numeric suffixes** (`100u8`): contextual literal typing already supplies a literal's width from its expected type, so a suffix would be a redundant second typing channel. These non-decimal forms and separators are accepted Doria syntax; their lexer slice is assigned in the numeric-literals work (Stage 13 itself added only decimal literals).
 
 Both operands of an integer binary operator must resolve to the same canonical integer type. Nonliteral values never widen or narrow implicitly, and Doria has no C-style integer promotions. The implemented integer operators are:
 
