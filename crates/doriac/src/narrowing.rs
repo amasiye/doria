@@ -94,7 +94,11 @@ impl MemberClassCatalog {
                             }
                         }
                         if method.name == "__construct" {
-                            for parameter in &method.params {
+                            for parameter in method
+                                .params
+                                .iter()
+                                .filter(|parameter| parameter.promoted_access.is_some())
+                            {
                                 if let Some(result) = class_name_in(&parameter.ty, &class.name) {
                                     catalog.properties.insert(
                                         (class.name.clone(), parameter.name.clone()),
@@ -1731,5 +1735,44 @@ impl Resolver {
 
     fn resolved_expr_class(&self, expr: &Expr) -> Option<String> {
         expression_class_name(expr, &self.resolution, None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_constructor_parameters_do_not_become_property_type_facts() {
+        let mut program = crate::parse_source(
+            "constructor-parameter-facts.doria",
+            r#"
+class Right {}
+class Wrong {}
+class Owner
+{
+    Right $item;
+    function __construct(Wrong $item) {}
+}
+"#,
+        )
+        .expect("fixture should parse");
+
+        let Item::Class(owner) = &mut program.items[2] else {
+            panic!("expected Owner class");
+        };
+        let crate::ast::ClassMember::Method(constructor) = &mut owner.members[1] else {
+            panic!("expected constructor");
+        };
+        constructor.params[0].promoted_access = None;
+
+        let catalog = MemberClassCatalog::from_program(&program);
+        assert_eq!(
+            catalog
+                .properties
+                .get(&("Owner".to_string(), "item".to_string()))
+                .map(String::as_str),
+            Some("Right")
+        );
     }
 }

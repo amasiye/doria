@@ -1597,7 +1597,7 @@ fn emit_expr(expr: &Expr, scopes: &PhpNameScopes) -> String {
             ..
         } => format!(
             "{}{}{property}",
-            emit_expr(object, scopes),
+            emit_member_receiver(object, scopes),
             if *null_safe { "?->" } else { "->" }
         ),
         Expr::MethodCall {
@@ -1608,7 +1608,7 @@ fn emit_expr(expr: &Expr, scopes: &PhpNameScopes) -> String {
             ..
         } => format!(
             "{}{}{method}({})",
-            emit_expr(object, scopes),
+            emit_member_receiver(object, scopes),
             if *null_safe { "?->" } else { "->" },
             args.iter()
                 .map(|arg| emit_expr(arg, scopes))
@@ -1730,6 +1730,22 @@ fn emit_expr(expr: &Expr, scopes: &PhpNameScopes) -> String {
             emit_expr(start, scopes),
             emit_expr(end, scopes)
         ),
+    }
+}
+
+fn emit_member_receiver(expr: &Expr, scopes: &PhpNameScopes) -> String {
+    let emitted = emit_expr(expr, scopes);
+    match expr {
+        Expr::Variable { .. }
+        | Expr::This { .. }
+        | Expr::PropertyAccess { .. }
+        | Expr::MethodCall { .. }
+        | Expr::FunctionCall { .. }
+        | Expr::StaticCall { .. }
+        | Expr::StaticMember { .. }
+        | Expr::New { .. }
+        | Expr::Grouped { .. } => emitted,
+        _ => format!("({emitted})"),
     }
 }
 

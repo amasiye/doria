@@ -4,8 +4,8 @@ use doriac::mir::{
     BasicBlock, BlockId, Class, ClassExpression, FloatBinaryOp, FloatExpression, FormatArgument,
     FormatExpression, Function, FunctionId, Local, LocalId, NullableClassExpression,
     NullableStringExpression, Operand, Program, Property, PropertyValue, PropertyValueSource,
-    ReturnType, Rvalue, ScalarType, ScalarValue, Statement, StringExpression, Terminator, Type,
-    ValueExpression,
+    ReturnType, Rvalue, ScalarType, ScalarValue, Statement, StaticId, StaticProperty, StaticValue,
+    StringExpression, Terminator, Type, ValueExpression,
 };
 use doriac::numeric::{FloatType, FloatValue, IntegerType, IntegerValue};
 
@@ -75,6 +75,100 @@ fn shared_validator_rejects_string_main_return() {
     assert!(error
         .message
         .contains("entry function must return void or int/int64"));
+}
+
+#[test]
+fn shared_validator_rejects_owned_nullable_class_statics() {
+    let mut program = class_program();
+    program.statics.push(StaticProperty {
+        id: StaticId(0),
+        class: ClassId(0),
+        name: "cached".to_string(),
+        ty: Type::NullableClass(ClassId(1)),
+        writable: false,
+        initializer: StaticValue::Null,
+    });
+
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("owned nullable statics must wait for static lifetime support");
+    assert!(error
+        .message
+        .contains("owned class type before owned static lifetime support"));
+}
+
+#[test]
+fn shared_validator_requires_control_flow_proof_for_nullable_class_unwraps() {
+    let mut invalid = class_program();
+    invalid.functions[0].locals = vec![
+        nullable_class_local(0, ClassId(0)),
+        class_local(1, ClassId(0)),
+    ];
+    invalid.functions[0].blocks[0].statements = vec![
+        Statement::AssignLocal {
+            target: LocalId(0),
+            value: Rvalue::NullableClass(NullableClassExpression::Null(ClassId(0))),
+        },
+        Statement::AssignLocal {
+            target: LocalId(1),
+            value: Rvalue::Class(ClassExpression::NullableLocalAssumeNonNull {
+                class: ClassId(0),
+                local: LocalId(0),
+                transfer: true,
+            }),
+        },
+    ];
+
+    let error = doriac::mir_validation::validate_program(&invalid)
+        .expect_err("an unchecked nullable class unwrap must be rejected");
+    assert!(error
+        .message
+        .contains("without a dominating presence proof"));
+
+    let mut valid = class_program();
+    valid.functions[0].locals = vec![
+        nullable_class_local(0, ClassId(0)),
+        class_local(1, ClassId(0)),
+    ];
+    valid.functions[0].blocks = vec![
+        BasicBlock {
+            id: BlockId(0),
+            statements: vec![Statement::AssignLocal {
+                target: LocalId(0),
+                value: Rvalue::NullableClass(NullableClassExpression::Null(ClassId(0))),
+            }],
+            terminator: Terminator::Branch {
+                condition: doriac::mir::BoolExpression::NullableClassIsPresent(Box::new(
+                    NullableClassExpression::Local {
+                        class: ClassId(0),
+                        local: LocalId(0),
+                        transfer: false,
+                    },
+                )),
+                then_block: BlockId(1),
+                else_block: BlockId(2),
+            },
+        },
+        BasicBlock {
+            id: BlockId(1),
+            statements: vec![Statement::AssignLocal {
+                target: LocalId(1),
+                value: Rvalue::Class(ClassExpression::NullableLocalAssumeNonNull {
+                    class: ClassId(0),
+                    local: LocalId(0),
+                    transfer: true,
+                }),
+            }],
+            terminator: Terminator::ReturnVoid,
+        },
+        BasicBlock {
+            id: BlockId(2),
+            statements: vec![],
+            terminator: Terminator::ReturnVoid,
+        },
+    ];
+
+    doriac::mir_validation::validate_program(&valid)
+        .expect("a dominating presence branch must authorize the unwrap");
 }
 
 #[test]
@@ -2679,6 +2773,12 @@ fn class_local(index: usize, class: ClassId) -> Local {
         synthetic: false,
         owned: true,
     }
+}
+
+fn nullable_class_local(index: usize, class: ClassId) -> Local {
+    let mut local = class_local(index, class);
+    local.ty = Type::NullableClass(class);
+    local
 }
 
 fn borrowed_class_local(index: usize, class: ClassId) -> Local {

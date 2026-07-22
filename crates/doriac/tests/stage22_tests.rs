@@ -578,7 +578,7 @@ fn nullable_native_fixture_lowers_to_valid_mir_and_interprets_exactly() {
         .expect("Stage 22 fixture should execute in the debug backend");
     assert_eq!(
         output.stdout,
-        b"42:7:typed:text:empty:label:none:label:fallback\n<fallback><label>\n"
+        b"42:7:typed:text:empty:label:none:label:fallback:ready\n<fallback><label>\n"
     );
     assert!(output.stderr.is_empty());
     assert_eq!(output.exit_status, 0);
@@ -1015,6 +1015,21 @@ function add(bool $condition, int $input): int
 "#,
     )
     .expect("known non-null expression types should establish flow facts at every assignment");
+}
+
+#[test]
+fn is_results_establish_non_null_facts_in_nullable_bool_slots() {
+    doriac::check_source(
+        "stage22-is-nullable-bool.doria",
+        r#"
+function matches(mixed $value): bool
+{
+    ?bool $matched = $value is int;
+    return $matched;
+}
+"#,
+    )
+    .expect("an `is` result is a concrete bool even in a nullable destination");
 }
 
 #[test]

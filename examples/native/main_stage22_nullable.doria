@@ -9,6 +9,11 @@ class Label
         return $this->text;
     }
 
+    function use(Label $other): void
+    {
+        echo ":used:" . $other->read();
+    }
+
     function __destruct()
     {
         echo "<" . $this->text . ">";
@@ -45,6 +50,12 @@ function maybeLabel(bool $present): ?Label
     return null;
 }
 
+function inspectLabel(Label $label): bool
+{
+    echo ":inspected:" . $label->read();
+    return true;
+}
+
 function main(): void
 {
     let $number = maybeInt(true);
@@ -78,5 +89,10 @@ function main(): void
     }
     let $fallbackLabel = maybeLabel(false) ?? new Label("fallback");
     echo ":" . $fallbackLabel->read();
+    ?bool $ready = true;
+    if ($ready ?? inspectLabel(new Label("skipped-fallback"))) {
+        echo ":ready";
+    }
+    $missingLabel?->use(new Label("skipped-argument"));
     echo "\n";
 }

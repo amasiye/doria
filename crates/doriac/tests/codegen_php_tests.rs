@@ -1917,3 +1917,24 @@ class Limits { static int $minimum = MINIMUM; }
         }
     }
 }
+
+#[test]
+fn php_backend_parenthesizes_composite_member_receivers() {
+    let php = doriac::compile_source_to_php(
+        "coalesced-receiver.doria",
+        r#"
+class Label
+{
+    function text(): string { return "label"; }
+}
+
+function read(?Label $left, ?Label $right): ?string
+{
+    return ($left ?? $right)?->text();
+}
+"#,
+    )
+    .expect("coalesced member receivers should lower to PHP");
+
+    assert!(php.contains("($left ?? $right)?->text()"), "{php}");
+}

@@ -1092,6 +1092,8 @@ impl Parser {
                 span: token.span,
             }),
             TokenKind::Null => Some(Expr::Null { span: token.span }),
+            TokenKind::When => self.parse_unsupported_when(token.span.start, false),
+            TokenKind::Given => self.parse_unsupported_when(token.span.start, true),
             TokenKind::New => self.parse_new(token.span.start),
             TokenKind::LeftBracket => self.parse_array(token.span.start),
             TokenKind::LeftParen => {
@@ -1414,9 +1416,23 @@ impl Parser {
 
     fn parse_argument_list_after_open(&mut self) -> Option<Vec<Expr>> {
         let mut args = Vec::new();
+        let mut named_argument_span = None;
         if !self.check(&TokenKind::RightParen) {
             loop {
-                args.push(self.parse_expression()?);
+                let is_named = matches!(self.peek().kind, TokenKind::Identifier(_))
+                    && self
+                        .tokens
+                        .get(self.current + 1)
+                        .is_some_and(|token| matches!(token.kind, TokenKind::Colon));
+                if is_named {
+                    let name = self.advance().clone();
+                    self.advance();
+                    let value = self.parse_expression()?;
+                    named_argument_span.get_or_insert(name.span.merge(value.span()));
+                    args.push(value);
+                } else {
+                    args.push(self.parse_expression()?);
+                }
                 if !self.match_kind(&TokenKind::Comma) {
                     break;
                 }
@@ -1426,7 +1442,61 @@ impl Parser {
             }
         }
         self.expect(TokenKind::RightParen, "expected `)` after arguments")?;
+        if let Some(span) = named_argument_span {
+            self.diagnostics.push(Diagnostic::unsupported_stage(
+                "E0514",
+                "named arguments are accepted syntax but are not available until Stage 23a",
+                span,
+            ));
+        }
         Some(args)
+    }
+
+    fn parse_unsupported_when(&mut self, start: usize, has_given: bool) -> Option<Expr> {
+        if has_given {
+            self.parse_block()?;
+            self.expect(TokenKind::When, "expected `when` after `given` block")?;
+        }
+
+        self.expect(TokenKind::LeftParen, "expected `(` after when")?;
+        self.parse_expression()?;
+        self.expect(TokenKind::RightParen, "expected `)` after when condition")?;
+        if self.match_kind(&TokenKind::Colon) {
+            self.parse_type_ref()?;
+        }
+        let mut end = self.parse_block()?.span.end;
+
+        let mut has_else = false;
+        while self.match_kind(&TokenKind::Else) {
+            if self.match_kind(&TokenKind::When) {
+                self.expect(TokenKind::LeftParen, "expected `(` after `else when`")?;
+                self.parse_expression()?;
+                self.expect(TokenKind::RightParen, "expected `)` after when condition")?;
+                end = self.parse_block()?.span.end;
+            } else {
+                has_else = true;
+                end = self.parse_block()?.span.end;
+                break;
+            }
+        }
+
+        if !has_else {
+            self.error(
+                "value-returning `when` requires an `else` block",
+                self.peek().span,
+            );
+        }
+        if self.match_kind(&TokenKind::Finally) {
+            end = self.parse_block()?.span.end;
+        }
+
+        let span = Span::new(start, end);
+        self.diagnostics.push(Diagnostic::unsupported_stage(
+            "E0513",
+            "`when`, `given`, and control-flow `finally` are accepted syntax but are not available until Stage 28a",
+            span,
+        ));
+        Some(Expr::Null { span })
     }
 
     fn parse_type_ref(&mut self) -> Option<TypeRef> {
@@ -1780,6 +1850,9 @@ fn token_name(kind: &TokenKind) -> &'static str {
         TokenKind::As => "as",
         TokenKind::If => "if",
         TokenKind::Else => "else",
+        TokenKind::When => "when",
+        TokenKind::Given => "given",
+        TokenKind::Finally => "finally",
         TokenKind::While => "while",
         TokenKind::For => "for",
         TokenKind::Break => "break",

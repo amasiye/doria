@@ -1,6 +1,6 @@
 //! Backend-independent structural and type validation for native MIR.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::backend::BackendError;
 use crate::class_layout::{compute_class_layout, ClassId, FieldType};
@@ -20,18 +20,24 @@ pub fn validate_program(program: &mir::Program) -> Result<(), BackendError> {
         }
         class_in(program, property.class)?;
         validate_type(program, property.ty)?;
+        if matches!(
+            property.ty,
+            mir::Type::Class(_) | mir::Type::NullableClass(_)
+        ) {
+            return Err(malformed_mir(format!(
+                "static{} uses an owned class type before owned static lifetime support",
+                property.id.0
+            )));
+        }
         let valid = match (&property.initializer, property.ty) {
             (
                 mir::StaticValue::Scalar(value),
                 mir::Type::Scalar(ty) | mir::Type::NullableScalar(ty),
             ) => value.ty() == ty,
             (mir::StaticValue::String(_), mir::Type::String | mir::Type::NullableString)
-            | (
-                mir::StaticValue::Null,
-                mir::Type::NullableScalar(_)
-                | mir::Type::NullableString
-                | mir::Type::NullableClass(_),
-            ) => true,
+            | (mir::StaticValue::Null, mir::Type::NullableScalar(_) | mir::Type::NullableString) => {
+                true
+            }
             _ => false,
         };
         if !valid {
@@ -262,6 +268,7 @@ fn validate_function(program: &mir::Program, function: &mir::Function) -> Result
         }
         validate_terminator(program, function, &block.terminator, reachable[block.id.0])?;
     }
+    validate_nullable_class_presence(function)?;
     validate_class_local_lifetimes(function)
 }
 
@@ -1369,6 +1376,7 @@ enum ClassLocalAccess<'a> {
 #[derive(Default)]
 struct ClassLocalAccesses<'a> {
     accesses: Vec<ClassLocalAccess<'a>>,
+    nullable_assumptions: Vec<mir::LocalId>,
 }
 
 impl<'a> ClassLocalAccesses<'a> {
@@ -1399,8 +1407,16 @@ impl<'a> ClassLocalAccesses<'a> {
         self.accesses.push(ClassLocalAccess::BeginCall);
     }
 
+    fn assume_nullable_present(&mut self, local: mir::LocalId) {
+        self.nullable_assumptions.push(local);
+    }
+
     fn iter(&self) -> impl Iterator<Item = ClassLocalAccess<'a>> + '_ {
         self.accesses.iter().copied()
+    }
+
+    fn nullable_assumptions(&self) -> impl Iterator<Item = mir::LocalId> + '_ {
+        self.nullable_assumptions.iter().copied()
     }
 
     fn borrowed(&self) -> impl Iterator<Item = mir::LocalId> + '_ {
@@ -1678,12 +1694,18 @@ fn collect_class_expression_local_accesses<'a>(
             local,
             transfer: true,
             ..
-        } => accesses.transfer(*local),
+        } => {
+            accesses.assume_nullable_present(*local);
+            accesses.transfer(*local);
+        }
         mir::ClassExpression::NullableLocalAssumeNonNull {
             local,
             transfer: false,
             ..
-        } => accesses.borrow(*local),
+        } => {
+            accesses.assume_nullable_present(*local);
+            accesses.borrow(*local);
+        }
         mir::ClassExpression::Property {
             object, property, ..
         } => accesses.borrow_property(*object, *property),
@@ -2052,6 +2074,191 @@ fn apply_class_local_accesses(
         }
         if matches!(access, ClassLocalAccess::Transfer(_)) {
             moved.insert(local);
+        }
+    }
+    Ok(())
+}
+
+fn validate_nullable_class_presence(function: &mir::Function) -> Result<(), BackendError> {
+    let mut entries = vec![None; function.blocks.len()];
+    entries[function.entry_block.0] = Some(HashSet::new());
+    let mut pending = VecDeque::from([function.entry_block]);
+
+    while let Some(block_id) = pending.pop_front() {
+        let block = block_in(function, block_id)?;
+        let Some(mut present) = entries[block_id.0].clone() else {
+            continue;
+        };
+        for statement in &block.statements {
+            apply_nullable_class_presence_statement(function, statement, &mut present)?;
+        }
+
+        match &block.terminator {
+            mir::Terminator::Jump(target) => {
+                if merge_definitely_present(&mut entries[target.0], &present) {
+                    pending.push_back(*target);
+                }
+            }
+            mir::Terminator::Branch {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                for (target, condition_value) in [(*then_block, true), (*else_block, false)] {
+                    if constant_bool_expression(condition)
+                        .is_some_and(|value| value != condition_value)
+                    {
+                        continue;
+                    }
+                    let mut outgoing = present.clone();
+                    apply_nullable_class_presence_condition(
+                        condition,
+                        condition_value,
+                        &mut outgoing,
+                    );
+                    if merge_definitely_present(&mut entries[target.0], &outgoing) {
+                        pending.push_back(target);
+                    }
+                }
+            }
+            mir::Terminator::Return(_)
+            | mir::Terminator::ReturnVoid
+            | mir::Terminator::Panic(_)
+            | mir::Terminator::Unreachable => {}
+        }
+    }
+
+    for block in &function.blocks {
+        let Some(mut present) = entries[block.id.0].clone() else {
+            continue;
+        };
+        for statement in &block.statements {
+            validate_nullable_class_assumptions(
+                &collect_statement_class_local_accesses(statement),
+                &present,
+            )?;
+            apply_nullable_class_presence_statement(function, statement, &mut present)?;
+        }
+        validate_nullable_class_assumptions(
+            &collect_terminator_class_local_accesses(&block.terminator),
+            &present,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn merge_definitely_present(
+    destination: &mut Option<HashSet<mir::LocalId>>,
+    incoming: &HashSet<mir::LocalId>,
+) -> bool {
+    match destination {
+        Some(current) => {
+            let merged = current
+                .intersection(incoming)
+                .copied()
+                .collect::<HashSet<_>>();
+            if *current == merged {
+                false
+            } else {
+                *current = merged;
+                true
+            }
+        }
+        None => {
+            *destination = Some(incoming.clone());
+            true
+        }
+    }
+}
+
+fn apply_nullable_class_presence_statement(
+    function: &mir::Function,
+    statement: &mir::Statement,
+    present: &mut HashSet<mir::LocalId>,
+) -> Result<(), BackendError> {
+    match statement {
+        mir::Statement::AssignLocal { target, value }
+            if matches!(local_in(function, *target)?.ty, mir::Type::NullableClass(_)) =>
+        {
+            let value_is_present = match value {
+                mir::Rvalue::NullableClass(value) => {
+                    nullable_class_expression_is_present(value, present)
+                }
+                _ => false,
+            };
+            if value_is_present {
+                present.insert(*target);
+            } else {
+                present.remove(target);
+            }
+        }
+        mir::Statement::DropClass { local, .. } => {
+            present.remove(local);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn nullable_class_expression_is_present(
+    expression: &mir::NullableClassExpression,
+    present: &HashSet<mir::LocalId>,
+) -> bool {
+    match expression {
+        mir::NullableClassExpression::Class(_) => true,
+        mir::NullableClassExpression::Local { local, .. } => present.contains(local),
+        mir::NullableClassExpression::Coalesce { left, right, .. } => {
+            nullable_class_expression_is_present(left, present)
+                || nullable_class_expression_is_present(right, present)
+        }
+        mir::NullableClassExpression::Null(_)
+        | mir::NullableClassExpression::Property { .. }
+        | mir::NullableClassExpression::Call { .. }
+        | mir::NullableClassExpression::NullSafeProperty { .. }
+        | mir::NullableClassExpression::NullSafeCall { .. } => false,
+    }
+}
+
+fn apply_nullable_class_presence_condition(
+    condition: &mir::BoolExpression,
+    when_true: bool,
+    present: &mut HashSet<mir::LocalId>,
+) {
+    match condition {
+        mir::BoolExpression::NullableClassIsPresent(value) => {
+            if let mir::NullableClassExpression::Local { local, .. } = value.as_ref() {
+                if when_true {
+                    present.insert(*local);
+                } else {
+                    present.remove(local);
+                }
+            }
+        }
+        mir::BoolExpression::Not(value) => {
+            apply_nullable_class_presence_condition(value, !when_true, present)
+        }
+        mir::BoolExpression::Binary { op, left, right } => match (op, when_true) {
+            (mir::BoolBinaryOp::And, true) | (mir::BoolBinaryOp::Or, false) => {
+                apply_nullable_class_presence_condition(left, when_true, present);
+                apply_nullable_class_presence_condition(right, when_true, present);
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
+fn validate_nullable_class_assumptions(
+    accesses: &ClassLocalAccesses<'_>,
+    present: &HashSet<mir::LocalId>,
+) -> Result<(), BackendError> {
+    for local in accesses.nullable_assumptions() {
+        if !present.contains(&local) {
+            return Err(malformed_mir(format!(
+                "nullable class local local{} is assumed non-null without a dominating presence proof",
+                local.0
+            )));
         }
     }
     Ok(())

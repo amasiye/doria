@@ -99,13 +99,15 @@ reopen with the named-arguments/variadic work.
   operators — consistent with the companion-API / interface surface.
 - `Ordering` (core enum) and `Comparable::compare` are the ordering foundation the
   sorted collections (0092) build on.
-- No new operator tokens are added; `**`/`<=>`/`@`/backtick/`&$` are
-  recognized-and-rejected with fixits.
+- No accepted operator tokens are added; `**`/`<=>`/`@`/backtick/`&$` are
+  recognized-and-rejected with targeted migration guidance. Rewrites that need
+  operand or type context belong to `doriac migrate php`, not unsafe lexical
+  fixits.
 
 ## Affected components
 
-Semantic analysis / diagnostics (recognize-and-reject `**`/`<=>`/`@`/backtick/`&$`
-with fixits), the numeric companion APIs (`Int::pow`, `Float::pow`), core stdlib
+Lexer diagnostics (recognize-and-reject `**`/`<=>`/`@`/backtick/`&$` with
+targeted guidance), the numeric companion APIs (`Int::pow`, `Float::pow`), core stdlib
 (`Ordering` enum, `Comparable::compare`), `doriac migrate php` (the fixit table),
 plan §9 core layer and the §12 catalogue, and SPEC's operator/rejection notes when
 the diagnostics and methods land (SPEC tracks the implemented surface).

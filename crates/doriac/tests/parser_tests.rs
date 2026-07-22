@@ -997,24 +997,58 @@ class Parser
 }
 
 #[test]
-fn parses_planned_control_flow_words_as_declaration_names() {
-    let program = doriac::parse_source(
+fn accepted_when_grammar_reports_its_implementation_stage_without_parse_errors() {
+    let diagnostics = doriac::parse_source(
         "test.doria",
         r#"
-function when(): void {}
-class finally {}
+let $value = given {
+    let $ready = true;
+} when ($ready): int {
+    return 1;
+} else when (false) {
+    return 2;
+} else {
+    return 3;
+} finally {
+};
 "#,
     )
-    .expect("parse should succeed");
+    .expect_err("accepted future control flow must stop before semantics");
 
-    assert!(matches!(
-        &program.items[0],
-        Item::Function(function) if function.name == "when"
-    ));
-    assert!(matches!(
-        &program.items[1],
-        Item::Class(class_decl) if class_decl.name == "finally"
-    ));
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "E0513"));
+    assert!(diagnostics
+        .iter()
+        .all(|diagnostic| !diagnostic.code.starts_with('P')));
+}
+
+#[test]
+fn accepted_named_argument_grammar_is_shared_by_every_call_form() {
+    let diagnostics = doriac::parse_source(
+        "test.doria",
+        r#"
+function main(): void
+{
+    save(name: "free");
+    $store->save(name: "method");
+    Store::save(name: "static");
+    new Store(name: "constructor");
+}
+"#,
+    )
+    .expect_err("named arguments must stop before their binding stage");
+
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "E0514")
+            .count(),
+        4
+    );
+    assert!(diagnostics
+        .iter()
+        .all(|diagnostic| !diagnostic.code.starts_with('P')));
 }
 
 #[test]

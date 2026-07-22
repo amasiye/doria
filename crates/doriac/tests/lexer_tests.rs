@@ -285,10 +285,39 @@ fn lexes_future_reserved_words() {
 }
 
 #[test]
-fn lexes_planned_control_flow_words_as_identifiers() {
-    let kinds = token_kinds("when finally");
-    assert!(matches!(kinds[0], TokenKind::Identifier(ref word) if word == "when"));
-    assert!(matches!(kinds[1], TokenKind::Identifier(ref word) if word == "finally"));
+fn lexes_accepted_control_flow_keywords() {
+    let kinds = token_kinds("when given finally");
+    assert!(matches!(kinds[0], TokenKind::When));
+    assert!(matches!(kinds[1], TokenKind::Given));
+    assert!(matches!(kinds[2], TokenKind::Finally));
+}
+
+#[test]
+fn rejected_php_operator_surfaces_have_targeted_diagnostics() {
+    for (source, expected) in [
+        ("2 ** 3", "typed numeric `pow` API"),
+        ("$value **= 3", "typed numeric `pow` API"),
+        ("$left <=> $right", "`Comparable`"),
+        ("@$fallible", "error suppression"),
+        ("`uname`", "backtick process execution"),
+        ("&$value", "ownership and writable borrowing"),
+    ] {
+        let source = SourceFile::new("test.doria", source);
+        let diagnostics = Lexer::new(&source)
+            .lex()
+            .expect_err("retired PHP operator syntax must be rejected");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "L0002"
+                    && (diagnostic.message.contains(expected)
+                        || diagnostic
+                            .help
+                            .as_deref()
+                            .is_some_and(|help| help.contains(expected)))
+            }),
+            "expected targeted guidance containing {expected}, got {diagnostics:#?}"
+        );
+    }
 }
 
 #[test]
