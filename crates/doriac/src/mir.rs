@@ -948,6 +948,9 @@ pub enum Statement {
         local: LocalId,
         class: ClassId,
     },
+    DropString {
+        local: LocalId,
+    },
     CollectionAdd {
         collection: LocalId,
         value: Rvalue,
@@ -1020,6 +1023,7 @@ fn statement_class_temporary_capacity(statement: &Statement) -> usize {
         }
         Statement::EchoStringLiteral(_)
         | Statement::DropClass { .. }
+        | Statement::DropString { .. }
         | Statement::DropCollection { .. }
         | Statement::WriteStreamBytes { .. } => 0,
         Statement::EchoString(value) | Statement::WriteStderr(value) => {
@@ -2082,6 +2086,7 @@ impl fmt::Display for Statement {
             Statement::DropClass { local, class } => {
                 write!(formatter, "drop class#{} local{}", class.0, local.0)
             }
+            Statement::DropString { local } => write!(formatter, "drop string local{}", local.0),
             Statement::CollectionAdd {
                 collection, value, ..
             } => {

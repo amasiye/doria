@@ -971,6 +971,16 @@ fn lower_statement_sequence(
                 lower_loop_control(*span, LoopControl::Continue, context)?;
             }
             hir::Stmt::Expr { expr, span } => {
+                if let hir::Expr::FunctionCall {
+                    name,
+                    args,
+                    span: call_span,
+                } = expr
+                {
+                    if lower_byte_file_write_statement(name, args, *call_span, context)? {
+                        continue;
+                    }
+                }
                 materialize_nested_collection_places(expr, false, context)?;
                 if let hir::Expr::MethodCall {
                     object,
@@ -1046,20 +1056,6 @@ fn lower_statement_sequence(
                             path: lower_string_expression(path, context)?,
                             contents: lower_string_expression(contents, context)?,
                         });
-                    } else if matches!(name.as_str(), "write_file_bytes" | "append_file_bytes") {
-                        let [path, contents] = args.as_slice() else {
-                            return Err(vec![unsupported(
-                                *call_span,
-                                format!("{name} expects 2 arguments"),
-                            )]);
-                        };
-                        let path = lower_string_expression(path, context)?;
-                        let contents = lower_bytes_local(contents, context)?.0;
-                        context.push_statement(mir::Statement::WriteFileBytes {
-                            path,
-                            contents,
-                            append: name == "append_file_bytes",
-                        });
                     } else if matches!(name.as_str(), "write_stdout_bytes" | "write_stderr_bytes") {
                         let [contents] = args.as_slice() else {
                             return Err(vec![unsupported(
@@ -1127,11 +1123,9 @@ fn lower_if_tree(
     context: &mut LoweringContext,
 ) -> DiagnosticResult<Vec<mir::BlockId>> {
     context.current_block = Some(condition_block);
-    materialize_nested_collection_places(&if_stmt.condition, false, context)?;
-    let condition = lower_condition(&if_stmt.condition, context)?;
     let then_block = context.create_block();
     let else_block = context.create_block();
-    context.terminate_condition(condition, then_block, else_block);
+    lower_condition_to_blocks(&if_stmt.condition, then_block, else_block, context)?;
 
     let mut fallthrough_blocks =
         lower_scoped_block(&if_stmt.then_block, then_block, return_type, context)?;
@@ -1160,9 +1154,7 @@ fn lower_while_statement(
 
     context.terminate_current(mir::Terminator::Jump(header_block));
     context.current_block = Some(header_block);
-    materialize_nested_collection_places(&while_stmt.condition, false, context)?;
-    let condition = lower_condition(&while_stmt.condition, context)?;
-    context.terminate_condition(condition, body_block, exit_block);
+    lower_condition_to_blocks(&while_stmt.condition, body_block, exit_block, context)?;
 
     context.push_loop_targets(LoopTargets {
         continue_block: header_block,
@@ -1213,17 +1205,16 @@ fn lower_for_statement_in_scope(
     context.terminate_current(mir::Terminator::Jump(header_block));
     context.current_block = Some(header_block);
     if let Some(condition) = &for_stmt.condition {
-        materialize_nested_collection_places(condition, false, context)?;
+        lower_condition_to_blocks(condition, body_block, exit_block, context)?;
+    } else {
+        context.terminate_condition(
+            mir::BoolExpression::Use {
+                operand: mir::Operand::Scalar(mir::ScalarValue::Bool(true)),
+            },
+            body_block,
+            exit_block,
+        );
     }
-    let condition = for_stmt
-        .condition
-        .as_ref()
-        .map(|condition| lower_condition(condition, context))
-        .transpose()?
-        .unwrap_or(mir::BoolExpression::Use {
-            operand: mir::Operand::Scalar(mir::ScalarValue::Bool(true)),
-        });
-    context.terminate_condition(condition, body_block, exit_block);
 
     context.push_loop_targets(LoopTargets {
         continue_block: increment_block,
@@ -2091,6 +2082,21 @@ impl<'semantic> LoweringContext<'semantic> {
             name,
             ty,
             writable,
+            owned: false,
+            synthetic: true,
+        });
+        id
+    }
+
+    fn declare_string_temp(&mut self) -> mir::LocalId {
+        let id = mir::LocalId(self.locals.len());
+        let name = format!("_string{}", self.temp_counter);
+        self.temp_counter += 1;
+        self.locals.push(mir::Local {
+            id,
+            name,
+            ty: mir::Type::String,
+            writable: false,
             owned: false,
             synthetic: true,
         });
@@ -4251,6 +4257,42 @@ fn append_string_concat_parts(
     }
 }
 
+fn lower_byte_file_write_statement(
+    name: &str,
+    args: &[hir::Expr],
+    span: Span,
+    context: &mut LoweringContext,
+) -> DiagnosticResult<bool> {
+    if !matches!(name, "write_file_bytes" | "append_file_bytes") {
+        return Ok(false);
+    }
+    let [path, contents] = args else {
+        return Err(vec![unsupported(
+            span,
+            format!("{name} expects 2 arguments"),
+        )]);
+    };
+
+    materialize_nested_collection_places(path, false, context)?;
+    let path = lower_string_expression(path, context)?;
+    let path_local = context.declare_string_temp();
+    context.push_statement(mir::Statement::AssignLocal {
+        target: path_local,
+        value: mir::Rvalue::String(path),
+    });
+
+    materialize_nested_collection_places(contents, false, context)?;
+    materialize_collection_place(contents, false, context)?;
+    let contents = lower_bytes_local(contents, context)?.0;
+    context.push_statement(mir::Statement::WriteFileBytes {
+        path: mir::StringExpression::Local(path_local),
+        contents,
+        append: name == "append_file_bytes",
+    });
+    context.push_statement(mir::Statement::DropString { local: path_local });
+    Ok(true)
+}
+
 fn lower_statement_call(
     name: &str,
     args: &[hir::Expr],
@@ -4633,6 +4675,49 @@ fn local_rvalue(local: mir::LocalId, ty: mir::Type, transfer: bool) -> mir::Rval
                 local,
                 transfer,
             })
+        }
+    }
+}
+
+fn lower_condition_to_blocks(
+    expr: &hir::Expr,
+    then_block: mir::BlockId,
+    else_block: mir::BlockId,
+    context: &mut LoweringContext,
+) -> DiagnosticResult<()> {
+    match unparenthesized_place(expr) {
+        hir::Expr::Unary {
+            op: hir::UnaryOp::Not,
+            expr,
+            ..
+        } => lower_condition_to_blocks(expr, else_block, then_block, context),
+        hir::Expr::Binary {
+            left,
+            op: hir::BinaryOp::And,
+            right,
+            ..
+        } => {
+            let right_block = context.create_block();
+            lower_condition_to_blocks(left, right_block, else_block, context)?;
+            context.current_block = Some(right_block);
+            lower_condition_to_blocks(right, then_block, else_block, context)
+        }
+        hir::Expr::Binary {
+            left,
+            op: hir::BinaryOp::Or,
+            right,
+            ..
+        } => {
+            let right_block = context.create_block();
+            lower_condition_to_blocks(left, then_block, right_block, context)?;
+            context.current_block = Some(right_block);
+            lower_condition_to_blocks(right, then_block, else_block, context)
+        }
+        _ => {
+            materialize_nested_collection_places(expr, false, context)?;
+            let condition = lower_condition(expr, context)?;
+            context.terminate_condition(condition, then_block, else_block);
+            Ok(())
         }
     }
 }

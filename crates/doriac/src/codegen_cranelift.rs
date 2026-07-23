@@ -1043,6 +1043,14 @@ fn lower_statement(
             };
             lower_drop_class_value_checked(builder, value, class, resources)?;
         }
+        mir::Statement::DropString { local } => {
+            let pointer = resources.module.target_config().pointer_type();
+            let slot = local_slot(resources.local_slots, *local)?;
+            let value = builder.ins().stack_load(pointer, slot, 0);
+            let zero = builder.ins().iconst(pointer, 0);
+            builder.ins().stack_store(zero, slot, 0);
+            release_string(builder, value, resources)?;
+        }
         mir::Statement::CollectionAdd {
             collection,
             value,
@@ -2257,12 +2265,25 @@ fn lower_drop_collection_value(
     let body = builder.create_block();
     let free = builder.create_block();
     builder.append_block_param(header, pointer);
-    builder.ins().jump(header, &[BlockArg::Value(zero)]);
+    builder.ins().jump(header, &[BlockArg::Value(length)]);
     builder.switch_to_block(header);
-    let index = builder.block_params(header)[0];
-    let more = builder.ins().icmp(IntCC::UnsignedLessThan, index, length);
+    let remaining = builder.block_params(header)[0];
+    let more = builder.ins().icmp(IntCC::NotEqual, remaining, zero);
     builder.ins().brif(more, body, &[], free, &[]);
     builder.switch_to_block(body);
+    let one = builder.ins().iconst(pointer, 1);
+    let index = builder.ins().isub(remaining, one);
+    let value_word = runtime_call(
+        builder,
+        COLLECTION_VALUE_AT,
+        &[pointer, pointer, pointer],
+        Some(types::I64),
+        &[resources.current_frame, collection, index],
+        resources,
+    )?
+    .ok_or_else(|| backend_failure("collection value read produced no result"))?;
+    let value = collection_word_to_value(builder, value_word, definition.value, pointer)?;
+    lower_drop_stored_value(builder, value, definition.value, resources)?;
     if let Some(key_type) = definition.key {
         let key_word = runtime_call(
             builder,
@@ -2276,20 +2297,7 @@ fn lower_drop_collection_value(
         let key = collection_word_to_value(builder, key_word, key_type, pointer)?;
         lower_drop_stored_value(builder, key, key_type, resources)?;
     }
-    let value_word = runtime_call(
-        builder,
-        COLLECTION_VALUE_AT,
-        &[pointer, pointer, pointer],
-        Some(types::I64),
-        &[resources.current_frame, collection, index],
-        resources,
-    )?
-    .ok_or_else(|| backend_failure("collection value read produced no result"))?;
-    let value = collection_word_to_value(builder, value_word, definition.value, pointer)?;
-    lower_drop_stored_value(builder, value, definition.value, resources)?;
-    let one = builder.ins().iconst(pointer, 1);
-    let next = builder.ins().iadd(index, one);
-    builder.ins().jump(header, &[BlockArg::Value(next)]);
+    builder.ins().jump(header, &[BlockArg::Value(index)]);
     builder.switch_to_block(free);
     let _ = runtime_call(
         builder,

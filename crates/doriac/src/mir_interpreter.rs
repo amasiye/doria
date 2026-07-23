@@ -671,6 +671,21 @@ impl Interpreter<'_> {
                     .tasks
                     .push(EvaluationTask::DropClass(local));
             }
+            mir::Statement::DropString { local } => {
+                let value = self
+                    .current_frame_mut()?
+                    .locals
+                    .get_mut(local.0)
+                    .and_then(Option::take)
+                    .ok_or_else(|| {
+                        InterpreterError::new("string temporary was dropped before initialization")
+                    })?;
+                if !matches!(value, LocalValue::String(_)) {
+                    return Err(InterpreterError::new(
+                        "string drop references a non-string local",
+                    ));
+                }
+            }
             mir::Statement::CollectionAdd {
                 collection,
                 value,

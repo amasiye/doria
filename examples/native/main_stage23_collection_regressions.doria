@@ -136,4 +136,6 @@ function main(): void
         CollectionEvaluationOrder::value()
     );
     echo "insert {$insertOrder[1]}\n";
+
+    List<Token> $reverseDrop = [new Token(7), new Token(8)];
 }

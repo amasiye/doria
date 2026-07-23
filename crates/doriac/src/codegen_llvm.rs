@@ -718,6 +718,14 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 build(self.builder.build_store(slot, pointer.const_null()))?;
                 self.drop_class_value_checked(value, class)?;
             }
+            mir::Statement::DropString { local } => {
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let slot = local_slot(&self.local_slots, *local)?;
+                let value = build(self.builder.build_load(pointer, slot, "string.drop"))?
+                    .into_pointer_value();
+                build(self.builder.build_store(slot, pointer.const_null()))?;
+                self.release_string(value)?;
+            }
             mir::Statement::CollectionAdd {
                 collection,
                 value,
@@ -1992,10 +2000,7 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
             self.builder
                 .build_alloca(usize_type, "collection.drop.index"),
         )?;
-        build(
-            self.builder
-                .build_store(index_slot, usize_type.const_zero()),
-        )?;
+        build(self.builder.build_store(index_slot, length))?;
         let header = self
             .context
             .append_basic_block(function, "collection.drop.header");
@@ -2014,43 +2019,43 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
         ))?
         .into_int_value();
         let more = build(self.builder.build_int_compare(
-            IntPredicate::ULT,
+            IntPredicate::NE,
             index,
-            length,
+            usize_type.const_zero(),
             "collection.drop.more",
         ))?;
         build(self.builder.build_conditional_branch(more, body, free))?;
         self.builder.position_at_end(body);
+        let current = build(self.builder.build_int_sub(
+            index,
+            usize_type.const_int(1, false),
+            "collection.drop.current",
+        ))?;
+        let value_word = self
+            .call_runtime(
+                COLLECTION_VALUE_AT,
+                &[pointer.into(), pointer.into(), usize_type.into()],
+                Some(self.context.i64_type().into()),
+                &[self.current_frame.into(), collection.into(), current.into()],
+            )?
+            .ok_or_else(|| backend_failure("collection value read produced no result"))?
+            .into_int_value();
+        let value = self.collection_word_to_value(value_word, definition.value)?;
+        self.drop_stored_value(value, definition.value)?;
         if let Some(key_type) = definition.key {
             let key_word = self
                 .call_runtime(
                     COLLECTION_KEY_AT,
                     &[pointer.into(), pointer.into(), usize_type.into()],
                     Some(self.context.i64_type().into()),
-                    &[self.current_frame.into(), collection.into(), index.into()],
+                    &[self.current_frame.into(), collection.into(), current.into()],
                 )?
                 .ok_or_else(|| backend_failure("collection key read produced no result"))?
                 .into_int_value();
             let key = self.collection_word_to_value(key_word, key_type)?;
             self.drop_stored_value(key, key_type)?;
         }
-        let value_word = self
-            .call_runtime(
-                COLLECTION_VALUE_AT,
-                &[pointer.into(), pointer.into(), usize_type.into()],
-                Some(self.context.i64_type().into()),
-                &[self.current_frame.into(), collection.into(), index.into()],
-            )?
-            .ok_or_else(|| backend_failure("collection value read produced no result"))?
-            .into_int_value();
-        let value = self.collection_word_to_value(value_word, definition.value)?;
-        self.drop_stored_value(value, definition.value)?;
-        let next = build(self.builder.build_int_add(
-            index,
-            usize_type.const_int(1, false),
-            "collection.drop.next",
-        ))?;
-        build(self.builder.build_store(index_slot, next))?;
+        build(self.builder.build_store(index_slot, current))?;
         build(self.builder.build_unconditional_branch(header))?;
         self.builder.position_at_end(free);
         let _ = self.call_runtime(

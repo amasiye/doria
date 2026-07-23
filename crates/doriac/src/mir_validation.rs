@@ -654,6 +654,15 @@ fn validate_statement(
             }
             class_in(program, *class).map(|_| ())
         }
+        mir::Statement::DropString { local } => {
+            let local = local_in(function, *local)?;
+            if local.ty != mir::Type::String || !local.synthetic {
+                return Err(malformed_mir(
+                    "string drop must reference a synthetic string local",
+                ));
+            }
+            Ok(())
+        }
         mir::Statement::CollectionAdd {
             collection,
             value,
@@ -2629,6 +2638,7 @@ fn collect_statement_class_local_accesses(statement: &mir::Statement) -> ClassLo
         }
         mir::Statement::EchoStringLiteral(_)
         | mir::Statement::DropClass { .. }
+        | mir::Statement::DropString { .. }
         | mir::Statement::DropCollection { .. }
         | mir::Statement::WriteStreamBytes { .. } => {}
     }
@@ -3719,6 +3729,7 @@ fn statement_observes_property(
         }
         mir::Statement::EchoStringLiteral(_)
         | mir::Statement::DropClass { .. }
+        | mir::Statement::DropString { .. }
         | mir::Statement::DropCollection { .. }
         | mir::Statement::WriteStreamBytes { .. } => false,
         mir::Statement::AssignStatic { value, .. } => {

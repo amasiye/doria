@@ -80,6 +80,35 @@ fn shared_validator_rejects_noncanonical_bytes_storage() {
 }
 
 #[test]
+fn shared_validator_limits_explicit_string_drops_to_synthetic_temporaries() {
+    let mut program = valid_void_program();
+    program.functions[0].locals.push(Local {
+        id: LocalId(0),
+        name: "_string0".to_string(),
+        ty: Type::String,
+        writable: false,
+        synthetic: true,
+        owned: false,
+    });
+    program.functions[0].blocks[0].statements = vec![
+        Statement::AssignLocal {
+            target: LocalId(0),
+            value: Rvalue::String(StringExpression::Literal("path".to_string())),
+        },
+        Statement::DropString { local: LocalId(0) },
+    ];
+    doriac::mir_validation::validate_program(&program)
+        .expect("a synthetic string temporary may be released explicitly");
+
+    program.functions[0].locals[0].synthetic = false;
+    let error = doriac::mir_validation::validate_program(&program)
+        .expect_err("an ordinary Doria string local must not be explicitly dropped");
+    assert!(error
+        .message
+        .contains("string drop must reference a synthetic string local"));
+}
+
+#[test]
 fn shared_validator_rejects_string_main_return() {
     let mut program = valid_void_program();
     program.functions[0].return_type = ReturnType::Value(Type::String);
