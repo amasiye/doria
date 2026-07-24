@@ -367,6 +367,7 @@ struct Interpreter<'program> {
     frames: Vec<CallFrame>,
     limits: InterpreterLimits,
     executed_blocks: usize,
+    pending_panic: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -457,6 +458,7 @@ fn interpret_internal(
         frames: Vec::new(),
         limits,
         executed_blocks: 0,
+        pending_panic: None,
     };
     interpreter.push_frame(program.entry, &[], None)?;
 
@@ -483,6 +485,9 @@ fn interpret_internal(
 
 impl Interpreter<'_> {
     fn step(&mut self) -> Result<StepOutcome, InterpreterError> {
+        if let Some(message) = self.pending_panic.take() {
+            return Ok(StepOutcome::Panic(message));
+        }
         let task = self.frames.last_mut().and_then(|frame| frame.tasks.pop());
         if let Some(task) = task {
             return self.execute_task(task);
@@ -2809,14 +2814,18 @@ impl Interpreter<'_> {
                 collection,
                 index,
                 transfer,
+                remove,
             } => {
                 let frame = self.current_frame_mut()?;
-                if transfer {
+                // An owning index read clones the box into an owned handle that shares the
+                // collection element's payload owner; `removeAt` instead moves the element
+                // out, so the popped box is already owned and must not be cloned.
+                if transfer && !remove {
                     frame.tasks.push(EvaluationTask::OwnMixed);
                 }
                 frame.tasks.push(EvaluationTask::LoadCollectionValue {
                     collection,
-                    transfer: false,
+                    transfer: remove,
                 });
                 frame.tasks.push(EvaluationTask::Rvalue(*index));
             }
@@ -3252,7 +3261,8 @@ impl Interpreter<'_> {
                 let MixedValue::Class {
                     object,
                     class: actual,
-                    ..
+                    owner,
+                    payload_owned,
                 } = value
                 else {
                     return Err(InterpreterError::new(
@@ -3263,6 +3273,26 @@ impl Interpreter<'_> {
                     return Err(InterpreterError::new(
                         "MIR mixed class payload observed another class",
                     ));
+                }
+                if transfer {
+                    // Moving the class payload out is only sound when this box holds the
+                    // final owning claim. If another box still shares the owner (e.g. read
+                    // from a collection with `mixed $x = $items[0]`) or the box only borrows
+                    // its payload, transferring the object would double-drop it once the
+                    // other holder releases the final claim. Refuse it, matching the native
+                    // backends' runtime panic.
+                    let claims = owner.get();
+                    let owns_final = if claims == 0 {
+                        false
+                    } else {
+                        owner.set(claims - 1);
+                        claims == 1 && payload_owned
+                    };
+                    if !owns_final {
+                        self.pending_panic =
+                            Some("cannot take ownership of a shared `mixed` value".to_string());
+                        return Ok(());
+                    }
                 }
                 self.current_frame_mut()?
                     .values

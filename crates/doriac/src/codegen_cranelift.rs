@@ -2321,7 +2321,11 @@ fn lower_drop_value_if(
 ) -> Result<(), BackendError> {
     if !matches!(
         ty,
-        mir::Type::String | mir::Type::Class(_) | mir::Type::Collection(_)
+        mir::Type::String
+            | mir::Type::Class(_)
+            | mir::Type::Collection(_)
+            | mir::Type::Mixed
+            | mir::Type::NullableMixed
     ) {
         return Ok(());
     }
@@ -3369,11 +3373,17 @@ fn lower_mixed_expression(
             collection,
             index,
             transfer,
+            remove,
         } => {
-            let value = lower_collection_index(builder, *collection, index, false, resources)?;
-            if *transfer {
+            let value = lower_collection_index(builder, *collection, index, *remove, resources)?;
+            if *transfer && !*remove {
+                // Owning index read (`mixed $x = $items[0]`): clone the collection's box
+                // into an owned handle that shares the payload owner with the element that
+                // remains in the collection.
                 lower_own_mixed_value(builder, value, mir::MixedOwnership::None, resources)
             } else {
+                // `removeAt` popped the element out, so the box is already ours and the
+                // collection no longer claims the payload; a borrow read keeps the box.
                 Ok(value)
             }
         }
@@ -3495,7 +3505,7 @@ fn lower_take_mixed_payload(
     let payload = collection_word_to_value(builder, word, tag.ty(), pointer)?;
     let zero = builder.ins().iconst(pointer, 0);
     builder.ins().stack_store(zero, slot, 0);
-    runtime_call(
+    let owns_final = runtime_call(
         builder,
         MIXED_RELEASE_OWNED,
         &[pointer],
@@ -3504,6 +3514,22 @@ fn lower_take_mixed_payload(
         resources,
     )?
     .ok_or_else(|| backend_failure("mixed payload take released no ownership claim"))?;
+    // A move-type payload may only be moved out when this box holds the final owning
+    // claim. If another box still shares the owner (e.g. the collection this value was
+    // read from with `mixed $x = $items[0]`), or the box only borrows its payload,
+    // `release_owned` reports a non-final claim; moving the payload out anyway would
+    // hand ownership to the callee while the other holder later drops the same payload,
+    // a double free. Refuse it rather than corrupt memory.
+    if matches!(tag, mir::MixedTag::String | mir::MixedTag::Class(_)) {
+        let zero_flag = builder.ins().iconst(types::I8, 0);
+        let not_final = builder.ins().icmp(IntCC::Equal, owns_final, zero_flag);
+        lower_panic_if_message(
+            builder,
+            not_final,
+            b"cannot take ownership of a shared `mixed` value",
+            resources,
+        )?;
+    }
     runtime_call(
         builder,
         MIXED_FREE,

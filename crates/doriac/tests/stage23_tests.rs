@@ -637,3 +637,62 @@ function main(): void
                 .contains("mixed expression could not be lowered")
     }));
 }
+
+#[test]
+fn bare_mixed_cannot_be_compared_to_null() {
+    let errors = doriac::lower_source_to_mir(
+        "stage23-bare-mixed-null.doria",
+        r#"
+function inspect(mixed $value): void
+{
+    if ($value == null) {
+        echo "null\n";
+    }
+}
+function main(): void
+{
+    inspect(1);
+}
+"#,
+    )
+    .expect_err("a non-null mixed cannot be compared to null without narrowing");
+    assert!(errors
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains("before narrowing")));
+}
+
+#[test]
+fn mixed_remove_at_lowers_to_a_removing_collection_index() {
+    let program = doriac::lower_source_to_mir(
+        "stage23-mixed-removeat.doria",
+        r#"
+function main(): void
+{
+    writable List<mixed> $items = [1, 2, 3];
+    mixed $first = $items->removeAt(0);
+    if ($first is int) {
+        echo "{$first}\n";
+    }
+}
+"#,
+    )
+    .expect("mixed removeAt should lower");
+    let removals = program
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.statements)
+        .filter(|statement| {
+            matches!(
+                statement,
+                doriac::mir::Statement::AssignLocal {
+                    value: doriac::mir::Rvalue::Mixed(
+                        doriac::mir::MixedExpression::CollectionIndex { remove: true, .. }
+                    ),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(removals, 1);
+}

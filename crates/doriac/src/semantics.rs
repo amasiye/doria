@@ -4136,15 +4136,54 @@ impl<'program> Checker<'program> {
         scopes: &ScopeStack,
         method_context: Option<&MethodContext>,
     ) {
-        if matches!(op, BinaryOp::Coalesce)
-            || (matches!(op, BinaryOp::Equal | BinaryOp::NotEqual)
-                && (Self::is_null_literal(left) || Self::is_null_literal(right)))
-        {
+        // Null-coalescing and `== null` / `!= null` are the only operations permitted on
+        // an un-narrowed value, but only when that value is actually nullable (`?mixed`).
+        // A bare, non-null `mixed` has nothing to coalesce and cannot be null, so those
+        // forms must still be reported here rather than being admitted by `check`/IDE
+        // analysis and then rejected during MIR lowering.
+        let bypass = match op {
+            BinaryOp::Coalesce => self.expr_declares_nullable(left, scopes, method_context),
+            BinaryOp::Equal | BinaryOp::NotEqual
+                if Self::is_null_literal(left) || Self::is_null_literal(right) =>
+            {
+                let operand = if Self::is_null_literal(left) {
+                    right
+                } else {
+                    left
+                };
+                self.expr_declares_nullable(operand, scopes, method_context)
+            }
+            _ => false,
+        };
+        if bypass {
             return;
         }
         if self.has_mixed_operand(left, right, scopes, method_context) {
             self.report_mixed_operation(span, "operator");
         }
+    }
+
+    fn expr_declares_nullable(
+        &mut self,
+        expr: &Expr,
+        scopes: &ScopeStack,
+        method_context: Option<&MethodContext>,
+    ) -> bool {
+        // Use the operand's DECLARED nullability, not its flow-narrowed type: a `?mixed`
+        // binding still permits `== null` / `??` after a `!= null` guard or a non-null
+        // assignment has narrowed it (a redundant but valid check), while a bare `mixed`
+        // (never nullable-declared) is reported.
+        let mut operand = expr;
+        while let Expr::Grouped { expr, .. } = operand {
+            operand = expr;
+        }
+        if let Expr::Variable { name, .. } = operand {
+            if let Some(binding) = scopes.lookup(name) {
+                return matches!(self.types.kind(binding.declared_ty), TypeKind::Nullable(_));
+            }
+        }
+        let ty = self.infer_expr_type(operand, scopes, method_context);
+        matches!(self.types.kind(ty), TypeKind::Nullable(_))
     }
 
     fn has_mixed_operand(

@@ -2027,7 +2027,11 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
     ) -> Result<(), BackendError> {
         if !matches!(
             ty,
-            mir::Type::String | mir::Type::Class(_) | mir::Type::Collection(_)
+            mir::Type::String
+                | mir::Type::Class(_)
+                | mir::Type::Collection(_)
+                | mir::Type::Mixed
+                | mir::Type::NullableMixed
         ) {
             return Ok(());
         }
@@ -3197,13 +3201,19 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 collection,
                 index,
                 transfer,
+                remove,
             } => {
                 let value = self
-                    .lower_collection_index(*collection, index, false)?
+                    .lower_collection_index(*collection, index, *remove)?
                     .into_pointer_value();
-                if *transfer {
+                if *transfer && !*remove {
+                    // Owning index read (`mixed $x = $items[0]`): clone the collection's box
+                    // into an owned handle that shares the payload owner with the element
+                    // that remains in the collection.
                     self.own_mixed_value(value, mir::MixedOwnership::None)
                 } else {
+                    // `removeAt` popped the element out, so the box is already ours and the
+                    // collection no longer claims the payload; a borrow read keeps the box.
                     Ok(value)
                 }
             }
@@ -3360,12 +3370,32 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
             .into_int_value();
         let payload = self.collection_word_to_value(payload, tag.ty())?;
         build(self.builder.build_store(slot, pointer.const_null()))?;
-        let _ = self.call_runtime(
-            MIXED_RELEASE_OWNED,
-            &[pointer.into()],
-            Some(self.context.i8_type().into()),
-            &[mixed.into()],
-        )?;
+        let owns_final = self
+            .call_runtime(
+                MIXED_RELEASE_OWNED,
+                &[pointer.into()],
+                Some(self.context.i8_type().into()),
+                &[mixed.into()],
+            )?
+            .ok_or_else(|| backend_failure("mixed payload take released no ownership claim"))?
+            .into_int_value();
+        // A move-type payload may only be moved out when this box holds the final owning
+        // claim. If another box still shares the owner (e.g. read from a collection with
+        // `mixed $x = $items[0]`) or the box only borrows its payload, `release_owned`
+        // reports a non-final claim; transferring the payload anyway would double-free
+        // when the other holder later drops it. Refuse it rather than corrupt memory.
+        if matches!(tag, mir::MixedTag::String | mir::MixedTag::Class(_)) {
+            let not_final = build(self.builder.build_int_compare(
+                IntPredicate::EQ,
+                owns_final,
+                self.context.i8_type().const_zero(),
+                "mixed.take.shared",
+            ))?;
+            self.lower_panic_if(
+                not_final,
+                b"cannot take ownership of a shared `mixed` value",
+            )?;
+        }
         let _ = self.call_runtime(MIXED_FREE, &[pointer.into()], None, &[mixed.into()])?;
         Ok(payload)
     }

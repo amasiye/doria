@@ -1140,6 +1140,7 @@ fn validate_mixed_expression(
             collection,
             index,
             transfer: _,
+            remove: _,
         } => {
             let local = local_in(function, *collection)?;
             let mir::Type::Collection(collection_type) = local.ty else {

@@ -425,6 +425,7 @@ pub enum MixedExpression {
         collection: LocalId,
         index: Box<Rvalue>,
         transfer: bool,
+        remove: bool,
     },
 }
 
@@ -1868,10 +1869,17 @@ impl fmt::Display for MixedExpression {
                 collection,
                 index,
                 transfer,
+                remove,
             } => write!(
                 formatter,
                 "{} mixed local{}[{index}]",
-                if *transfer { "move" } else { "borrow" },
+                if *remove {
+                    "remove"
+                } else if *transfer {
+                    "move"
+                } else {
+                    "borrow"
+                },
                 collection.0
             ),
         }

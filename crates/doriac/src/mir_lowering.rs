@@ -1582,6 +1582,7 @@ fn collection_value_rvalue(
             collection,
             index: Box::new(index),
             transfer: false,
+            remove: false,
         })),
         mir::Type::Collection(nested) => {
             Ok(mir::Rvalue::Collection(mir::CollectionExpression::Index {
@@ -5556,6 +5557,24 @@ fn lower_mixed_expression(
     transfer: bool,
     context: &LoweringContext,
 ) -> DiagnosticResult<mir::MixedExpression> {
+    // `List<mixed>::removeAt(i)` is a collection removal, not a class method call, so it
+    // must be intercepted before the method-call arm below (which requires a concrete
+    // class receiver). It removes the element and hands back the owned box, mirroring the
+    // interception in `lower_rvalue_as_expected`.
+    if let Some((collection, index, value_type)) = lower_list_remove_at(expr, context)? {
+        if value_type != mir::Type::Mixed {
+            return Err(vec![unsupported(
+                expr.span(),
+                "List::removeAt result has another type",
+            )]);
+        }
+        return Ok(mir::MixedExpression::CollectionIndex {
+            collection,
+            index: Box::new(index),
+            transfer: true,
+            remove: true,
+        });
+    }
     if let hir::Expr::Variable { name, span } = unparenthesized_place(expr) {
         let local = context.lookup_local(name, *span)?;
         if context.local_type(local) == mir::Type::Mixed {
@@ -5590,6 +5609,7 @@ fn lower_mixed_expression(
             collection,
             index: Box::new(index),
             transfer,
+            remove: false,
         });
     }
     if let hir::Expr::FunctionCall { name, args, span } = expr {
@@ -6160,6 +6180,7 @@ fn collection_remove_at_rvalue(
             collection,
             index: Box::new(index),
             transfer: true,
+            remove: true,
         })),
         mir::Type::Collection(nested) => {
             Ok(mir::Rvalue::Collection(mir::CollectionExpression::Index {
