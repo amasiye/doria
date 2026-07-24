@@ -1,0 +1,30 @@
+class Token
+{
+    function __construct(string $name)
+    {
+    }
+
+    function __destruct()
+    {
+        echo "<drop " . $this->name . ">\n";
+    }
+}
+
+function consume(take Token $token): void
+{
+    echo "consumed\n";
+}
+
+function main(): void
+{
+    // `mixed $borrowed = $items[0]` clones the box, sharing the payload owner with the
+    // element still in the collection. Taking that class payload out by `take` would
+    // double-free, so it must panic instead of transferring ownership.
+    writable List<mixed> $items = [new Token("shared")];
+    mixed $borrowed = $items[0];
+    echo "before-take\n";
+    if ($borrowed is Token) {
+        consume($borrowed);
+    }
+    echo "after-take\n";
+}

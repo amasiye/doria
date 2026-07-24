@@ -1,0 +1,33 @@
+class Token
+{
+    function __construct(string $name)
+    {
+    }
+
+    function text(): string
+    {
+        return $this->name;
+    }
+
+    function __destruct()
+    {
+        echo "<drop " . $this->name . ">\n";
+    }
+}
+
+function main(): void
+{
+    // removeAt on a List<mixed> must move the element out, not leave a shared copy.
+    writable List<mixed> $items = [new Token("a"), new Token("b"), new Token("c")];
+    mixed $first = $items->removeAt(0);
+    echo "count=" . $items->count . "\n";
+    if ($first is Token) {
+        echo "removed=" . $first->text() . "\n";
+    }
+
+    // Replacing an existing Dictionary<string, mixed> value must drop the old box.
+    writable Dictionary<string, mixed> $registry = ["key" => new Token("old")];
+    echo "before-replace\n";
+    $registry->set("key", new Token("new"));
+    echo "after-replace\n";
+}

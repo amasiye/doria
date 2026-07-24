@@ -170,8 +170,10 @@ pub struct Local {
 pub enum Type {
     Scalar(ScalarType),
     String,
+    Mixed,
     NullableScalar(ScalarType),
     NullableString,
+    NullableMixed,
     Class(ClassId),
     NullableClass(ClassId),
     Collection(CollectionTypeId),
@@ -210,14 +212,20 @@ pub enum Operand {
         collection: LocalId,
         offset: Box<Rvalue>,
     },
+    MixedPayload {
+        mixed: LocalId,
+        tag: MixedTag,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rvalue {
     Value(ValueExpression),
     String(StringExpression),
+    Mixed(MixedExpression),
     NullableScalar(NullableScalarExpression),
     NullableString(NullableStringExpression),
+    NullableMixed(NullableMixedExpression),
     Class(ClassExpression),
     NullableClass(NullableClassExpression),
     Collection(CollectionExpression),
@@ -228,8 +236,10 @@ impl Rvalue {
         match self {
             Self::Value(value) => Type::Scalar(value.ty()),
             Self::String(_) => Type::String,
+            Self::Mixed(_) => Type::Mixed,
             Self::NullableScalar(value) => Type::NullableScalar(value.ty()),
             Self::NullableString(_) => Type::NullableString,
+            Self::NullableMixed(_) => Type::NullableMixed,
             Self::Class(value) => Type::Class(value.class()),
             Self::NullableClass(value) => Type::NullableClass(value.class()),
             Self::Collection(value) => Type::Collection(value.collection()),
@@ -243,8 +253,24 @@ impl Rvalue {
             Self::Collection(_) => None,
             Self::Value(_)
             | Self::String(_)
+            | Self::Mixed(_)
             | Self::NullableScalar(_)
+            | Self::NullableMixed(_)
             | Self::NullableString(_) => None,
+        }
+    }
+
+    pub const fn mixed_ownership(&self) -> MixedOwnership {
+        match self {
+            Self::Mixed(value) => value.ownership(),
+            Self::NullableMixed(value) => value.ownership(),
+            Self::Value(_)
+            | Self::String(_)
+            | Self::NullableScalar(_)
+            | Self::NullableString(_)
+            | Self::Class(_)
+            | Self::NullableClass(_)
+            | Self::Collection(_) => MixedOwnership::None,
         }
     }
 }
@@ -336,6 +362,135 @@ impl CollectionExpression {
 pub struct CollectionEntry {
     pub key: Option<Rvalue>,
     pub value: Rvalue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MixedTag {
+    Bool,
+    Integer(IntegerType),
+    Float(FloatType),
+    String,
+    Class(ClassId),
+}
+
+impl MixedTag {
+    pub const fn ty(self) -> Type {
+        match self {
+            Self::Bool => Type::Scalar(ScalarType::Bool),
+            Self::Integer(ty) => Type::Scalar(ScalarType::Integer(ty)),
+            Self::Float(ty) => Type::Scalar(ScalarType::Float(ty)),
+            Self::String => Type::String,
+            Self::Class(class) => Type::Class(class),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MixedOwnership {
+    None,
+    ShellOnly,
+    Owned,
+}
+
+impl MixedOwnership {
+    pub const fn has_shell(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MixedExpression {
+    Local {
+        local: LocalId,
+        transfer: bool,
+    },
+    Property {
+        object: LocalId,
+        property: PropertyId,
+    },
+    Call {
+        function: FunctionId,
+        args: Vec<Rvalue>,
+    },
+    BoxValue(ValueExpression),
+    BoxString {
+        value: StringExpression,
+        payload_owned: bool,
+    },
+    BoxClass {
+        value: ClassExpression,
+        payload_owned: bool,
+    },
+    CollectionIndex {
+        collection: LocalId,
+        index: Box<Rvalue>,
+        transfer: bool,
+        remove: bool,
+    },
+}
+
+impl MixedExpression {
+    pub const fn ownership(&self) -> MixedOwnership {
+        match self {
+            Self::Local { transfer: true, .. }
+            | Self::Call { .. }
+            | Self::CollectionIndex { transfer: true, .. } => MixedOwnership::Owned,
+            Self::BoxValue(_) => MixedOwnership::ShellOnly,
+            Self::BoxString { payload_owned, .. } | Self::BoxClass { payload_owned, .. } => {
+                if *payload_owned {
+                    MixedOwnership::Owned
+                } else {
+                    MixedOwnership::ShellOnly
+                }
+            }
+            Self::Local {
+                transfer: false, ..
+            }
+            | Self::Property { .. }
+            | Self::CollectionIndex {
+                transfer: false, ..
+            } => MixedOwnership::None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NullableMixedExpression {
+    Null,
+    Mixed(MixedExpression),
+    Local {
+        local: LocalId,
+        transfer: bool,
+    },
+    Property {
+        object: LocalId,
+        property: PropertyId,
+    },
+    Call {
+        function: FunctionId,
+        args: Vec<Rvalue>,
+    },
+    Coalesce {
+        left: Box<NullableMixedExpression>,
+        right: Box<NullableMixedExpression>,
+        transfer: bool,
+    },
+}
+
+impl NullableMixedExpression {
+    pub const fn ownership(&self) -> MixedOwnership {
+        match self {
+            Self::Mixed(value) => value.ownership(),
+            Self::Local { transfer: true, .. } | Self::Call { .. } | Self::Coalesce { .. } => {
+                MixedOwnership::Owned
+            }
+            Self::Null
+            | Self::Local {
+                transfer: false, ..
+            }
+            | Self::Property { .. } => MixedOwnership::None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -442,6 +597,11 @@ pub enum ClassExpression {
         index: Box<Rvalue>,
         transfer: bool,
     },
+    MixedPayload {
+        class: ClassId,
+        mixed: LocalId,
+        transfer: bool,
+    },
 }
 
 impl ClassExpression {
@@ -453,7 +613,8 @@ impl ClassExpression {
             | Self::New { class, .. }
             | Self::NullableLocalAssumeNonNull { class, .. }
             | Self::Coalesce { class, .. }
-            | Self::CollectionIndex { class, .. } => *class,
+            | Self::CollectionIndex { class, .. }
+            | Self::MixedPayload { class, .. } => *class,
         }
     }
 
@@ -470,6 +631,7 @@ impl ClassExpression {
             | Self::NullableLocalAssumeNonNull { .. }
             | Self::Coalesce { .. }
             | Self::CollectionIndex { .. }
+            | Self::MixedPayload { .. }
             | Self::Call {
                 return_borrow: Some(_),
                 ..
@@ -679,6 +841,20 @@ pub enum StringExpression {
         collection: LocalId,
         offset: Box<Rvalue>,
     },
+    MixedPayload(LocalId),
+}
+
+impl StringExpression {
+    pub const fn is_borrowed_place(&self) -> bool {
+        matches!(
+            self,
+            Self::Local(_)
+                | Self::NullableLocalAssumeNonNull(_)
+                | Self::Property { .. }
+                | Self::Static(_)
+                | Self::MixedPayload(_)
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -843,6 +1019,7 @@ pub enum BoolExpression {
     },
     NullableScalarIsPresent(Box<NullableScalarExpression>),
     NullableClassIsPresent(Box<NullableClassExpression>),
+    NullableMixedIsPresent(Box<NullableMixedExpression>),
     Not(Box<BoolExpression>),
     Binary {
         op: BoolBinaryOp,
@@ -868,6 +1045,10 @@ pub enum BoolExpression {
     CollectionEqual {
         left: LocalId,
         right: LocalId,
+    },
+    MixedIs {
+        mixed: Box<MixedExpression>,
+        tag: MixedTag,
     },
 }
 
@@ -951,6 +1132,9 @@ pub enum Statement {
     DropString {
         local: LocalId,
     },
+    DropMixed {
+        local: LocalId,
+    },
     CollectionAdd {
         collection: LocalId,
         value: Rvalue,
@@ -1024,6 +1208,7 @@ fn statement_class_temporary_capacity(statement: &Statement) -> usize {
         Statement::EchoStringLiteral(_)
         | Statement::DropClass { .. }
         | Statement::DropString { .. }
+        | Statement::DropMixed { .. }
         | Statement::DropCollection { .. }
         | Statement::WriteStreamBytes { .. } => 0,
         Statement::EchoString(value) | Statement::WriteStderr(value) => {
@@ -1060,11 +1245,42 @@ fn rvalue_class_temporary_capacity(value: &Rvalue) -> usize {
     match value {
         Rvalue::Value(value) => value_class_temporary_capacity(value),
         Rvalue::String(value) => string_class_temporary_capacity(value),
+        Rvalue::Mixed(value) => mixed_class_temporary_capacity(value),
         Rvalue::NullableScalar(value) => nullable_scalar_class_temporary_capacity(value),
         Rvalue::NullableString(value) => nullable_string_class_temporary_capacity(value),
+        Rvalue::NullableMixed(value) => nullable_mixed_class_temporary_capacity(value),
         Rvalue::Class(value) => class_expression_temporary_capacity(value),
         Rvalue::NullableClass(value) => nullable_class_temporary_capacity(value),
         Rvalue::Collection(value) => collection_class_temporary_capacity(value),
+    }
+}
+
+fn mixed_class_temporary_capacity(value: &MixedExpression) -> usize {
+    match value {
+        MixedExpression::BoxValue(value) => value_class_temporary_capacity(value),
+        MixedExpression::BoxString { value, .. } => string_class_temporary_capacity(value),
+        MixedExpression::BoxClass { value, .. } => class_expression_temporary_capacity(value),
+        MixedExpression::Call { args, .. } => {
+            args.iter().map(rvalue_class_temporary_capacity).sum()
+        }
+        MixedExpression::CollectionIndex { index, .. } => rvalue_class_temporary_capacity(index),
+        MixedExpression::Local { .. } | MixedExpression::Property { .. } => 0,
+    }
+}
+
+fn nullable_mixed_class_temporary_capacity(value: &NullableMixedExpression) -> usize {
+    match value {
+        NullableMixedExpression::Mixed(value) => mixed_class_temporary_capacity(value),
+        NullableMixedExpression::Call { args, .. } => {
+            args.iter().map(rvalue_class_temporary_capacity).sum()
+        }
+        NullableMixedExpression::Coalesce { left, right, .. } => {
+            nullable_mixed_class_temporary_capacity(left)
+                + nullable_mixed_class_temporary_capacity(right)
+        }
+        NullableMixedExpression::Null
+        | NullableMixedExpression::Local { .. }
+        | NullableMixedExpression::Property { .. } => 0,
     }
 }
 
@@ -1156,6 +1372,7 @@ fn string_class_temporary_capacity(value: &StringExpression) -> usize {
         StringExpression::Literal(_)
         | StringExpression::Local(_)
         | StringExpression::NullableLocalAssumeNonNull(_)
+        | StringExpression::MixedPayload(_)
         | StringExpression::Static(_)
         | StringExpression::Property { .. } => 0,
     }
@@ -1194,7 +1411,8 @@ fn class_expression_temporary_capacity(value: &ClassExpression) -> usize {
     match value {
         ClassExpression::Local { .. }
         | ClassExpression::Property { .. }
-        | ClassExpression::NullableLocalAssumeNonNull { .. } => 0,
+        | ClassExpression::NullableLocalAssumeNonNull { .. }
+        | ClassExpression::MixedPayload { .. } => 0,
         ClassExpression::Call { args, .. } => {
             usize::from(value.owned_temporary_class().is_some())
                 + args
@@ -1303,6 +1521,9 @@ pub(crate) fn bool_class_temporary_capacity(value: &BoolExpression) -> usize {
             nullable_scalar_class_temporary_capacity(value)
         }
         BoolExpression::NullableClassIsPresent(value) => nullable_class_temporary_capacity(value),
+        BoolExpression::NullableMixedIsPresent(value) => {
+            nullable_mixed_class_temporary_capacity(value)
+        }
         BoolExpression::Not(value) => bool_class_temporary_capacity(value),
         BoolExpression::Binary { left, right, .. } => {
             bool_class_temporary_capacity(left) + bool_class_temporary_capacity(right)
@@ -1314,6 +1535,7 @@ pub(crate) fn bool_class_temporary_capacity(value: &BoolExpression) -> usize {
         BoolExpression::CollectionHas { value, .. } => rvalue_class_temporary_capacity(value),
         BoolExpression::CollectionIsEmpty { .. } => 0,
         BoolExpression::CollectionEqual { .. } => 0,
+        BoolExpression::MixedIs { mixed, .. } => mixed_class_temporary_capacity(mixed),
     }
 }
 
@@ -1409,8 +1631,10 @@ impl fmt::Display for Type {
         match self {
             Type::Scalar(ty) => write!(formatter, "{ty}"),
             Type::String => write!(formatter, "string"),
+            Type::Mixed => write!(formatter, "mixed"),
             Type::NullableScalar(ty) => write!(formatter, "?{ty}"),
             Type::NullableString => write!(formatter, "?string"),
+            Type::NullableMixed => write!(formatter, "?mixed"),
             Type::Class(class) => write!(formatter, "class#{}", class.0),
             Type::NullableClass(class) => write!(formatter, "?class#{}", class.0),
             Type::Collection(collection) => write!(formatter, "collection#{}", collection.0),
@@ -1453,6 +1677,9 @@ impl fmt::Display for Operand {
             Operand::CollectionKeyAt { collection, offset } => {
                 write!(formatter, "key_at(local{}, {offset})", collection.0)
             }
+            Operand::MixedPayload { mixed, tag } => {
+                write!(formatter, "mixed_payload<{tag}>(local{})", mixed.0)
+            }
         }
     }
 }
@@ -1464,6 +1691,8 @@ impl fmt::Display for Rvalue {
             Rvalue::String(value) => write!(formatter, "{value}"),
             Rvalue::NullableScalar(value) => write!(formatter, "{value}"),
             Rvalue::NullableString(value) => write!(formatter, "{value}"),
+            Rvalue::Mixed(value) => write!(formatter, "{value}"),
+            Rvalue::NullableMixed(value) => write!(formatter, "{value}"),
             Rvalue::Class(value) => write!(formatter, "{value}"),
             Rvalue::NullableClass(value) => write!(formatter, "{value}"),
             Rvalue::Collection(value) => write!(formatter, "{value}"),
@@ -1589,6 +1818,94 @@ impl fmt::Display for ClassExpression {
                 collection.0,
                 class.0
             ),
+            Self::MixedPayload {
+                class,
+                mixed,
+                transfer,
+            } => write!(
+                formatter,
+                "{} mixed_payload<class#{}>(local{})",
+                if *transfer { "move" } else { "borrow" },
+                class.0,
+                mixed.0
+            ),
+        }
+    }
+}
+
+impl fmt::Display for MixedTag {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bool => formatter.write_str("bool"),
+            Self::Integer(ty) => write!(formatter, "{ty}"),
+            Self::Float(ty) => write!(formatter, "{ty}"),
+            Self::String => formatter.write_str("string"),
+            Self::Class(class) => write!(formatter, "class#{}", class.0),
+        }
+    }
+}
+
+impl fmt::Display for MixedExpression {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Local {
+                local,
+                transfer: true,
+            } => write!(formatter, "move mixed local{}", local.0),
+            Self::Local {
+                local,
+                transfer: false,
+            } => write!(formatter, "borrow mixed local{}", local.0),
+            Self::Property { object, property } => write!(
+                formatter,
+                "borrow local{}->property#{}:{}",
+                object.0, property.class.0, property.index
+            ),
+            Self::Call { function, args } => write_call(formatter, *function, args),
+            Self::BoxValue(value) => write!(formatter, "mixed({value})"),
+            Self::BoxString { value, .. } => write!(formatter, "mixed({value})"),
+            Self::BoxClass { value, .. } => write!(formatter, "mixed({value})"),
+            Self::CollectionIndex {
+                collection,
+                index,
+                transfer,
+                remove,
+            } => write!(
+                formatter,
+                "{} mixed local{}[{index}]",
+                if *remove {
+                    "remove"
+                } else if *transfer {
+                    "move"
+                } else {
+                    "borrow"
+                },
+                collection.0
+            ),
+        }
+    }
+}
+
+impl fmt::Display for NullableMixedExpression {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Null => formatter.write_str("null"),
+            Self::Mixed(value) => write!(formatter, "some({value})"),
+            Self::Local {
+                local,
+                transfer: true,
+            } => write!(formatter, "move ?mixed local{}", local.0),
+            Self::Local {
+                local,
+                transfer: false,
+            } => write!(formatter, "borrow ?mixed local{}", local.0),
+            Self::Property { object, property } => write!(
+                formatter,
+                "borrow local{}->property#{}:{}",
+                object.0, property.class.0, property.index
+            ),
+            Self::Call { function, args } => write_call(formatter, *function, args),
+            Self::Coalesce { left, right, .. } => write!(formatter, "({left} ?? {right})"),
         }
     }
 }
@@ -1679,6 +1996,9 @@ impl fmt::Display for IntegerExpression {
                 Operand::CollectionKeyAt { collection, offset } => {
                     write!(formatter, "key_at(local{}, {offset}): {ty}", collection.0)
                 }
+                Operand::MixedPayload { mixed, tag } => {
+                    write!(formatter, "mixed_payload<{tag}>(local{}): {ty}", mixed.0)
+                }
             },
             IntegerExpression::Unary { ty, op, operand } => {
                 write!(formatter, "({op}{operand}): {ty}")
@@ -1744,6 +2064,9 @@ impl fmt::Display for FloatExpression {
                 Operand::CollectionKeyAt { collection, offset } => {
                     write!(formatter, "key_at(local{}, {offset}): {ty}", collection.0)
                 }
+                Operand::MixedPayload { mixed, tag } => {
+                    write!(formatter, "mixed_payload<{tag}>(local{}): {ty}", mixed.0)
+                }
             },
             Self::Negate { ty, operand } => write!(formatter, "(-{operand}): {ty}"),
             Self::Binary {
@@ -1778,6 +2101,9 @@ impl fmt::Display for StringExpression {
                 write!(formatter, "local{}->property{}", object.0, property.index)
             }
             StringExpression::Static(id) => write!(formatter, "static{}", id.0),
+            StringExpression::MixedPayload(local) => {
+                write!(formatter, "mixed_payload<string>(local{})", local.0)
+            }
             StringExpression::Concat(parts) => {
                 write!(formatter, "(")?;
                 for (index, part) in parts.iter().enumerate() {
@@ -1893,6 +2219,9 @@ impl fmt::Display for BoolExpression {
                 Operand::CollectionKeyAt { collection, offset } => {
                     write!(formatter, "key_at(local{}, {offset}): bool", collection.0)
                 }
+                Operand::MixedPayload { mixed, tag } => {
+                    write!(formatter, "mixed_payload<{tag}>(local{}): bool", mixed.0)
+                }
             },
             Self::Compare { op, left, right } => write!(formatter, "{left} {op} {right}"),
             Self::StringCompare { op, left, right } => write!(formatter, "{left} {op} {right}"),
@@ -1901,6 +2230,8 @@ impl fmt::Display for BoolExpression {
             }
             Self::NullableScalarIsPresent(value) => write!(formatter, "present({value})"),
             Self::NullableClassIsPresent(value) => write!(formatter, "present({value})"),
+            Self::NullableMixedIsPresent(value) => write!(formatter, "present({value})"),
+            Self::MixedIs { mixed, tag } => write!(formatter, "{mixed} is {tag}"),
             Self::Not(condition) => write!(formatter, "!({condition})"),
             Self::Binary { op, left, right } => {
                 write!(formatter, "({left}) {op} ({right})")
@@ -2087,6 +2418,7 @@ impl fmt::Display for Statement {
                 write!(formatter, "drop class#{} local{}", class.0, local.0)
             }
             Statement::DropString { local } => write!(formatter, "drop string local{}", local.0),
+            Statement::DropMixed { local } => write!(formatter, "drop mixed local{}", local.0),
             Statement::CollectionAdd {
                 collection, value, ..
             } => {

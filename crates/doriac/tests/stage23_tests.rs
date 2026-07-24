@@ -370,25 +370,25 @@ function main(): void
 }
 
 #[test]
-fn runtime_mixed_collection_values_remain_at_stage23_slice3() {
-    let diagnostics = doriac::lower_source_to_mir(
+fn runtime_mixed_collection_values_lower_to_stage23_slice3_boxes() {
+    let program = doriac::lower_source_to_mir(
         "stage23-mixed-collection.doria",
         r#"
 function main(): void
 {
     List<mixed> $values = [1];
+    foreach ($values as mixed $value) {
+        if ($value is int) {
+            echo "{$value}";
+        }
+    }
 }
 "#,
     )
-    .expect_err("runtime mixed collection elements require the Slice 3 box");
-    let boundary = diagnostics
-        .iter()
-        .find(|diagnostic| diagnostic.code == "M1101")
-        .unwrap_or_else(|| panic!("expected a native-stage diagnostic: {diagnostics:#?}"));
-    assert!(boundary.message.contains("Stage 23 Slice 3"));
-    assert!(!diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.code.starts_with('P')));
+    .expect("runtime mixed collection elements should lower after Slice 3");
+    let output = doriac::mir_interpreter::interpret(&program)
+        .expect("runtime mixed collection elements should execute");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "1");
 }
 
 #[test]
@@ -577,4 +577,122 @@ function main(): void
         "E0521",
     );
     assert!(family.message.contains("Decision 0100"));
+}
+
+#[test]
+fn mixed_collection_index_bindings_retain_without_removing_elements() {
+    let mir = doriac::lower_source_to_mir(
+        "stage23-mixed-index-ownership.doria",
+        r#"
+class Token { function __construct(string $name) {} }
+function main(): void
+{
+    List<mixed> $items = [new Token("list")];
+    mixed $item = $items[0];
+    Dictionary<string, mixed> $named = ["token" => new Token("dictionary")];
+    mixed $token = $named["token"];
+}
+"#,
+    )
+    .expect("mixed index bindings should receive retained ownership claims");
+
+    let transfers = mir
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.statements)
+        .filter(|statement| {
+            matches!(
+                statement,
+                doriac::mir::Statement::AssignLocal {
+                    value: doriac::mir::Rvalue::Mixed(
+                        doriac::mir::MixedExpression::CollectionIndex { transfer: true, .. }
+                    ),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(transfers, 2);
+}
+
+#[test]
+fn non_narrowed_nullable_mixed_cannot_flow_into_non_null_mixed() {
+    let errors = doriac::lower_source_to_mir(
+        "stage23-nullable-mixed-sink.doria",
+        r#"
+function consume(mixed $value): void {}
+function main(): void
+{
+    ?mixed $value = null;
+    consume($value);
+}
+"#,
+    )
+    .expect_err("nullable mixed must be narrowed before entering a mixed sink");
+    assert!(errors.iter().any(|diagnostic| {
+        diagnostic.message.contains("nullable")
+            || diagnostic
+                .message
+                .contains("mixed expression could not be lowered")
+    }));
+}
+
+#[test]
+fn bare_mixed_cannot_be_compared_to_null() {
+    let errors = doriac::lower_source_to_mir(
+        "stage23-bare-mixed-null.doria",
+        r#"
+function inspect(mixed $value): void
+{
+    if ($value == null) {
+        echo "null\n";
+    }
+}
+function main(): void
+{
+    inspect(1);
+}
+"#,
+    )
+    .expect_err("a non-null mixed cannot be compared to null without narrowing");
+    assert!(errors
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains("before narrowing")));
+}
+
+#[test]
+fn mixed_remove_at_lowers_to_a_removing_collection_index() {
+    let program = doriac::lower_source_to_mir(
+        "stage23-mixed-removeat.doria",
+        r#"
+function main(): void
+{
+    writable List<mixed> $items = [1, 2, 3];
+    mixed $first = $items->removeAt(0);
+    if ($first is int) {
+        echo "{$first}\n";
+    }
+}
+"#,
+    )
+    .expect("mixed removeAt should lower");
+    let removals = program
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.statements)
+        .filter(|statement| {
+            matches!(
+                statement,
+                doriac::mir::Statement::AssignLocal {
+                    value: doriac::mir::Rvalue::Mixed(
+                        doriac::mir::MixedExpression::CollectionIndex { remove: true, .. }
+                    ),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(removals, 1);
 }

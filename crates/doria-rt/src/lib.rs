@@ -11,6 +11,7 @@ mod collection;
 mod device_io;
 mod file_io;
 mod line_io;
+mod mixed;
 
 use device_io::{StandardStream, WriteOutcome};
 
@@ -36,6 +37,7 @@ pub struct DrStringV1 {
 
 pub use bytes::DrBytesV1;
 pub use collection::DrCollectionV1;
+pub use mixed::DrMixedV1;
 
 /// # Safety
 ///
@@ -338,6 +340,92 @@ pub unsafe extern "C" fn dr_v1_collection_contains(
     value_kind: u8,
 ) -> u8 {
     u8::from(collection::contains(collection, value, value_kind))
+}
+
+/// # Safety
+///
+/// `payload` must use the representation implied by `tag` and `type_id`.
+/// The returned box owns that payload until generated code explicitly drops it.
+#[no_mangle]
+pub unsafe extern "C" fn dr_v1_mixed_new(tag: u8, type_id: u32, payload: u64) -> *mut DrMixedV1 {
+    let value = mixed::new_owned(tag, type_id, payload);
+    if value.is_null() {
+        static MESSAGE: &[u8] = b"mixed allocation failed";
+        dr_v1_panic(ptr::null(), MESSAGE.as_ptr(), MESSAGE.len());
+    }
+    value
+}
+
+/// # Safety
+///
+/// `payload` must remain live for the returned shell's lifetime.
+#[no_mangle]
+pub unsafe extern "C" fn dr_v1_mixed_new_borrowed(
+    tag: u8,
+    type_id: u32,
+    payload: u64,
+) -> *mut DrMixedV1 {
+    let value = mixed::new_borrowed(tag, type_id, payload);
+    if value.is_null() {
+        static MESSAGE: &[u8] = b"mixed allocation failed";
+        dr_v1_panic(ptr::null(), MESSAGE.as_ptr(), MESSAGE.len());
+    }
+    value
+}
+
+/// # Safety
+///
+/// `value` must point to a live mixed box.
+#[no_mangle]
+pub unsafe extern "C" fn dr_v1_mixed_clone_owned(value: *const DrMixedV1) -> *mut DrMixedV1 {
+    let clone = mixed::clone_owned(value);
+    if clone.is_null() {
+        static MESSAGE: &[u8] = b"mixed ownership clone failed";
+        dr_v1_panic(ptr::null(), MESSAGE.as_ptr(), MESSAGE.len());
+    }
+    clone
+}
+
+/// Returns whether this released the final claim to an owned payload.
+///
+/// # Safety
+///
+/// `value` must point to a live mixed box.
+#[no_mangle]
+pub unsafe extern "C" fn dr_v1_mixed_release_owned(value: *mut DrMixedV1) -> u8 {
+    u8::from(mixed::release_owned(value))
+}
+
+/// # Safety
+///
+/// `value` must be null or a live box returned by `dr_v1_mixed_new`.
+#[no_mangle]
+pub unsafe extern "C" fn dr_v1_mixed_free(value: *mut DrMixedV1) {
+    mixed::free(value)
+}
+
+/// # Safety
+///
+/// `value` must point to a live mixed box.
+#[no_mangle]
+pub unsafe extern "C" fn dr_v1_mixed_tag(value: *const DrMixedV1) -> u8 {
+    (*value).tag
+}
+
+/// # Safety
+///
+/// `value` must point to a live mixed box.
+#[no_mangle]
+pub unsafe extern "C" fn dr_v1_mixed_type_id(value: *const DrMixedV1) -> u32 {
+    (*value).type_id
+}
+
+/// # Safety
+///
+/// `value` must point to a live mixed box.
+#[no_mangle]
+pub unsafe extern "C" fn dr_v1_mixed_payload(value: *const DrMixedV1) -> u64 {
+    (*value).payload
 }
 
 /// # Safety

@@ -1,0 +1,9 @@
+count=2
+removed=a
+before-replace
+<drop old>
+after-replace
+<drop new>
+<drop a>
+<drop c>
+<drop b>

@@ -3317,7 +3317,7 @@ impl<'program> Checker<'program> {
             } => {
                 self.check_expr(left, scopes, method_context);
                 self.check_expr(right, scopes, method_context);
-                self.check_mixed_binary_operands(left, right, *span, scopes, method_context);
+                self.check_mixed_binary_operands(left, op, right, *span, scopes, method_context);
                 self.check_binary_operands(left, op, right, *span, scopes, method_context);
             }
             Expr::Range {
@@ -4130,14 +4130,60 @@ impl<'program> Checker<'program> {
     fn check_mixed_binary_operands(
         &mut self,
         left: &Expr,
+        op: &BinaryOp,
         right: &Expr,
         span: Span,
         scopes: &ScopeStack,
         method_context: Option<&MethodContext>,
     ) {
+        // Null-coalescing and `== null` / `!= null` are the only operations permitted on
+        // an un-narrowed value, but only when that value is actually nullable (`?mixed`).
+        // A bare, non-null `mixed` has nothing to coalesce and cannot be null, so those
+        // forms must still be reported here rather than being admitted by `check`/IDE
+        // analysis and then rejected during MIR lowering.
+        let bypass = match op {
+            BinaryOp::Coalesce => self.expr_declares_nullable(left, scopes, method_context),
+            BinaryOp::Equal | BinaryOp::NotEqual
+                if Self::is_null_literal(left) || Self::is_null_literal(right) =>
+            {
+                let operand = if Self::is_null_literal(left) {
+                    right
+                } else {
+                    left
+                };
+                self.expr_declares_nullable(operand, scopes, method_context)
+            }
+            _ => false,
+        };
+        if bypass {
+            return;
+        }
         if self.has_mixed_operand(left, right, scopes, method_context) {
             self.report_mixed_operation(span, "operator");
         }
+    }
+
+    fn expr_declares_nullable(
+        &mut self,
+        expr: &Expr,
+        scopes: &ScopeStack,
+        method_context: Option<&MethodContext>,
+    ) -> bool {
+        // Use the operand's DECLARED nullability, not its flow-narrowed type: a `?mixed`
+        // binding still permits `== null` / `??` after a `!= null` guard or a non-null
+        // assignment has narrowed it (a redundant but valid check), while a bare `mixed`
+        // (never nullable-declared) is reported.
+        let mut operand = expr;
+        while let Expr::Grouped { expr, .. } = operand {
+            operand = expr;
+        }
+        if let Expr::Variable { name, .. } = operand {
+            if let Some(binding) = scopes.lookup(name) {
+                return matches!(self.types.kind(binding.declared_ty), TypeKind::Nullable(_));
+            }
+        }
+        let ty = self.infer_expr_type(operand, scopes, method_context);
+        matches!(self.types.kind(ty), TypeKind::Nullable(_))
     }
 
     fn has_mixed_operand(
@@ -5908,6 +5954,7 @@ impl<'program> Checker<'program> {
                 | TypeKind::Float(_)
                 | TypeKind::String
                 | TypeKind::Bool
+                | TypeKind::Mixed
                 | TypeKind::Class(_) => self.types.intern(TypeKind::Nullable(inner)),
                 TypeKind::Bytes
                 | TypeKind::TypedArray(_)
@@ -5922,7 +5969,6 @@ impl<'program> Checker<'program> {
                 ),
                 TypeKind::Void
                 | TypeKind::Null
-                | TypeKind::Mixed
                 | TypeKind::Nullable(_)
                 | TypeKind::Unknown
                 | TypeKind::Heterogeneous
@@ -6388,6 +6434,11 @@ impl<'program> Checker<'program> {
         match (target_kind, value_kind) {
             (TypeKind::Heterogeneous, _) | (_, TypeKind::Heterogeneous) => false,
             (TypeKind::Mixed, _) => true,
+            (TypeKind::Nullable(target), TypeKind::Mixed)
+                if matches!(self.types.kind(target), TypeKind::Mixed) =>
+            {
+                true
+            }
             (_, TypeKind::Mixed) => false,
             (TypeKind::Unknown, _) | (_, TypeKind::Unknown) => true,
             (TypeKind::Nullable(_), TypeKind::Null) => true,
@@ -7377,7 +7428,9 @@ impl<'program> Checker<'program> {
     fn exact_type_test_can_match(&self, value: TypeId, tested: TypeId) -> bool {
         match self.types.kind(value).clone() {
             TypeKind::Mixed | TypeKind::Unknown => true,
-            TypeKind::Nullable(inner) => inner == tested,
+            TypeKind::Nullable(inner) => {
+                inner == tested || matches!(self.types.kind(inner), TypeKind::Mixed)
+            }
             _ => value == tested,
         }
     }

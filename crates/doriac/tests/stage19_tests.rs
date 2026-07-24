@@ -625,15 +625,15 @@ fn inferred_mixed_locals_are_tracked_as_move_owners() {
 }
 
 #[test]
-fn mixed_owner_moves_into_properties_remain_unsupported() {
+fn mixed_owner_moves_into_properties_consume_the_source() {
     let diagnostics = doriac::check_source(
         "mixed-property-assignment.doria",
         "function sink(take mixed $value): void {} class Box { writable mixed $payload = 1; writable function store(take mixed $value): void { $this->payload = $value; sink($value); } }",
     )
-    .expect_err("direct moves into properties remain unsupported");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "E0472" && diagnostic.message.contains("moves into")
-    }));
+    .expect_err("the mixed property owns the moved value");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "E0470"));
 }
 
 #[test]

@@ -1,0 +1,117 @@
+class Token
+{
+    function __construct(string $name)
+    {
+    }
+
+    function text(): string
+    {
+        return $this->name;
+    }
+
+    function __destruct()
+    {
+        echo "<drop " . $this->name . ">\n";
+    }
+}
+
+class Holder
+{
+    writable mixed $value = 0;
+
+    writable function replace(take mixed $value): void
+    {
+        $this->value = $value;
+    }
+}
+
+function describe(mixed $value): void
+{
+    if ($value is string) {
+        echo "string=" . $value . "\n";
+    } else if ($value is Token) {
+        echo "token=" . $value->text() . "\n";
+    } else if ($value is int) {
+        echo "int={$value}\n";
+    }
+}
+
+function makeMixedToken(): mixed
+{
+    return new Token("is-temporary");
+}
+
+function describeNullable(?mixed $value): void
+{
+    if ($value != null) {
+        describe($value);
+    }
+}
+
+function describeFallback(?mixed $value): void
+{
+    describeNullable($value ?? new Token("fallback"));
+}
+
+function main(): void
+{
+    let $token = new Token("borrowed");
+    describe($token);
+    echo "after=" . $token->text() . "\n";
+
+    string $text = "live";
+    describe($text);
+    echo "after-string=" . $text . "\n";
+
+    describe(new Token("temporary"));
+    if (makeMixedToken() is Token) {
+        echo "is-token\n";
+    }
+
+    ?mixed $present = new Token("present");
+    describeFallback($present);
+    if ($present is Token) {
+        echo "present-after=" . $present->text() . "\n";
+    }
+
+    ?mixed $missing = null;
+    describeFallback($missing);
+
+    writable Set<string> $values = Set::from([]);
+    $values->add("member");
+    mixed $needle = "member";
+    if ($needle is string) {
+        if ($values->contains($needle)) {
+            echo "contains\n";
+        }
+    }
+    describe($needle);
+    if ($needle is string) {
+        if ($values->remove($needle)) {
+            echo "removed\n";
+        }
+    }
+    describe($needle);
+
+    let writable $holder = new Holder();
+    $holder->replace(new Token("old"));
+    $holder->replace(new Token("new"));
+
+    List<mixed> $items = [1, "two"];
+    mixed $first = $items[0];
+    describe($first);
+
+    Dictionary<string, mixed> $dictionary = ["answer" => 42];
+    mixed $answer = $dictionary["answer"];
+    describe($answer);
+
+    List<mixed> $tokens = [new Token("list-index")];
+    mixed $listToken = $tokens[0];
+    describe($listToken);
+
+    Dictionary<string, mixed> $tokenDictionary = [
+        "token" => new Token("dictionary-index"),
+    ];
+    mixed $dictionaryToken = $tokenDictionary["token"];
+    describe($dictionaryToken);
+}

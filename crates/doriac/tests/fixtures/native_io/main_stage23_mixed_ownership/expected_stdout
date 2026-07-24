@@ -1,0 +1,26 @@
+token=borrowed
+after=borrowed
+string=live
+after-string=live
+token=temporary
+<drop temporary>
+<drop is-temporary>
+is-token
+token=present
+present-after=present
+token=fallback
+<drop fallback>
+contains
+string=member
+removed
+string=member
+<drop old>
+int=1
+int=42
+token=list-index
+token=dictionary-index
+<drop dictionary-index>
+<drop list-index>
+<drop new>
+<drop present>
+<drop borrowed>
