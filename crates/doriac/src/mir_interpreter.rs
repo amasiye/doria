@@ -1,4 +1,4 @@
-use std::cell::{Ref, RefCell, RefMut};
+use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
@@ -97,6 +97,8 @@ enum MixedValue {
     Class {
         object: usize,
         class: crate::class_layout::ClassId,
+        owner: Rc<Cell<usize>>,
+        payload_owned: bool,
     },
 }
 
@@ -181,6 +183,7 @@ enum EvaluationTask {
     CollectionHas {
         collection: mir::LocalId,
         op: mir::CollectionMembershipOp,
+        ownership: mir::MixedOwnership,
     },
     CollectionIsEmpty(mir::LocalId),
     CollectionLength(mir::LocalId),
@@ -204,7 +207,7 @@ enum EvaluationTask {
         argument_count: usize,
         property_expression_count: usize,
         temporary_class_args: Vec<Option<crate::class_layout::ClassId>>,
-        temporary_mixed_args: Vec<bool>,
+        temporary_mixed_args: Vec<mir::MixedOwnership>,
     },
     FinishClassNew {
         object: usize,
@@ -215,14 +218,22 @@ enum EvaluationTask {
     BuildNullableClassSome(crate::class_layout::ClassId),
     BuildMixedValue,
     BuildMixedString,
-    BuildMixedClass,
+    BuildMixedClass(bool),
+    OwnMixed,
     BuildNullableMixedSome,
     WrapNullable(mir::Type),
     AfterNullableMixedCoalesce {
         right: mir::NullableMixedExpression,
+        left_ownership: mir::MixedOwnership,
     },
+    OwnNullableMixed(mir::MixedOwnership),
     NullableScalarIsPresent,
     NullableClassIsPresent(Option<crate::class_layout::ClassId>),
+    NullableMixedIsPresent(mir::MixedOwnership),
+    MixedIs {
+        tag: mir::MixedTag,
+        ownership: mir::MixedOwnership,
+    },
     AfterIntegerCoalesce(mir::IntegerExpression),
     AfterFloatCoalesce(mir::FloatExpression),
     AfterBoolCoalesce(mir::BoolExpression),
@@ -298,7 +309,7 @@ enum EvaluationTask {
         argument_count: usize,
         expectation: ReturnExpectation,
         temporary_class_args: Vec<bool>,
-        temporary_mixed_args: Vec<bool>,
+        temporary_mixed_args: Vec<mir::MixedOwnership>,
     },
     FinishStatement,
     DropTemporaryClasses(Vec<(usize, crate::class_layout::ClassId)>),
@@ -1104,7 +1115,11 @@ impl Interpreter<'_> {
                     Err(message) => return Ok(StepOutcome::Panic(message)),
                 }
             }
-            EvaluationTask::CollectionHas { collection, op } => {
+            EvaluationTask::CollectionHas {
+                collection,
+                op,
+                ownership,
+            } => {
                 let needle = self.pop_local_value()?;
                 let (found, needle_type) = {
                     let collection = self.collection_local(collection)?;
@@ -1130,7 +1145,9 @@ impl Interpreter<'_> {
                 };
                 if op == mir::CollectionMembershipOp::Add {
                     if found {
-                        self.queue_value_drops(needle)?;
+                        if ownership == mir::MixedOwnership::Owned {
+                            self.queue_value_drops(needle)?;
+                        }
                     } else {
                         self.collection_local(collection)?
                             .entries_mut()
@@ -1161,7 +1178,9 @@ impl Interpreter<'_> {
                     }
                     mir::CollectionMembershipOp::Add => unreachable!("handled above"),
                 };
-                self.queue_value_drops(needle)?;
+                if ownership == mir::MixedOwnership::Owned {
+                    self.queue_value_drops(needle)?;
+                }
                 self.push_scalar(mir::ScalarValue::Bool(result))?;
             }
             EvaluationTask::CollectionIsEmpty(collection) => {
@@ -1413,7 +1432,7 @@ impl Interpreter<'_> {
                         temporary_drops.push((*object, *class));
                     }
                     for (index, temporary_mixed) in temporary_mixed_args.iter().enumerate() {
-                        if !temporary_mixed {
+                        if *temporary_mixed != mir::MixedOwnership::Owned {
                             continue;
                         }
                         let promoted = properties.iter().any(|property| {
@@ -1515,11 +1534,23 @@ impl Interpreter<'_> {
                 let value = self.pop_string()?;
                 self.push_mixed(MixedValue::String(value))?;
             }
-            EvaluationTask::BuildMixedClass => {
+            EvaluationTask::BuildMixedClass(payload_owned) => {
                 let LocalValue::Class { object, class } = self.pop_local_value()? else {
                     return Err(InterpreterError::new("mixed class payload is not a class"));
                 };
-                self.push_mixed(MixedValue::Class { object, class })?;
+                self.push_mixed(MixedValue::Class {
+                    object,
+                    class,
+                    owner: Rc::new(Cell::new(1)),
+                    payload_owned,
+                })?;
+            }
+            EvaluationTask::OwnMixed => {
+                let LocalValue::Mixed(mut value) = self.pop_local_value()? else {
+                    return Err(InterpreterError::new("owned mixed value is not mixed"));
+                };
+                retain_mixed_claim(&mut value, mir::MixedOwnership::None);
+                self.push_mixed(value)?;
             }
             EvaluationTask::BuildNullableMixedSome => {
                 let LocalValue::Mixed(value) = self.pop_local_value()? else {
@@ -1543,6 +1574,26 @@ impl Interpreter<'_> {
                         .push((object, class));
                 }
                 self.push_scalar(mir::ScalarValue::Bool(object.is_some()))?;
+            }
+            EvaluationTask::NullableMixedIsPresent(ownership) => {
+                let value = self.pop_nullable_mixed()?;
+                let present = value.is_some();
+                if ownership == mir::MixedOwnership::Owned {
+                    self.queue_value_drops(LocalValue::NullableMixed(value))?;
+                }
+                self.push_scalar(mir::ScalarValue::Bool(present))?;
+            }
+            EvaluationTask::MixedIs { tag, ownership } => {
+                let LocalValue::Mixed(value) = self.pop_local_value()? else {
+                    return Err(InterpreterError::new(
+                        "MIR mixed is expression produced another value type",
+                    ));
+                };
+                let matches = value.tag() == tag;
+                if ownership == mir::MixedOwnership::Owned {
+                    self.queue_value_drops(LocalValue::Mixed(value))?;
+                }
+                self.push_scalar(mir::ScalarValue::Bool(matches))?;
             }
             EvaluationTask::AfterIntegerCoalesce(right) => {
                 let (_, value) = self.pop_nullable_scalar()?;
@@ -1663,14 +1714,28 @@ impl Interpreter<'_> {
                     frame.tasks.push(EvaluationTask::NullableClass(right));
                 }
             }
-            EvaluationTask::AfterNullableMixedCoalesce { right } => {
-                let value = self.pop_nullable_mixed()?;
-                if let Some(value) = value {
-                    self.push_nullable_mixed(Some(value))?;
+            EvaluationTask::AfterNullableMixedCoalesce {
+                right,
+                left_ownership,
+            } => {
+                let mut value = self.pop_nullable_mixed()?;
+                if let Some(present) = value.as_mut() {
+                    retain_mixed_claim(present, left_ownership);
+                    self.push_nullable_mixed(value)?;
                 } else {
                     let frame = self.current_frame_mut()?;
+                    frame
+                        .tasks
+                        .push(EvaluationTask::OwnNullableMixed(right.ownership()));
                     frame.tasks.push(EvaluationTask::NullableMixed(right));
                 }
+            }
+            EvaluationTask::OwnNullableMixed(ownership) => {
+                let mut value = self.pop_nullable_mixed()?;
+                if let Some(value) = value.as_mut() {
+                    retain_mixed_claim(value, ownership);
+                }
+                self.push_nullable_mixed(value)?;
             }
             EvaluationTask::FinishNullableClassCoalesceRight(owned) => {
                 let (class, object) = self.pop_nullable_class()?;
@@ -2012,8 +2077,8 @@ impl Interpreter<'_> {
                         }
                     }
                 }
-                for (argument, temporary) in args.iter().zip(temporary_mixed_args) {
-                    if temporary {
+                for (argument, ownership) in args.iter().zip(temporary_mixed_args) {
+                    if ownership == mir::MixedOwnership::Owned {
                         collect_owned_objects_from_value(argument.clone(), &mut drops);
                     }
                 }
@@ -2342,18 +2407,18 @@ impl Interpreter<'_> {
                 frame.tasks.push(EvaluationTask::NullableClass(*value));
             }
             mir::BoolExpression::NullableMixedIsPresent(value) => {
-                self.expand_nullable_mixed_expression(*value)?;
-                let present = self.pop_nullable_mixed()?.is_some();
-                self.push_scalar(mir::ScalarValue::Bool(present))?;
+                let ownership = value.ownership();
+                let frame = self.current_frame_mut()?;
+                frame
+                    .tasks
+                    .push(EvaluationTask::NullableMixedIsPresent(ownership));
+                frame.tasks.push(EvaluationTask::NullableMixed(*value));
             }
             mir::BoolExpression::MixedIs { mixed, tag } => {
-                self.expand_mixed_expression(*mixed)?;
-                let LocalValue::Mixed(value) = self.pop_local_value()? else {
-                    return Err(InterpreterError::new(
-                        "MIR mixed is expression produced another value type",
-                    ));
-                };
-                self.push_scalar(mir::ScalarValue::Bool(value.tag() == tag))?;
+                let ownership = mixed.ownership();
+                let frame = self.current_frame_mut()?;
+                frame.tasks.push(EvaluationTask::MixedIs { tag, ownership });
+                frame.tasks.push(EvaluationTask::Mixed(*mixed));
             }
             mir::BoolExpression::Not(condition) => {
                 let frame = self.current_frame_mut()?;
@@ -2405,10 +2470,13 @@ impl Interpreter<'_> {
                 value,
                 op,
             } => {
+                let ownership = value.mixed_ownership();
                 let frame = self.current_frame_mut()?;
-                frame
-                    .tasks
-                    .push(EvaluationTask::CollectionHas { collection, op });
+                frame.tasks.push(EvaluationTask::CollectionHas {
+                    collection,
+                    op,
+                    ownership,
+                });
                 frame.tasks.push(EvaluationTask::Rvalue(*value));
             }
             mir::BoolExpression::CollectionIsEmpty { collection } => {
@@ -2722,14 +2790,19 @@ impl Interpreter<'_> {
                 frame.tasks.push(EvaluationTask::BuildMixedValue);
                 frame.tasks.push(EvaluationTask::Value(value));
             }
-            mir::MixedExpression::BoxString(value) => {
+            mir::MixedExpression::BoxString { value, .. } => {
                 let frame = self.current_frame_mut()?;
                 frame.tasks.push(EvaluationTask::BuildMixedString);
                 frame.tasks.push(EvaluationTask::String(value));
             }
-            mir::MixedExpression::BoxClass(value) => {
+            mir::MixedExpression::BoxClass {
+                value,
+                payload_owned,
+            } => {
                 let frame = self.current_frame_mut()?;
-                frame.tasks.push(EvaluationTask::BuildMixedClass);
+                frame
+                    .tasks
+                    .push(EvaluationTask::BuildMixedClass(payload_owned));
                 frame.tasks.push(EvaluationTask::Class(value));
             }
             mir::MixedExpression::CollectionIndex {
@@ -2738,9 +2811,12 @@ impl Interpreter<'_> {
                 transfer,
             } => {
                 let frame = self.current_frame_mut()?;
+                if transfer {
+                    frame.tasks.push(EvaluationTask::OwnMixed);
+                }
                 frame.tasks.push(EvaluationTask::LoadCollectionValue {
                     collection,
-                    transfer,
+                    transfer: false,
                 });
                 frame.tasks.push(EvaluationTask::Rvalue(*index));
             }
@@ -2801,10 +2877,14 @@ impl Interpreter<'_> {
                 right,
                 transfer: _,
             } => {
+                let left_ownership = left.ownership();
                 let frame = self.current_frame_mut()?;
                 frame
                     .tasks
-                    .push(EvaluationTask::AfterNullableMixedCoalesce { right: *right });
+                    .push(EvaluationTask::AfterNullableMixedCoalesce {
+                        right: *right,
+                        left_ownership,
+                    });
                 frame.tasks.push(EvaluationTask::NullableMixed(*left));
             }
         }
@@ -3026,10 +3106,7 @@ impl Interpreter<'_> {
                     .iter()
                     .map(mir::Rvalue::owned_temporary_class)
                     .collect();
-                let temporary_mixed_args = args
-                    .iter()
-                    .map(mir::Rvalue::owned_temporary_mixed)
-                    .collect();
+                let temporary_mixed_args = args.iter().map(mir::Rvalue::mixed_ownership).collect();
                 let property_expression_count = properties
                     .iter()
                     .filter(|property| {
@@ -3175,6 +3252,7 @@ impl Interpreter<'_> {
                 let MixedValue::Class {
                     object,
                     class: actual,
+                    ..
                 } = value
                 else {
                     return Err(InterpreterError::new(
@@ -3569,8 +3647,11 @@ impl Interpreter<'_> {
             .iter()
             .zip(&callee.params)
             .map(|(argument, parameter)| {
-                argument.owned_temporary_mixed()
-                    && !local_in(callee, *parameter).is_ok_and(|local| local.owned)
+                if !local_in(callee, *parameter).is_ok_and(|local| local.owned) {
+                    argument.mixed_ownership()
+                } else {
+                    mir::MixedOwnership::None
+                }
             })
             .collect();
         let frame = self.current_frame_mut()?;
@@ -3617,11 +3698,14 @@ impl Interpreter<'_> {
             },
         ));
         let mut temporary_mixed_args = Vec::with_capacity(args.len() + 1);
-        temporary_mixed_args.push(false);
+        temporary_mixed_args.push(mir::MixedOwnership::None);
         temporary_mixed_args.extend(args.iter().zip(callee.params.iter().skip(1)).map(
             |(argument, parameter)| {
-                argument.owned_temporary_mixed()
-                    && !local_in(callee, *parameter).is_ok_and(|local| local.owned)
+                if !local_in(callee, *parameter).is_ok_and(|local| local.owned) {
+                    argument.mixed_ownership()
+                } else {
+                    mir::MixedOwnership::None
+                }
             },
         ));
         let frame = self.current_frame_mut()?;
@@ -3665,11 +3749,14 @@ impl Interpreter<'_> {
             },
         ));
         let mut temporary_mixed_args = Vec::with_capacity(args.len() + 1);
-        temporary_mixed_args.push(false);
+        temporary_mixed_args.push(mir::MixedOwnership::None);
         temporary_mixed_args.extend(args.iter().zip(callee.params.iter().skip(1)).map(
             |(argument, parameter)| {
-                argument.owned_temporary_mixed()
-                    && !local_in(callee, *parameter).is_ok_and(|local| local.owned)
+                if !local_in(callee, *parameter).is_ok_and(|local| local.owned) {
+                    argument.mixed_ownership()
+                } else {
+                    mir::MixedOwnership::None
+                }
             },
         ));
         let frame = self.current_frame_mut()?;
@@ -4914,11 +5001,36 @@ fn owned_object(value: &LocalValue) -> Option<(usize, crate::class_layout::Class
             object: Some(object),
             class,
         } => Some((*object, *class)),
-        LocalValue::Mixed(MixedValue::Class { object, class })
-        | LocalValue::NullableMixed(Some(MixedValue::Class { object, class })) => {
-            Some((*object, *class))
+        LocalValue::Mixed(MixedValue::Class {
+            object,
+            class,
+            owner,
+            payload_owned,
+        })
+        | LocalValue::NullableMixed(Some(MixedValue::Class {
+            object,
+            class,
+            owner,
+            payload_owned,
+        })) => {
+            let claims = owner.get();
+            if claims == 0 {
+                None
+            } else {
+                owner.set(claims - 1);
+                (claims == 1 && *payload_owned).then_some((*object, *class))
+            }
         }
         _ => None,
+    }
+}
+
+fn retain_mixed_claim(value: &mut MixedValue, ownership: mir::MixedOwnership) {
+    if ownership == mir::MixedOwnership::Owned {
+        return;
+    }
+    if let MixedValue::Class { owner, .. } = value {
+        owner.set(owner.get().saturating_add(1));
     }
 }
 

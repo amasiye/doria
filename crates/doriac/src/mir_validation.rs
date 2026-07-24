@@ -384,7 +384,14 @@ fn validate_statement(
                 ))),
                 (mir::Type::Mixed, mir::Rvalue::Mixed(expression)) => {
                     validate_mixed_expression(program, function, expression)?;
-                    if !local.owned && !is_borrowed_mixed_expression(expression) {
+                    let borrowed = is_borrowed_mixed_expression(expression);
+                    if local.owned && borrowed {
+                        return Err(malformed_mir(format!(
+                            "owned mixed local local{} receives a borrowed value",
+                            target.0
+                        )));
+                    }
+                    if !local.owned && !borrowed {
                         return Err(malformed_mir(format!(
                             "borrowed mixed local local{} receives an owning value",
                             target.0
@@ -398,7 +405,17 @@ fn validate_statement(
                 ))),
                 (mir::Type::NullableMixed, mir::Rvalue::NullableMixed(expression)) => {
                     validate_nullable_mixed_expression(program, function, expression)?;
-                    if !local.owned && !is_borrowed_nullable_mixed_expression(expression) {
+                    let borrowed = is_borrowed_nullable_mixed_expression(expression);
+                    if local.owned
+                        && borrowed
+                        && !matches!(expression, mir::NullableMixedExpression::Null)
+                    {
+                        return Err(malformed_mir(format!(
+                            "owned nullable mixed local local{} receives a borrowed value",
+                            target.0
+                        )));
+                    }
+                    if !local.owned && !borrowed {
                         return Err(malformed_mir(format!(
                             "borrowed nullable mixed local local{} receives an owning value",
                             target.0
@@ -652,6 +669,19 @@ fn validate_statement(
                     expression,
                     &format!("assignment to property{}", property.index),
                 )?;
+            } else if matches!(
+                property_definition.ty,
+                mir::Type::Mixed | mir::Type::NullableMixed
+            ) && value.mixed_ownership() == mir::MixedOwnership::None
+                && !matches!(
+                    value,
+                    mir::Rvalue::NullableMixed(mir::NullableMixedExpression::Null)
+                )
+            {
+                return Err(malformed_mir(format!(
+                    "assignment to property{} stores a borrowed mixed value",
+                    property.index
+                )));
             }
             Ok(())
         }
@@ -669,6 +699,18 @@ fn validate_statement(
                     target.0,
                     value.ty(),
                     property.ty
+                )));
+            }
+            if matches!(property.ty, mir::Type::Mixed | mir::Type::NullableMixed)
+                && value.mixed_ownership() == mir::MixedOwnership::None
+                && !matches!(
+                    value,
+                    mir::Rvalue::NullableMixed(mir::NullableMixedExpression::Null)
+                )
+            {
+                return Err(malformed_mir(format!(
+                    "assignment to static{} stores a borrowed mixed value",
+                    target.0
                 )));
             }
             validate_rvalue(program, function, value)
@@ -1029,27 +1071,11 @@ fn validate_rvalue(
 }
 
 fn is_borrowed_mixed_expression(expression: &mir::MixedExpression) -> bool {
-    matches!(
-        expression,
-        mir::MixedExpression::Local {
-            transfer: false,
-            ..
-        } | mir::MixedExpression::Property { .. }
-            | mir::MixedExpression::CollectionIndex {
-                transfer: false,
-                ..
-            }
-    )
+    expression.ownership() == mir::MixedOwnership::None
 }
 
 fn is_borrowed_nullable_mixed_expression(expression: &mir::NullableMixedExpression) -> bool {
-    matches!(
-        expression,
-        mir::NullableMixedExpression::Local {
-            transfer: false,
-            ..
-        } | mir::NullableMixedExpression::Property { .. }
-    )
+    expression.ownership() == mir::MixedOwnership::None
 }
 
 fn validate_mixed_expression(
@@ -1088,10 +1114,26 @@ fn validate_mixed_expression(
         mir::MixedExpression::BoxValue(value) => {
             validate_value_expression(program, function, value)
         }
-        mir::MixedExpression::BoxString(value) => {
+        mir::MixedExpression::BoxString {
+            value,
+            payload_owned,
+        } => {
+            if !payload_owned && !value.is_borrowed_place() {
+                return Err(malformed_mir(
+                    "shell-only mixed string box uses an owning payload expression",
+                ));
+            }
             validate_string_expression(program, function, value)
         }
-        mir::MixedExpression::BoxClass(value) => {
+        mir::MixedExpression::BoxClass {
+            value,
+            payload_owned,
+        } => {
+            if !payload_owned && value.owned_temporary_class().is_some() {
+                return Err(malformed_mir(
+                    "shell-only mixed class box uses an owning payload expression",
+                ));
+            }
             validate_class_expression(program, function, value)
         }
         mir::MixedExpression::CollectionIndex {
@@ -2349,10 +2391,10 @@ fn collect_mixed_class_local_accesses<'a>(
         mir::MixedExpression::BoxValue(value) => {
             collect_value_class_local_accesses(value, accesses)
         }
-        mir::MixedExpression::BoxString(value) => {
+        mir::MixedExpression::BoxString { value, .. } => {
             collect_string_class_local_accesses(value, accesses)
         }
-        mir::MixedExpression::BoxClass(value) => {
+        mir::MixedExpression::BoxClass { value, .. } => {
             collect_class_expression_local_accesses(value, accesses)
         }
         mir::MixedExpression::Call { function, args } => {
@@ -4324,10 +4366,12 @@ fn mixed_observes_property(
 ) -> bool {
     match value {
         mir::MixedExpression::BoxValue(value) => value_observes_property(value, receiver, property),
-        mir::MixedExpression::BoxString(value) => {
+        mir::MixedExpression::BoxString { value, .. } => {
             string_observes_property(value, receiver, property)
         }
-        mir::MixedExpression::BoxClass(value) => class_observes_property(value, receiver, property),
+        mir::MixedExpression::BoxClass { value, .. } => {
+            class_observes_property(value, receiver, property)
+        }
         mir::MixedExpression::Call { args, .. } => args
             .iter()
             .any(|value| rvalue_observes_property(value, receiver, property)),
@@ -4944,6 +4988,17 @@ fn validate_call_args_for_params(
                     expression,
                     &format!("call to {} argument {}", callee.name, index + 1),
                 )?;
+            }
+        } else if matches!(parameter_type, mir::Type::Mixed | mir::Type::NullableMixed) {
+            let ownership = argument.mixed_ownership();
+            if (parameter_definition.owned || promoted_transfer)
+                && ownership == mir::MixedOwnership::None
+            {
+                return Err(malformed_mir(format!(
+                    "call to {} borrows mixed argument {} for an owned parameter",
+                    callee.name,
+                    index + 1
+                )));
             }
         }
         if class_like_parameter && !parameter_definition.owned && !promoted_transfer {

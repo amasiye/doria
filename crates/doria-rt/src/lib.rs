@@ -348,12 +348,52 @@ pub unsafe extern "C" fn dr_v1_collection_contains(
 /// The returned box owns that payload until generated code explicitly drops it.
 #[no_mangle]
 pub unsafe extern "C" fn dr_v1_mixed_new(tag: u8, type_id: u32, payload: u64) -> *mut DrMixedV1 {
-    let value = mixed::new(tag, type_id, payload);
+    let value = mixed::new_owned(tag, type_id, payload);
     if value.is_null() {
         static MESSAGE: &[u8] = b"mixed allocation failed";
         dr_v1_panic(ptr::null(), MESSAGE.as_ptr(), MESSAGE.len());
     }
     value
+}
+
+/// # Safety
+///
+/// `payload` must remain live for the returned shell's lifetime.
+#[no_mangle]
+pub unsafe extern "C" fn dr_v1_mixed_new_borrowed(
+    tag: u8,
+    type_id: u32,
+    payload: u64,
+) -> *mut DrMixedV1 {
+    let value = mixed::new_borrowed(tag, type_id, payload);
+    if value.is_null() {
+        static MESSAGE: &[u8] = b"mixed allocation failed";
+        dr_v1_panic(ptr::null(), MESSAGE.as_ptr(), MESSAGE.len());
+    }
+    value
+}
+
+/// # Safety
+///
+/// `value` must point to a live mixed box.
+#[no_mangle]
+pub unsafe extern "C" fn dr_v1_mixed_clone_owned(value: *const DrMixedV1) -> *mut DrMixedV1 {
+    let clone = mixed::clone_owned(value);
+    if clone.is_null() {
+        static MESSAGE: &[u8] = b"mixed ownership clone failed";
+        dr_v1_panic(ptr::null(), MESSAGE.as_ptr(), MESSAGE.len());
+    }
+    clone
+}
+
+/// Returns whether this released the final claim to an owned payload.
+///
+/// # Safety
+///
+/// `value` must point to a live mixed box.
+#[no_mangle]
+pub unsafe extern "C" fn dr_v1_mixed_release_owned(value: *mut DrMixedV1) -> u8 {
+    u8::from(mixed::release_owned(value))
 }
 
 /// # Safety

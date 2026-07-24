@@ -108,6 +108,7 @@ examples/native/main_stage23_bytes_oob_panic.doria
 examples/native/main_stage23_bytes_ownership.doria
 examples/native/main_stage23_bytes_stdio.doria
 examples/native/main_stage23_mixed_collections.doria
+examples/native/main_stage23_mixed_ownership.doria
 examples/native/main_stage23_mixed_round_trip.doria
 examples/native/main_stage23_mixed_stdin_reads.doria
 examples/native/main_stage23_nullable_mixed.doria

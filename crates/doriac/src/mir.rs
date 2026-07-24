@@ -260,17 +260,17 @@ impl Rvalue {
         }
     }
 
-    pub const fn owned_temporary_mixed(&self) -> bool {
+    pub const fn mixed_ownership(&self) -> MixedOwnership {
         match self {
-            Self::Mixed(value) => value.owned_temporary_mixed(),
-            Self::NullableMixed(value) => value.owned_temporary_mixed(),
+            Self::Mixed(value) => value.ownership(),
+            Self::NullableMixed(value) => value.ownership(),
             Self::Value(_)
             | Self::String(_)
             | Self::NullableScalar(_)
             | Self::NullableString(_)
             | Self::Class(_)
             | Self::NullableClass(_)
-            | Self::Collection(_) => false,
+            | Self::Collection(_) => MixedOwnership::None,
         }
     }
 }
@@ -385,6 +385,19 @@ impl MixedTag {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MixedOwnership {
+    None,
+    ShellOnly,
+    Owned,
+}
+
+impl MixedOwnership {
+    pub const fn has_shell(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MixedExpression {
     Local {
@@ -400,8 +413,14 @@ pub enum MixedExpression {
         args: Vec<Rvalue>,
     },
     BoxValue(ValueExpression),
-    BoxString(StringExpression),
-    BoxClass(ClassExpression),
+    BoxString {
+        value: StringExpression,
+        payload_owned: bool,
+    },
+    BoxClass {
+        value: ClassExpression,
+        payload_owned: bool,
+    },
     CollectionIndex {
         collection: LocalId,
         index: Box<Rvalue>,
@@ -410,11 +429,26 @@ pub enum MixedExpression {
 }
 
 impl MixedExpression {
-    pub const fn owned_temporary_mixed(&self) -> bool {
+    pub const fn ownership(&self) -> MixedOwnership {
         match self {
-            Self::Call { .. } | Self::BoxValue(_) | Self::BoxString(_) | Self::BoxClass(_) => true,
-            Self::CollectionIndex { transfer, .. } => *transfer,
-            Self::Local { .. } | Self::Property { .. } => false,
+            Self::Local { transfer: true, .. }
+            | Self::Call { .. }
+            | Self::CollectionIndex { transfer: true, .. } => MixedOwnership::Owned,
+            Self::BoxValue(_) => MixedOwnership::ShellOnly,
+            Self::BoxString { payload_owned, .. } | Self::BoxClass { payload_owned, .. } => {
+                if *payload_owned {
+                    MixedOwnership::Owned
+                } else {
+                    MixedOwnership::ShellOnly
+                }
+            }
+            Self::Local {
+                transfer: false, ..
+            }
+            | Self::Property { .. }
+            | Self::CollectionIndex {
+                transfer: false, ..
+            } => MixedOwnership::None,
         }
     }
 }
@@ -443,13 +477,17 @@ pub enum NullableMixedExpression {
 }
 
 impl NullableMixedExpression {
-    pub const fn owned_temporary_mixed(&self) -> bool {
+    pub const fn ownership(&self) -> MixedOwnership {
         match self {
-            Self::Mixed(value) => value.owned_temporary_mixed(),
-            Self::Call { .. } => true,
-            Self::Null | Self::Local { .. } | Self::Property { .. } | Self::Coalesce { .. } => {
-                false
+            Self::Mixed(value) => value.ownership(),
+            Self::Local { transfer: true, .. } | Self::Call { .. } | Self::Coalesce { .. } => {
+                MixedOwnership::Owned
             }
+            Self::Null
+            | Self::Local {
+                transfer: false, ..
+            }
+            | Self::Property { .. } => MixedOwnership::None,
         }
     }
 }
@@ -803,6 +841,19 @@ pub enum StringExpression {
         offset: Box<Rvalue>,
     },
     MixedPayload(LocalId),
+}
+
+impl StringExpression {
+    pub const fn is_borrowed_place(&self) -> bool {
+        matches!(
+            self,
+            Self::Local(_)
+                | Self::NullableLocalAssumeNonNull(_)
+                | Self::Property { .. }
+                | Self::Static(_)
+                | Self::MixedPayload(_)
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1206,8 +1257,8 @@ fn rvalue_class_temporary_capacity(value: &Rvalue) -> usize {
 fn mixed_class_temporary_capacity(value: &MixedExpression) -> usize {
     match value {
         MixedExpression::BoxValue(value) => value_class_temporary_capacity(value),
-        MixedExpression::BoxString(value) => string_class_temporary_capacity(value),
-        MixedExpression::BoxClass(value) => class_expression_temporary_capacity(value),
+        MixedExpression::BoxString { value, .. } => string_class_temporary_capacity(value),
+        MixedExpression::BoxClass { value, .. } => class_expression_temporary_capacity(value),
         MixedExpression::Call { args, .. } => {
             args.iter().map(rvalue_class_temporary_capacity).sum()
         }
@@ -1811,8 +1862,8 @@ impl fmt::Display for MixedExpression {
             ),
             Self::Call { function, args } => write_call(formatter, *function, args),
             Self::BoxValue(value) => write!(formatter, "mixed({value})"),
-            Self::BoxString(value) => write!(formatter, "mixed({value})"),
-            Self::BoxClass(value) => write!(formatter, "mixed({value})"),
+            Self::BoxString { value, .. } => write!(formatter, "mixed({value})"),
+            Self::BoxClass { value, .. } => write!(formatter, "mixed({value})"),
             Self::CollectionIndex {
                 collection,
                 index,

@@ -578,3 +578,62 @@ function main(): void
     );
     assert!(family.message.contains("Decision 0100"));
 }
+
+#[test]
+fn mixed_collection_index_bindings_retain_without_removing_elements() {
+    let mir = doriac::lower_source_to_mir(
+        "stage23-mixed-index-ownership.doria",
+        r#"
+class Token { function __construct(string $name) {} }
+function main(): void
+{
+    List<mixed> $items = [new Token("list")];
+    mixed $item = $items[0];
+    Dictionary<string, mixed> $named = ["token" => new Token("dictionary")];
+    mixed $token = $named["token"];
+}
+"#,
+    )
+    .expect("mixed index bindings should receive retained ownership claims");
+
+    let transfers = mir
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.statements)
+        .filter(|statement| {
+            matches!(
+                statement,
+                doriac::mir::Statement::AssignLocal {
+                    value: doriac::mir::Rvalue::Mixed(
+                        doriac::mir::MixedExpression::CollectionIndex { transfer: true, .. }
+                    ),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(transfers, 2);
+}
+
+#[test]
+fn non_narrowed_nullable_mixed_cannot_flow_into_non_null_mixed() {
+    let errors = doriac::lower_source_to_mir(
+        "stage23-nullable-mixed-sink.doria",
+        r#"
+function consume(mixed $value): void {}
+function main(): void
+{
+    ?mixed $value = null;
+    consume($value);
+}
+"#,
+    )
+    .expect_err("nullable mixed must be narrowed before entering a mixed sink");
+    assert!(errors.iter().any(|diagnostic| {
+        diagnostic.message.contains("nullable")
+            || diagnostic
+                .message
+                .contains("mixed expression could not be lowered")
+    }));
+}

@@ -2644,7 +2644,8 @@ fn lower_var_decl(decl: &hir::VarDecl, context: &mut LoweringContext) -> Diagnos
     }
     if ty == mir::Type::Mixed {
         let value = lower_mixed_expression(&decl.initializer, true, context)?;
-        let local = context.declare_user_local_owned(&decl.name, decl.writable, ty, true);
+        let owned = value.ownership() != mir::MixedOwnership::None;
+        let local = context.declare_user_local_owned(&decl.name, decl.writable, ty, owned);
         context.push_statement(mir::Statement::AssignLocal {
             target: local,
             value: mir::Rvalue::Mixed(value),
@@ -5560,7 +5561,10 @@ fn lower_mixed_expression(
         if context.local_type(local) == mir::Type::Mixed {
             return Ok(mir::MixedExpression::Local { local, transfer });
         }
-        if context.local_type(local) == mir::Type::NullableMixed && !transfer {
+        if context.local_type(local) == mir::Type::NullableMixed
+            && !transfer
+            && context.expression_type(expr)? == mir::Type::Mixed
+        {
             return Ok(mir::MixedExpression::Local {
                 local,
                 transfer: false,
@@ -5575,6 +5579,18 @@ fn lower_mixed_expression(
         if ty == mir::Type::Mixed {
             return Ok(mir::MixedExpression::Property { object, property });
         }
+    }
+    if let hir::Expr::Index {
+        collection, index, ..
+    } = unparenthesized_place(expr)
+    {
+        let (collection, index) =
+            lower_collection_index_operand(collection, index, mir::Type::Mixed, context)?;
+        return Ok(mir::MixedExpression::CollectionIndex {
+            collection,
+            index: Box::new(index),
+            transfer,
+        });
     }
     if let hir::Expr::FunctionCall { name, args, span } = expr {
         let signature = context.lookup_function(name, *span)?;
@@ -5621,12 +5637,22 @@ fn lower_mixed_expression(
         mir::Type::Scalar(_) => Ok(mir::MixedExpression::BoxValue(lower_value_expression(
             expr, context,
         )?)),
-        mir::Type::String => Ok(mir::MixedExpression::BoxString(lower_string_expression(
-            expr, context,
-        )?)),
-        mir::Type::Class(class) => Ok(mir::MixedExpression::BoxClass(lower_class_expression(
-            expr, class, true, context,
-        )?)),
+        mir::Type::String => {
+            let value = lower_string_expression(expr, context)?;
+            let payload_owned = transfer || !value.is_borrowed_place();
+            Ok(mir::MixedExpression::BoxString {
+                value,
+                payload_owned,
+            })
+        }
+        mir::Type::Class(class) => {
+            let value = lower_class_expression(expr, class, transfer, context)?;
+            let payload_owned = transfer || value.owned_temporary_class().is_some();
+            Ok(mir::MixedExpression::BoxClass {
+                value,
+                payload_owned,
+            })
+        }
         mir::Type::Mixed => Err(vec![unsupported(
             expr.span(),
             "mixed expression could not be lowered as a mixed value",

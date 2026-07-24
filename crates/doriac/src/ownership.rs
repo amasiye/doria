@@ -61,6 +61,7 @@ struct Binding {
 struct PropertyInfo {
     class: Option<String>,
     collection: Option<CollectionInfo>,
+    mixed: bool,
     move_type: bool,
     writable: bool,
 }
@@ -78,6 +79,7 @@ enum CollectionFamily {
 struct CollectionInfo {
     family: CollectionFamily,
     value_move: bool,
+    value_mixed: bool,
     value_class: Option<String>,
     value_collection: Option<Box<CollectionInfo>>,
 }
@@ -219,6 +221,7 @@ pub(crate) fn check_program_with_inferred_move_returns(
                                         &classes,
                                         Some(&class.name),
                                     ),
+                                    mixed: property.ty.name == "mixed",
                                     move_type,
                                     writable: property.writable,
                                 },
@@ -257,6 +260,7 @@ pub(crate) fn check_program_with_inferred_move_returns(
                                                     &classes,
                                                     Some(&class.name),
                                                 ),
+                                                mixed: param.ty.name == "mixed",
                                                 move_type,
                                                 writable: param.writable,
                                             },
@@ -861,7 +865,9 @@ impl Checker<'_> {
                 });
                 let class = declared_class.or_else(|| self.expr_class(&decl.initializer, scopes));
                 let borrowed_initializer = self.expr_returns_borrow(&decl.initializer, scopes);
-                if borrowed_initializer {
+                let borrowed_mixed_index = borrowed_initializer
+                    && self.expr_is_mixed_collection_index(&decl.initializer, scopes);
+                if borrowed_initializer && !borrowed_mixed_index {
                     self.diagnostics.push(
                         Diagnostic::new(
                             "E0478",
@@ -885,7 +891,7 @@ impl Checker<'_> {
                 self.use_expr(
                     &decl.initializer,
                     scopes,
-                    if borrowed_initializer {
+                    if borrowed_initializer && !borrowed_mixed_index {
                         UseMode::Read
                     } else if initializer_moves || class.is_some() || mixed || declared_move_type {
                         UseMode::Give
@@ -999,6 +1005,9 @@ impl Checker<'_> {
                         self.use_expr(&assignment.value, scopes, UseMode::Read);
                     }
                 } else {
+                    let mixed_property = self
+                        .assignment_property_info(&assignment.target, scopes)
+                        .is_some_and(|property| property.mixed);
                     if self.expr_returns_borrow(&assignment.value, scopes) {
                         self.diagnostics.push(
                             Diagnostic::new(
@@ -1010,7 +1019,8 @@ impl Checker<'_> {
                                 "assign an independently owned value to the property instead",
                             ),
                         );
-                    } else if self.expr_is_move_value(&assignment.value, scopes) {
+                    } else if self.expr_is_move_value(&assignment.value, scopes) && !mixed_property
+                    {
                         self.diagnostics.push(
                             Diagnostic::new(
                                 "E0472",
@@ -1022,7 +1032,16 @@ impl Checker<'_> {
                             ),
                         );
                     }
-                    self.use_assignment_operands(&assignment.target, &assignment.value, scopes);
+                    self.use_assignment_operands_with_mode(
+                        &assignment.target,
+                        &assignment.value,
+                        scopes,
+                        if mixed_property {
+                            UseMode::Give
+                        } else {
+                            UseMode::Read
+                        },
+                    );
                 }
                 Flow::fallthrough()
             }
@@ -1371,6 +1390,16 @@ impl Checker<'_> {
     }
 
     fn use_assignment_operands(&mut self, target: &Expr, value: &Expr, scopes: &mut Scopes) {
+        self.use_assignment_operands_with_mode(target, value, scopes, UseMode::Read);
+    }
+
+    fn use_assignment_operands_with_mode(
+        &mut self,
+        target: &Expr,
+        value: &Expr,
+        scopes: &mut Scopes,
+        value_mode: UseMode,
+    ) {
         self.use_expr(target, scopes, UseMode::Write);
         let mut ungrouped_target = target;
         while let Expr::Grouped { expr, .. } = ungrouped_target {
@@ -1392,7 +1421,7 @@ impl Checker<'_> {
         let target_inserted = assignment_target
             .as_ref()
             .is_some_and(|target| self.active_assignment_targets.insert(target.clone()));
-        self.use_expr(value, scopes, UseMode::Read);
+        self.use_expr(value, scopes, value_mode);
         if target_inserted {
             self.active_assignment_targets
                 .remove(assignment_target.as_deref().expect("inserted target"));
@@ -2386,7 +2415,7 @@ impl Checker<'_> {
             } => self.expr_returns_borrow(left, scopes) || self.expr_returns_borrow(right, scopes),
             Expr::Index { collection, .. } => self
                 .expr_collection_info(collection, scopes)
-                .is_some_and(|collection| collection.value_move),
+                .is_some_and(|collection| collection.value_move && !collection.value_mixed),
             Expr::PropertyAccess {
                 object, property, ..
             } => self
@@ -2397,6 +2426,44 @@ impl Checker<'_> {
                         && matches!(property.as_str(), "first" | "last")
                 }),
             _ => false,
+        }
+    }
+
+    fn expr_is_mixed_collection_index(&self, expr: &Expr, scopes: &Scopes) -> bool {
+        match expr {
+            Expr::Grouped { expr, .. } => self.expr_is_mixed_collection_index(expr, scopes),
+            Expr::Index { collection, .. } => self
+                .expr_collection_info(collection, scopes)
+                .is_some_and(|collection| collection.value_mixed),
+            _ => false,
+        }
+    }
+
+    fn expr_is_mixed_value(&self, expr: &Expr, scopes: &Scopes) -> bool {
+        match expr {
+            Expr::Variable { name, .. } => scopes.get(name).is_some_and(|binding| binding.mixed),
+            Expr::Grouped { expr, .. } => self.expr_is_mixed_value(expr, scopes),
+            Expr::Index { collection, .. } => self
+                .expr_collection_info(collection, scopes)
+                .is_some_and(|collection| collection.value_mixed),
+            _ => false,
+        }
+    }
+
+    fn assignment_property_info<'a>(
+        &'a self,
+        target: &Expr,
+        scopes: &Scopes,
+    ) -> Option<&'a PropertyInfo> {
+        match target {
+            Expr::Grouped { expr, .. } => self.assignment_property_info(expr, scopes),
+            Expr::PropertyAccess {
+                object, property, ..
+            } => {
+                let class = self.expr_class(object, scopes)?;
+                self.properties.get(&(class, property.clone()))
+            }
+            _ => None,
         }
     }
 
@@ -2489,6 +2556,7 @@ impl Checker<'_> {
                         CollectionFamily::List
                     },
                     value_move: value.is_some_and(|value| self.expr_is_move_value(value, scopes)),
+                    value_mixed: value.is_some_and(|value| self.expr_is_mixed_value(value, scopes)),
                     value_class: value.and_then(|value| self.expr_class(value, scopes)),
                     value_collection: value
                         .and_then(|value| self.expr_collection_info(value, scopes))
@@ -2533,6 +2601,7 @@ impl Checker<'_> {
                 Some(CollectionInfo {
                     family: CollectionFamily::Set,
                     value_move: source.as_ref().is_some_and(|info| info.value_move),
+                    value_mixed: source.as_ref().is_some_and(|info| info.value_mixed),
                     value_class: source.as_ref().and_then(|info| info.value_class.clone()),
                     value_collection: source.and_then(|info| info.value_collection.clone()),
                 })
@@ -2679,6 +2748,7 @@ fn type_ref_collection_info(
     Some(CollectionInfo {
         family,
         value_move: type_ref_is_move_type(value, classes, receiver_class),
+        value_mixed: value.name == "mixed",
         value_class: type_ref_class_name(value, classes, receiver_class),
         value_collection: type_ref_collection_info(value, classes, receiver_class).map(Box::new),
     })
@@ -2688,6 +2758,7 @@ fn bytes_collection_info() -> CollectionInfo {
     CollectionInfo {
         family: CollectionFamily::Bytes,
         value_move: false,
+        value_mixed: false,
         value_class: None,
         value_collection: None,
     }
@@ -2697,6 +2768,7 @@ fn byte_array_collection_info() -> CollectionInfo {
     CollectionInfo {
         family: CollectionFamily::TypedArray,
         value_move: false,
+        value_mixed: false,
         value_class: None,
         value_collection: None,
     }

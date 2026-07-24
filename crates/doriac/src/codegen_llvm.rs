@@ -30,14 +30,15 @@ use crate::native_abi::{
     COLLECTION_LENGTH, COLLECTION_NEW, COLLECTION_NULLABLE_ACCESS, COLLECTION_PUSH,
     COLLECTION_PUSH_UNIQUE, COLLECTION_REMOVE_AT, COLLECTION_REMOVE_VALUE, COLLECTION_SET_ALGEBRA,
     COLLECTION_SET_AT, COLLECTION_VALUE_AT, FORMAT_F32, FORMAT_F64, FORMAT_I64, FORMAT_STRING,
-    FORMAT_U64, MIXED_FREE, MIXED_NEW, MIXED_PAYLOAD, MIXED_TAG, MIXED_TAG_BOOL, MIXED_TAG_CLASS,
-    MIXED_TAG_FLOAT32, MIXED_TAG_FLOAT64, MIXED_TAG_INT16, MIXED_TAG_INT32, MIXED_TAG_INT64,
-    MIXED_TAG_INT8, MIXED_TAG_STRING, MIXED_TAG_UINT16, MIXED_TAG_UINT32, MIXED_TAG_UINT64,
-    MIXED_TAG_UINT8, MIXED_TYPE_ID, NULLABLE_STRING_EQUAL, READ_FILE, READ_FILE_BYTES,
-    READ_STDIN_BYTES, READ_STDIN_LINE, STRING_COMPARE, STRING_CONCAT, STRING_DATA,
-    STRING_FROM_BOOL, STRING_FROM_F32, STRING_FROM_F64, STRING_FROM_I64, STRING_FROM_U64,
-    STRING_FROM_UTF8, STRING_LENGTH, STRING_RELEASE, STRING_RETAIN, STRING_WRITE_STDERR,
-    STRING_WRITE_STDOUT, WRITE_FILE, WRITE_FILE_BYTES, WRITE_STDERR_BYTES, WRITE_STDOUT_BYTES,
+    FORMAT_U64, MIXED_CLONE_OWNED, MIXED_FREE, MIXED_NEW, MIXED_NEW_BORROWED, MIXED_PAYLOAD,
+    MIXED_RELEASE_OWNED, MIXED_TAG, MIXED_TAG_BOOL, MIXED_TAG_CLASS, MIXED_TAG_FLOAT32,
+    MIXED_TAG_FLOAT64, MIXED_TAG_INT16, MIXED_TAG_INT32, MIXED_TAG_INT64, MIXED_TAG_INT8,
+    MIXED_TAG_STRING, MIXED_TAG_UINT16, MIXED_TAG_UINT32, MIXED_TAG_UINT64, MIXED_TAG_UINT8,
+    MIXED_TYPE_ID, NULLABLE_STRING_EQUAL, READ_FILE, READ_FILE_BYTES, READ_STDIN_BYTES,
+    READ_STDIN_LINE, STRING_COMPARE, STRING_CONCAT, STRING_DATA, STRING_FROM_BOOL, STRING_FROM_F32,
+    STRING_FROM_F64, STRING_FROM_I64, STRING_FROM_U64, STRING_FROM_UTF8, STRING_LENGTH,
+    STRING_RELEASE, STRING_RETAIN, STRING_WRITE_STDERR, STRING_WRITE_STDOUT, WRITE_FILE,
+    WRITE_FILE_BYTES, WRITE_STDERR_BYTES, WRITE_STDOUT_BYTES,
 };
 use crate::numeric::{FloatType, FloatValue, IntegerPanic, IntegerType, IntegerValue};
 
@@ -68,7 +69,13 @@ pub fn lower_mir_to_object(program: &mir::Program) -> Result<Vec<u8>, BackendErr
     module.set_data_layout(&target_data.get_data_layout());
 
     let functions = declare_functions(&context, &module, &target_data, program)?;
+    let class_drop_functions = declare_class_drop_functions(&context, &module, program);
     let statics = declare_statics(&context, &module, &target_data, program)?;
+    let declarations = DeclaredProgram {
+        functions,
+        class_drop_functions,
+        statics,
+    };
     for function in &program.functions {
         define_function(
             &context,
@@ -76,11 +83,19 @@ pub fn lower_mir_to_object(program: &mir::Program) -> Result<Vec<u8>, BackendErr
             &target_data,
             program,
             function,
-            &functions,
-            &statics,
+            &declarations,
         )?;
     }
-    define_process_main(&context, &module, program, &functions)?;
+    define_class_drop_functions(
+        &context,
+        &module,
+        &target_data,
+        program,
+        &declarations.functions,
+        &declarations.class_drop_functions,
+        &declarations.statics,
+    )?;
+    define_process_main(&context, &module, program, &declarations.functions)?;
 
     module
         .verify()
@@ -98,6 +113,34 @@ pub fn lower_mir_to_object(program: &mir::Program) -> Result<Vec<u8>, BackendErr
         .write_to_memory_buffer(&module, FileType::Object)
         .map_err(|error| backend_failure(format!("LLVM object emission failed: {error}")))?;
     Ok(object.as_slice().to_vec())
+}
+
+struct DeclaredProgram<'ctx> {
+    functions: Vec<FunctionValue<'ctx>>,
+    class_drop_functions: Vec<FunctionValue<'ctx>>,
+    statics: Vec<GlobalValue<'ctx>>,
+}
+
+fn declare_class_drop_functions<'ctx>(
+    context: &'ctx Context,
+    module: &Module<'ctx>,
+    program: &mir::Program,
+) -> Vec<FunctionValue<'ctx>> {
+    let pointer = context.ptr_type(AddressSpace::default());
+    let signature = context
+        .void_type()
+        .fn_type(&[pointer.into(), pointer.into()], false);
+    program
+        .classes
+        .iter()
+        .map(|class| {
+            module.add_function(
+                &format!("__doria_drop_class_{}", class.id.0),
+                signature,
+                Some(Linkage::Internal),
+            )
+        })
+        .collect()
 }
 
 fn declare_functions<'ctx>(
@@ -260,10 +303,10 @@ fn define_function<'ctx>(
     target_data: &TargetData,
     program: &mir::Program,
     function: &mir::Function,
-    functions: &[FunctionValue<'ctx>],
-    statics: &[GlobalValue<'ctx>],
+    declarations: &DeclaredProgram<'ctx>,
 ) -> Result<(), BackendError> {
-    let llvm_function = *functions
+    let llvm_function = *declarations
+        .functions
         .get(function.id.0)
         .ok_or_else(|| malformed_mir(format!("function{} was not declared", function.id.0)))?;
     let builder = context.create_builder();
@@ -332,8 +375,9 @@ fn define_function<'ctx>(
         builder,
         program,
         function,
-        functions,
-        statics,
+        functions: &declarations.functions,
+        class_drop_functions: &declarations.class_drop_functions,
+        statics: &declarations.statics,
         local_slots,
         blocks,
         current_frame: frame,
@@ -354,6 +398,59 @@ fn define_function<'ctx>(
             .builder
             .position_at_end(block_for(&lowerer.blocks, block.id)?);
         lowerer.lower_block(block)?;
+    }
+    Ok(())
+}
+
+fn define_class_drop_functions<'ctx>(
+    context: &'ctx Context,
+    module: &Module<'ctx>,
+    target_data: &TargetData,
+    program: &mir::Program,
+    functions: &[FunctionValue<'ctx>],
+    class_drop_functions: &[FunctionValue<'ctx>],
+    statics: &[GlobalValue<'ctx>],
+) -> Result<(), BackendError> {
+    let function = function_in(program, program.entry)?;
+    for class in &program.classes {
+        let llvm_function = *class_drop_functions.get(class.id.0).ok_or_else(|| {
+            malformed_mir(format!(
+                "class{} drop function was not declared",
+                class.id.0
+            ))
+        })?;
+        let builder = context.create_builder();
+        let entry = context.append_basic_block(llvm_function, "entry");
+        builder.position_at_end(entry);
+        let current_frame = llvm_function
+            .get_nth_param(0)
+            .ok_or_else(|| malformed_mir("class drop function is missing its frame"))?
+            .into_pointer_value();
+        let object = llvm_function
+            .get_nth_param(1)
+            .ok_or_else(|| malformed_mir("class drop function is missing its object"))?
+            .into_pointer_value();
+        let mut lowerer = FunctionLowerer {
+            context,
+            module,
+            target_data,
+            builder,
+            program,
+            function,
+            functions,
+            class_drop_functions,
+            statics,
+            local_slots: Vec::new(),
+            blocks: Vec::new(),
+            current_frame,
+            next_data_id: 0,
+            defer_class_temporary_drops: false,
+            deferred_class_temporary_slots: Vec::new(),
+            deferred_class_temporary_slot_cursor: 0,
+            deferred_class_temporary_drops: Vec::new(),
+        };
+        lowerer.drop_class_value(object, class.id)?;
+        build(lowerer.builder.build_return(None))?;
     }
     Ok(())
 }
@@ -413,6 +510,7 @@ struct FunctionLowerer<'ctx, 'program> {
     program: &'program mir::Program,
     function: &'program mir::Function,
     functions: &'program [FunctionValue<'ctx>],
+    class_drop_functions: &'program [FunctionValue<'ctx>],
     statics: &'program [GlobalValue<'ctx>],
     local_slots: Vec<Option<PointerValue<'ctx>>>,
     blocks: Vec<BasicBlock<'ctx>>,
@@ -697,7 +795,7 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 let value = self.lower_rvalue(value)?;
                 let address = self.static_address(*target)?;
                 let old = match property.ty {
-                    mir::Type::String => Some(
+                    mir::Type::String | mir::Type::Mixed | mir::Type::NullableMixed => Some(
                         build(self.builder.build_load(
                             self.context.ptr_type(AddressSpace::default()),
                             address,
@@ -718,7 +816,11 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 };
                 build(self.builder.build_store(address, value))?;
                 if let Some(old) = old {
-                    self.release_string(old)?;
+                    if matches!(property.ty, mir::Type::Mixed | mir::Type::NullableMixed) {
+                        self.drop_mixed_value(old)?;
+                    } else {
+                        self.release_string(old)?;
+                    }
                 }
             }
             mir::Statement::DropClass { local, .. } => {
@@ -2173,7 +2275,7 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 }
                 let mut lowered_args = Vec::with_capacity(args.len());
                 let mut owned_strings = Vec::new();
-                let mut owned_mixed = Vec::new();
+                let mut temporary_mixed = Vec::new();
                 for (index, argument) in args.iter().enumerate() {
                     let value = self.lower_rvalue(argument)?;
                     match argument.ty() {
@@ -2188,8 +2290,9 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                         )),
                         _ => {}
                     }
-                    if argument.owned_temporary_mixed() {
-                        owned_mixed.push((index, value.into_pointer_value()));
+                    let ownership = argument.mixed_ownership();
+                    if ownership.has_shell() {
+                        temporary_mixed.push((index, value.into_pointer_value(), ownership));
                     }
                     lowered_args.push(value);
                 }
@@ -2254,7 +2357,7 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                     )?;
 
                     let constructor_definition = function_in(self.program, *constructor)?;
-                    for (index, value) in &owned_mixed {
+                    for (index, value, ownership) in &temporary_mixed {
                         let promoted = properties.iter().any(|property| {
                             matches!(
                                 property.source,
@@ -2273,7 +2376,7 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                                     ))
                                 })?;
                         if !promoted && !local_in(constructor_definition, parameter)?.owned {
-                            self.drop_mixed_value(*value)?;
+                            self.cleanup_mixed_temporary(*value, *ownership)?;
                         }
                     }
                     for (index, argument) in args.iter().enumerate() {
@@ -3008,6 +3111,7 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
         &mut self,
         tag: mir::MixedTag,
         payload: BasicValueEnum<'ctx>,
+        payload_owned: bool,
     ) -> Result<PointerValue<'ctx>, BackendError> {
         let pointer = self.context.ptr_type(AddressSpace::default());
         let i8_type = self.context.i8_type();
@@ -3017,7 +3121,11 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
         let (tag, type_id) = self.mixed_tag_value(tag);
         Ok(self
             .call_runtime(
-                MIXED_NEW,
+                if payload_owned {
+                    MIXED_NEW
+                } else {
+                    MIXED_NEW_BORROWED
+                },
                 &[i8_type.into(), i32_type.into(), i64_type.into()],
                 Some(pointer.into()),
                 &[
@@ -3063,24 +3171,42 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                     mir::ScalarType::Float(ty) => mir::MixedTag::Float(ty),
                 };
                 let payload = self.lower_value_expression(value)?;
-                self.lower_mixed_box(tag, payload)
+                self.lower_mixed_box(tag, payload, false)
             }
-            mir::MixedExpression::BoxString(value) => {
+            mir::MixedExpression::BoxString {
+                value,
+                payload_owned,
+            } => {
                 let payload = self.lower_string_expression(value)?;
-                self.lower_mixed_box(mir::MixedTag::String, payload.into())
+                let mixed =
+                    self.lower_mixed_box(mir::MixedTag::String, payload.into(), *payload_owned)?;
+                if !payload_owned {
+                    self.release_string(payload)?;
+                }
+                Ok(mixed)
             }
-            mir::MixedExpression::BoxClass(value) => {
+            mir::MixedExpression::BoxClass {
+                value,
+                payload_owned,
+            } => {
                 let class = value.class();
                 let payload = self.lower_class_expression(value)?;
-                self.lower_mixed_box(mir::MixedTag::Class(class), payload.into())
+                self.lower_mixed_box(mir::MixedTag::Class(class), payload.into(), *payload_owned)
             }
             mir::MixedExpression::CollectionIndex {
                 collection,
                 index,
                 transfer,
-            } => Ok(self
-                .lower_collection_index(*collection, index, *transfer)?
-                .into_pointer_value()),
+            } => {
+                let value = self
+                    .lower_collection_index(*collection, index, false)?
+                    .into_pointer_value();
+                if *transfer {
+                    self.own_mixed_value(value, mir::MixedOwnership::None)
+                } else {
+                    Ok(value)
+                }
+            }
         }
     }
 
@@ -3116,11 +3242,21 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 .lower_call(*function, args, true)?
                 .ok_or_else(|| malformed_mir("nullable-mixed call produced no result"))?
                 .into_pointer_value()),
-            mir::NullableMixedExpression::Coalesce { left, right, .. } => {
+            mir::NullableMixedExpression::Coalesce {
+                left,
+                right,
+                transfer,
+            } => {
+                let left_ownership = left.ownership();
+                let right_ownership = right.ownership();
                 let left = self.lower_nullable_mixed_expression(left)?;
-                self.lower_nullable_mixed_coalesce(left, |lowerer| {
-                    Ok(lowerer.lower_nullable_mixed_expression(right)?.into())
-                })
+                self.lower_nullable_mixed_coalesce(
+                    left,
+                    !transfer,
+                    left_ownership,
+                    right_ownership,
+                    |lowerer| Ok(lowerer.lower_nullable_mixed_expression(right)?.into()),
+                )
             }
         }
     }
@@ -3128,6 +3264,9 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
     fn lower_nullable_mixed_coalesce(
         &mut self,
         left: PointerValue<'ctx>,
+        normalize_ownership: bool,
+        left_ownership: mir::MixedOwnership,
+        right_ownership: mir::MixedOwnership,
         fallback: impl FnOnce(&mut Self) -> Result<BasicValueEnum<'ctx>, BackendError>,
     ) -> Result<PointerValue<'ctx>, BackendError> {
         let pointer = self.context.ptr_type(AddressSpace::default());
@@ -3147,6 +3286,11 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
         )?;
         build(self.builder.build_conditional_branch(present, some, none))?;
         self.builder.position_at_end(some);
+        let left = if normalize_ownership {
+            self.own_mixed_value(left, left_ownership)?
+        } else {
+            left
+        };
         build(self.builder.build_unconditional_branch(done))?;
         let some_end = self
             .builder
@@ -3154,6 +3298,11 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
             .expect("nullable-mixed coalesce some block");
         self.builder.position_at_end(none);
         let fallback = fallback(self)?.into_pointer_value();
+        let fallback = if normalize_ownership {
+            self.own_nullable_mixed_value(fallback, right_ownership)?
+        } else {
+            fallback
+        };
         build(self.builder.build_unconditional_branch(done))?;
         let none_end = self
             .builder
@@ -3211,6 +3360,12 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
             .into_int_value();
         let payload = self.collection_word_to_value(payload, tag.ty())?;
         build(self.builder.build_store(slot, pointer.const_null()))?;
+        let _ = self.call_runtime(
+            MIXED_RELEASE_OWNED,
+            &[pointer.into()],
+            Some(self.context.i8_type().into()),
+            &[mixed.into()],
+        )?;
         let _ = self.call_runtime(MIXED_FREE, &[pointer.into()], None, &[mixed.into()])?;
         Ok(payload)
     }
@@ -3223,13 +3378,14 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
         let pointer = self.context.ptr_type(AddressSpace::default());
         let i8_type = self.context.i8_type();
         let i32_type = self.context.i32_type();
-        let mixed = self.lower_mixed_expression(mixed)?;
+        let ownership = mixed.ownership();
+        let mixed_value = self.lower_mixed_expression(mixed)?;
         let actual_tag = self
             .call_runtime(
                 MIXED_TAG,
                 &[pointer.into()],
                 Some(i8_type.into()),
-                &[mixed.into()],
+                &[mixed_value.into()],
             )?
             .ok_or_else(|| backend_failure("mixed tag read produced no result"))?
             .into_int_value();
@@ -3240,28 +3396,31 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
             i8_type.const_int(u64::from(expected_tag), false),
             "mixed.tag.matches",
         ))?;
-        if !matches!(tag, mir::MixedTag::Class(_)) {
-            return Ok(tag_matches);
-        }
-        let actual_type_id = self
-            .call_runtime(
-                MIXED_TYPE_ID,
-                &[pointer.into()],
-                Some(i32_type.into()),
-                &[mixed.into()],
+        let result = if matches!(tag, mir::MixedTag::Class(_)) {
+            let actual_type_id = self
+                .call_runtime(
+                    MIXED_TYPE_ID,
+                    &[pointer.into()],
+                    Some(i32_type.into()),
+                    &[mixed_value.into()],
+                )?
+                .ok_or_else(|| backend_failure("mixed type-id read produced no result"))?
+                .into_int_value();
+            let type_matches = build(self.builder.build_int_compare(
+                IntPredicate::EQ,
+                actual_type_id,
+                i32_type.const_int(u64::from(expected_type_id), false),
+                "mixed.type.matches",
+            ))?;
+            build(
+                self.builder
+                    .build_and(tag_matches, type_matches, "mixed.matches"),
             )?
-            .ok_or_else(|| backend_failure("mixed type-id read produced no result"))?
-            .into_int_value();
-        let type_matches = build(self.builder.build_int_compare(
-            IntPredicate::EQ,
-            actual_type_id,
-            i32_type.const_int(u64::from(expected_type_id), false),
-            "mixed.type.matches",
-        ))?;
-        build(
-            self.builder
-                .build_and(tag_matches, type_matches, "mixed.matches"),
-        )
+        } else {
+            tag_matches
+        };
+        self.cleanup_mixed_temporary(mixed_value, ownership)?;
+        Ok(result)
     }
 
     fn drop_mixed_value(&mut self, value: PointerValue<'ctx>) -> Result<(), BackendError> {
@@ -3280,6 +3439,32 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 .build_conditional_branch(has_box, drop_block, done),
         )?;
         self.builder.position_at_end(drop_block);
+        let release_payload = self
+            .call_runtime(
+                MIXED_RELEASE_OWNED,
+                &[pointer.into()],
+                Some(i8_type.into()),
+                &[value.into()],
+            )?
+            .ok_or_else(|| backend_failure("mixed ownership release produced no result"))?
+            .into_int_value();
+        let drop_payload = self
+            .context
+            .append_basic_block(function, "mixed.drop.payload");
+        let free_shell = self
+            .context
+            .append_basic_block(function, "mixed.drop.shell");
+        let release_payload = build(self.builder.build_int_compare(
+            IntPredicate::NE,
+            release_payload,
+            i8_type.const_zero(),
+            "mixed.drop.final-owner",
+        ))?;
+        build(
+            self.builder
+                .build_conditional_branch(release_payload, drop_payload, free_shell),
+        )?;
+        self.builder.position_at_end(drop_payload);
         let tag = self
             .call_runtime(
                 MIXED_TAG,
@@ -3394,10 +3579,119 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
             }
         }
         self.builder.position_at_end(after_class);
+        build(self.builder.build_unconditional_branch(free_shell))?;
+        self.builder.position_at_end(free_shell);
         let _ = self.call_runtime(MIXED_FREE, &[pointer.into()], None, &[value.into()])?;
         build(self.builder.build_unconditional_branch(done))?;
         self.builder.position_at_end(done);
         Ok(())
+    }
+
+    fn free_mixed_shell(&mut self, value: PointerValue<'ctx>) -> Result<(), BackendError> {
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        let _ = self.call_runtime(MIXED_FREE, &[pointer.into()], None, &[value.into()])?;
+        Ok(())
+    }
+
+    fn cleanup_mixed_temporary(
+        &mut self,
+        value: PointerValue<'ctx>,
+        ownership: mir::MixedOwnership,
+    ) -> Result<(), BackendError> {
+        match ownership {
+            mir::MixedOwnership::None => Ok(()),
+            mir::MixedOwnership::ShellOnly => self.free_mixed_shell(value),
+            mir::MixedOwnership::Owned => self.drop_mixed_value(value),
+        }
+    }
+
+    fn cleanup_mixed_temporary_if(
+        &mut self,
+        condition: IntValue<'ctx>,
+        value: PointerValue<'ctx>,
+        ownership: mir::MixedOwnership,
+    ) -> Result<(), BackendError> {
+        if !ownership.has_shell() {
+            return Ok(());
+        }
+        let function = current_function(&self.builder)?;
+        let cleanup = self
+            .context
+            .append_basic_block(function, "mixed.temporary.cleanup");
+        let done = self
+            .context
+            .append_basic_block(function, "mixed.temporary.continue");
+        build(
+            self.builder
+                .build_conditional_branch(condition, cleanup, done),
+        )?;
+        self.builder.position_at_end(cleanup);
+        self.cleanup_mixed_temporary(value, ownership)?;
+        build(self.builder.build_unconditional_branch(done))?;
+        self.builder.position_at_end(done);
+        Ok(())
+    }
+
+    fn own_mixed_value(
+        &mut self,
+        value: PointerValue<'ctx>,
+        ownership: mir::MixedOwnership,
+    ) -> Result<PointerValue<'ctx>, BackendError> {
+        if ownership == mir::MixedOwnership::Owned {
+            return Ok(value);
+        }
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        let owned = self
+            .call_runtime(
+                MIXED_CLONE_OWNED,
+                &[pointer.into()],
+                Some(pointer.into()),
+                &[value.into()],
+            )?
+            .ok_or_else(|| backend_failure("mixed ownership clone produced no result"))?
+            .into_pointer_value();
+        if ownership == mir::MixedOwnership::ShellOnly {
+            self.free_mixed_shell(value)?;
+        }
+        Ok(owned)
+    }
+
+    fn own_nullable_mixed_value(
+        &mut self,
+        value: PointerValue<'ctx>,
+        ownership: mir::MixedOwnership,
+    ) -> Result<PointerValue<'ctx>, BackendError> {
+        if ownership == mir::MixedOwnership::Owned {
+            return Ok(value);
+        }
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        let function = current_function(&self.builder)?;
+        let own = self
+            .context
+            .append_basic_block(function, "nullable-mixed.own");
+        let done = self
+            .context
+            .append_basic_block(function, "nullable-mixed.own.done");
+        let current = self
+            .builder
+            .get_insert_block()
+            .ok_or_else(|| backend_failure("nullable mixed ownership has no block"))?;
+        let present = build(
+            self.builder
+                .build_is_not_null(value, "nullable-mixed.own.present"),
+        )?;
+        build(self.builder.build_conditional_branch(present, own, done))?;
+        self.builder.position_at_end(own);
+        let owned = self.own_mixed_value(value, ownership)?;
+        build(self.builder.build_unconditional_branch(done))?;
+        let owned_block = self
+            .builder
+            .get_insert_block()
+            .ok_or_else(|| backend_failure("nullable mixed owned value has no block"))?;
+        self.builder.position_at_end(done);
+        let result = build(self.builder.build_phi(pointer, "nullable-mixed.owned"))?;
+        result.add_incoming(&[(&value, current), (&owned, owned_block)]);
+        Ok(result.as_basic_value().into_pointer_value())
     }
 
     fn cleanup_mixed_locals(&mut self) -> Result<(), BackendError> {
@@ -3523,7 +3817,14 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 .build_conditional_branch(condition, drop_block, continue_block),
         )?;
         self.builder.position_at_end(drop_block);
-        self.drop_class_value(object, class)?;
+        let drop_function = *self.class_drop_functions.get(class.0).ok_or_else(|| {
+            malformed_mir(format!("class{} drop function does not exist", class.0))
+        })?;
+        build(self.builder.build_call(
+            drop_function,
+            &[self.current_frame.into(), object.into()],
+            "class.drop.call",
+        ))?;
         build(self.builder.build_unconditional_branch(continue_block))?;
         self.builder.position_at_end(continue_block);
         Ok(())
@@ -4848,7 +5149,7 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
         }
         let mut lowered_args = Vec::with_capacity(args.len());
         let mut owned_strings = Vec::new();
-        let mut owned_mixed = Vec::new();
+        let mut temporary_mixed = Vec::new();
         for (index, argument) in args.iter().enumerate() {
             let value = self.lower_rvalue(argument)?;
             match argument.ty() {
@@ -4860,8 +5161,9 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 ),
                 _ => {}
             }
-            if argument.owned_temporary_mixed() {
-                owned_mixed.push((index, value.into_pointer_value()));
+            let ownership = argument.mixed_ownership();
+            if ownership.has_shell() {
+                temporary_mixed.push((index, value.into_pointer_value(), ownership));
             }
             values.push(value.into());
             lowered_args.push(value);
@@ -4879,7 +5181,7 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
             self.release_string(string)?;
         }
         let callee_definition = function_in(self.program, function)?;
-        for (index, value) in &owned_mixed {
+        for (index, value, ownership) in &temporary_mixed {
             let parameter_index = *index + usize::from(receiver.is_some());
             let parameter = *callee_definition
                 .params
@@ -4891,7 +5193,7 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                     ))
                 })?;
             if !local_in(callee_definition, parameter)?.owned {
-                self.drop_mixed_value(*value)?;
+                self.cleanup_mixed_temporary(*value, *ownership)?;
             }
         }
         for (index, argument) in args.iter().enumerate() {
@@ -5179,11 +5481,13 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 )?;
             }
             mir::BoolExpression::NullableMixedIsPresent(value) => {
+                let ownership = value.ownership();
                 let value = self.lower_nullable_mixed_expression(value)?;
                 let condition = build(
                     self.builder
                         .build_is_not_null(value, "nullable-mixed.present"),
                 )?;
+                self.cleanup_mixed_temporary(value, ownership)?;
                 build(
                     self.builder
                         .build_conditional_branch(condition, then_block, else_block),
@@ -5243,6 +5547,7 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                 };
                 let definition = self.collection_definition(collection_type)?.clone();
                 let needle_type = definition.key.unwrap_or(definition.value);
+                let mixed_ownership = value.mixed_ownership();
                 let needle = self.lower_rvalue(value)?;
                 let needle_word = self.value_to_collection_word(needle, needle_type)?;
                 let collection_value = self.collection_pointer(*collection)?;
@@ -5269,7 +5574,14 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                                 backend_failure("collection membership produced no result")
                             })?
                             .into_int_value();
-                        self.drop_stored_value(needle, needle_type)?;
+                        if matches!(needle_type, mir::Type::Mixed | mir::Type::NullableMixed) {
+                            self.cleanup_mixed_temporary(
+                                needle.into_pointer_value(),
+                                mixed_ownership,
+                            )?;
+                        } else {
+                            self.drop_stored_value(needle, needle_type)?;
+                        }
                         found
                     }
                     mir::CollectionMembershipOp::Add => {
@@ -5286,7 +5598,21 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                             )?
                             .ok_or_else(|| backend_failure("set insertion produced no result"))?
                             .into_int_value();
-                        self.drop_value_unless(inserted, needle, needle_type)?;
+                        if matches!(needle_type, mir::Type::Mixed | mir::Type::NullableMixed) {
+                            let rejected = build(self.builder.build_int_compare(
+                                IntPredicate::EQ,
+                                inserted,
+                                self.context.i8_type().const_zero(),
+                                "mixed.set.rejected",
+                            ))?;
+                            self.cleanup_mixed_temporary_if(
+                                rejected,
+                                needle.into_pointer_value(),
+                                mixed_ownership,
+                            )?;
+                        } else {
+                            self.drop_value_unless(inserted, needle, needle_type)?;
+                        }
                         inserted
                     }
                     mir::CollectionMembershipOp::Remove => {
@@ -5322,7 +5648,14 @@ impl<'ctx> FunctionLowerer<'ctx, '_> {
                         let removed_value =
                             self.collection_word_to_value(removed_word, needle_type)?;
                         self.drop_value_if(removed, removed_value, needle_type)?;
-                        self.drop_stored_value(needle, needle_type)?;
+                        if matches!(needle_type, mir::Type::Mixed | mir::Type::NullableMixed) {
+                            self.cleanup_mixed_temporary(
+                                needle.into_pointer_value(),
+                                mixed_ownership,
+                            )?;
+                        } else {
+                            self.drop_stored_value(needle, needle_type)?;
+                        }
                         removed
                     }
                 };

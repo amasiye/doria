@@ -24,14 +24,15 @@ use crate::native_abi::{
     COLLECTION_LENGTH, COLLECTION_NEW, COLLECTION_NULLABLE_ACCESS, COLLECTION_PUSH,
     COLLECTION_PUSH_UNIQUE, COLLECTION_REMOVE_AT, COLLECTION_REMOVE_VALUE, COLLECTION_SET_ALGEBRA,
     COLLECTION_SET_AT, COLLECTION_VALUE_AT, FORMAT_F32, FORMAT_F64, FORMAT_I64, FORMAT_STRING,
-    FORMAT_U64, MIXED_FREE, MIXED_NEW, MIXED_PAYLOAD, MIXED_TAG, MIXED_TAG_BOOL, MIXED_TAG_CLASS,
-    MIXED_TAG_FLOAT32, MIXED_TAG_FLOAT64, MIXED_TAG_INT16, MIXED_TAG_INT32, MIXED_TAG_INT64,
-    MIXED_TAG_INT8, MIXED_TAG_STRING, MIXED_TAG_UINT16, MIXED_TAG_UINT32, MIXED_TAG_UINT64,
-    MIXED_TAG_UINT8, MIXED_TYPE_ID, NULLABLE_STRING_EQUAL, READ_FILE, READ_FILE_BYTES,
-    READ_STDIN_BYTES, READ_STDIN_LINE, STRING_COMPARE, STRING_CONCAT, STRING_DATA,
-    STRING_FROM_BOOL, STRING_FROM_F32, STRING_FROM_F64, STRING_FROM_I64, STRING_FROM_U64,
-    STRING_FROM_UTF8, STRING_LENGTH, STRING_RELEASE, STRING_RETAIN, STRING_WRITE_STDERR,
-    STRING_WRITE_STDOUT, WRITE_FILE, WRITE_FILE_BYTES, WRITE_STDERR_BYTES, WRITE_STDOUT_BYTES,
+    FORMAT_U64, MIXED_CLONE_OWNED, MIXED_FREE, MIXED_NEW, MIXED_NEW_BORROWED, MIXED_PAYLOAD,
+    MIXED_RELEASE_OWNED, MIXED_TAG, MIXED_TAG_BOOL, MIXED_TAG_CLASS, MIXED_TAG_FLOAT32,
+    MIXED_TAG_FLOAT64, MIXED_TAG_INT16, MIXED_TAG_INT32, MIXED_TAG_INT64, MIXED_TAG_INT8,
+    MIXED_TAG_STRING, MIXED_TAG_UINT16, MIXED_TAG_UINT32, MIXED_TAG_UINT64, MIXED_TAG_UINT8,
+    MIXED_TYPE_ID, NULLABLE_STRING_EQUAL, READ_FILE, READ_FILE_BYTES, READ_STDIN_BYTES,
+    READ_STDIN_LINE, STRING_COMPARE, STRING_CONCAT, STRING_DATA, STRING_FROM_BOOL, STRING_FROM_F32,
+    STRING_FROM_F64, STRING_FROM_I64, STRING_FROM_U64, STRING_FROM_UTF8, STRING_LENGTH,
+    STRING_RELEASE, STRING_RETAIN, STRING_WRITE_STDERR, STRING_WRITE_STDOUT, WRITE_FILE,
+    WRITE_FILE_BYTES, WRITE_STDERR_BYTES, WRITE_STDOUT_BYTES,
 };
 use crate::numeric::{FloatType, FloatValue, IntegerPanic, IntegerType, IntegerValue};
 
@@ -62,6 +63,7 @@ pub fn lower_mir_to_object(program: &mir::Program) -> Result<Vec<u8>, BackendErr
             .map_err(|error| backend_failure(error.to_string()))?;
         function_ids.push(function_id);
     }
+    let class_drop_function_ids = declare_class_drop_functions(&mut module, program)?;
     let static_ids = define_static_data(&mut module, program)?;
 
     let mut process_signature = module.make_signature();
@@ -71,7 +73,24 @@ pub fn lower_mir_to_object(program: &mir::Program) -> Result<Vec<u8>, BackendErr
         .map_err(|error| backend_failure(error.to_string()))?;
 
     for function in &program.functions {
-        define_function(&mut module, program, function, &function_ids, &static_ids)?;
+        define_function(
+            &mut module,
+            program,
+            function,
+            &function_ids,
+            &class_drop_function_ids,
+            &static_ids,
+        )?;
+    }
+    for class in &program.classes {
+        define_class_drop_function(
+            &mut module,
+            program,
+            class.id,
+            &function_ids,
+            &class_drop_function_ids,
+            &static_ids,
+        )?;
     }
     define_process_main(
         &mut module,
@@ -85,6 +104,29 @@ pub fn lower_mir_to_object(program: &mir::Program) -> Result<Vec<u8>, BackendErr
         .finish()
         .emit()
         .map_err(|error| backend_failure(error.to_string()))
+}
+
+fn declare_class_drop_functions(
+    module: &mut ObjectModule,
+    program: &mir::Program,
+) -> Result<Vec<FuncId>, BackendError> {
+    let pointer = module.target_config().pointer_type();
+    program
+        .classes
+        .iter()
+        .map(|class| {
+            let mut signature = module.make_signature();
+            signature.params.push(AbiParam::new(pointer));
+            signature.params.push(AbiParam::new(pointer));
+            module
+                .declare_function(
+                    &format!("__doria_drop_class_{}", class.id.0),
+                    Linkage::Local,
+                    &signature,
+                )
+                .map_err(|error| backend_failure(error.to_string()))
+        })
+        .collect()
 }
 
 fn function_signature(
@@ -322,6 +364,7 @@ fn define_function(
     program: &mir::Program,
     function: &mir::Function,
     function_ids: &[FuncId],
+    class_drop_function_ids: &[FuncId],
     static_ids: &[DataId],
 ) -> Result<(), BackendError> {
     let function_id = *function_ids
@@ -423,6 +466,7 @@ fn define_function(
             module,
             program,
             function_ids,
+            class_drop_function_ids,
             static_ids,
             local_slots: &local_slots,
             deferred_class_temporary_slots,
@@ -455,6 +499,60 @@ fn define_function(
         builder.finalize();
     }
 
+    module
+        .define_function(function_id, &mut context)
+        .map_err(|error| backend_failure(format!("{error:?}")))?;
+    module.clear_context(&mut context);
+    Ok(())
+}
+
+fn define_class_drop_function(
+    module: &mut ObjectModule,
+    program: &mir::Program,
+    class: crate::class_layout::ClassId,
+    function_ids: &[FuncId],
+    class_drop_function_ids: &[FuncId],
+    static_ids: &[DataId],
+) -> Result<(), BackendError> {
+    let function_id = *class_drop_function_ids
+        .get(class.0)
+        .ok_or_else(|| malformed_mir(format!("class{} drop function was not declared", class.0)))?;
+    let pointer = module.target_config().pointer_type();
+    let mut context = module.make_context();
+    context.func.signature.params.push(AbiParam::new(pointer));
+    context.func.signature.params.push(AbiParam::new(pointer));
+    let mut builder_context = FunctionBuilderContext::new();
+    {
+        let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let current_frame = builder.block_params(entry)[0];
+        let object = builder.block_params(entry)[1];
+        let local_slots = [];
+        let mut resources = LoweringResources {
+            module,
+            program,
+            function_ids,
+            class_drop_function_ids,
+            static_ids,
+            local_slots: &local_slots,
+            deferred_class_temporary_slots: Vec::new(),
+            deferred_class_temporary_slot_cursor: 0,
+            write_stdout_func_id: None,
+            panic_func_id: None,
+            runtime_functions: HashMap::new(),
+            next_data_id: 0,
+            function_id: program.entry,
+            current_frame,
+            defer_class_temporary_drops: false,
+            deferred_class_temporary_drops: Vec::new(),
+        };
+        lower_drop_class_value(&mut builder, object, class, &mut resources)?;
+        builder.ins().return_(&[]);
+        builder.seal_all_blocks();
+        builder.finalize();
+    }
     module
         .define_function(function_id, &mut context)
         .map_err(|error| backend_failure(format!("{error:?}")))?;
@@ -715,6 +813,7 @@ struct LoweringResources<'module, 'program> {
     module: &'module mut ObjectModule,
     program: &'program mir::Program,
     function_ids: &'program [FuncId],
+    class_drop_function_ids: &'program [FuncId],
     static_ids: &'program [DataId],
     local_slots: &'program [Option<StackSlot>],
     deferred_class_temporary_slots: Vec<StackSlot>,
@@ -1014,6 +1113,9 @@ fn lower_statement(
                 (mir::Type::Collection(collection), Some(old_value)) => {
                     lower_drop_collection_value(builder, old_value, collection, resources)?;
                 }
+                (mir::Type::Mixed | mir::Type::NullableMixed, Some(old_value)) => {
+                    lower_drop_mixed_value(builder, old_value, resources)?;
+                }
                 _ => {}
             }
         }
@@ -1023,7 +1125,7 @@ fn lower_statement(
             let address = lower_static_address(builder, *target, resources)?;
             let pointer = resources.module.target_config().pointer_type();
             let old_value = match property.ty {
-                mir::Type::String => Some(
+                mir::Type::String | mir::Type::Mixed | mir::Type::NullableMixed => Some(
                     load_lowered_from_address(builder, property.ty, address, pointer).single()?,
                 ),
                 mir::Type::NullableString => Some(
@@ -1035,7 +1137,11 @@ fn lower_statement(
             };
             store_lowered_to_address(builder, property.ty, address, new_value, pointer)?;
             if let Some(old_value) = old_value {
-                release_string(builder, old_value, resources)?;
+                if matches!(property.ty, mir::Type::Mixed | mir::Type::NullableMixed) {
+                    lower_drop_mixed_value(builder, old_value, resources)?;
+                } else {
+                    release_string(builder, old_value, resources)?;
+                }
             }
         }
         mir::Statement::DropClass { local, .. } => {
@@ -2470,7 +2576,7 @@ fn lower_class_expression(
                 builder.ins().call(callee, &constructor_args);
 
                 let constructor_definition = function_in(resources.program, *constructor)?;
-                for (index, value) in &lowered_args.owned_mixed {
+                for (index, value, ownership) in &lowered_args.temporary_mixed {
                     let promoted = properties.iter().any(|property| {
                         matches!(
                             property.source,
@@ -2489,7 +2595,7 @@ fn lower_class_expression(
                                 ))
                             })?;
                     if !promoted && !local_in(constructor_definition, parameter)?.owned {
-                        lower_drop_mixed_value(builder, *value, resources)?;
+                        lower_cleanup_mixed_temporary(builder, *value, *ownership, resources)?;
                     }
                 }
                 for (index, argument) in args.iter().enumerate() {
@@ -2801,7 +2907,16 @@ fn lower_drop_class_value_checked(
         .ins()
         .brif(has_object, drop_block, &[], continue_block, &[]);
     builder.switch_to_block(drop_block);
-    lower_drop_class_value(builder, object, class, resources)?;
+    let drop_function = *resources
+        .class_drop_function_ids
+        .get(class.0)
+        .ok_or_else(|| malformed_mir(format!("class{} drop function does not exist", class.0)))?;
+    let drop_function = resources
+        .module
+        .declare_func_in_func(drop_function, builder.func);
+    builder
+        .ins()
+        .call(drop_function, &[resources.current_frame, object]);
     builder.ins().jump(continue_block, &[]);
     builder.switch_to_block(continue_block);
     Ok(())
@@ -2937,6 +3052,21 @@ fn lower_drop_mixed_value(
     let done = builder.create_block();
     builder.ins().brif(has_box, drop_block, &[], done, &[]);
     builder.switch_to_block(drop_block);
+    let release_payload = runtime_call(
+        builder,
+        MIXED_RELEASE_OWNED,
+        &[pointer],
+        Some(types::I8),
+        &[value],
+        resources,
+    )?
+    .ok_or_else(|| backend_failure("mixed ownership release produced no result"))?;
+    let drop_payload = builder.create_block();
+    let free_shell = builder.create_block();
+    builder
+        .ins()
+        .brif(release_payload, drop_payload, &[], free_shell, &[]);
+    builder.switch_to_block(drop_payload);
 
     let tag = runtime_call(
         builder,
@@ -3022,10 +3152,103 @@ fn lower_drop_mixed_value(
     }
 
     builder.switch_to_block(after_class);
+    builder.ins().jump(free_shell, &[]);
+    builder.switch_to_block(free_shell);
     runtime_call(builder, MIXED_FREE, &[pointer], None, &[value], resources)?;
     builder.ins().jump(done, &[]);
     builder.switch_to_block(done);
     Ok(())
+}
+
+fn lower_free_mixed_shell(
+    builder: &mut FunctionBuilder,
+    value: Value,
+    resources: &mut LoweringResources<'_, '_>,
+) -> Result<(), BackendError> {
+    let pointer = resources.module.target_config().pointer_type();
+    runtime_call(builder, MIXED_FREE, &[pointer], None, &[value], resources)?;
+    Ok(())
+}
+
+fn lower_cleanup_mixed_temporary(
+    builder: &mut FunctionBuilder,
+    value: Value,
+    ownership: mir::MixedOwnership,
+    resources: &mut LoweringResources<'_, '_>,
+) -> Result<(), BackendError> {
+    match ownership {
+        mir::MixedOwnership::None => Ok(()),
+        mir::MixedOwnership::ShellOnly => lower_free_mixed_shell(builder, value, resources),
+        mir::MixedOwnership::Owned => lower_drop_mixed_value(builder, value, resources),
+    }
+}
+
+fn lower_cleanup_mixed_temporary_if(
+    builder: &mut FunctionBuilder,
+    condition: Value,
+    value: Value,
+    ownership: mir::MixedOwnership,
+    resources: &mut LoweringResources<'_, '_>,
+) -> Result<(), BackendError> {
+    if !ownership.has_shell() {
+        return Ok(());
+    }
+    let cleanup = builder.create_block();
+    let done = builder.create_block();
+    builder.ins().brif(condition, cleanup, &[], done, &[]);
+    builder.switch_to_block(cleanup);
+    lower_cleanup_mixed_temporary(builder, value, ownership, resources)?;
+    builder.ins().jump(done, &[]);
+    builder.switch_to_block(done);
+    Ok(())
+}
+
+fn lower_own_mixed_value(
+    builder: &mut FunctionBuilder,
+    value: Value,
+    ownership: mir::MixedOwnership,
+    resources: &mut LoweringResources<'_, '_>,
+) -> Result<Value, BackendError> {
+    if ownership == mir::MixedOwnership::Owned {
+        return Ok(value);
+    }
+    let pointer = resources.module.target_config().pointer_type();
+    let owned = runtime_call(
+        builder,
+        MIXED_CLONE_OWNED,
+        &[pointer],
+        Some(pointer),
+        &[value],
+        resources,
+    )?
+    .ok_or_else(|| backend_failure("mixed ownership clone produced no result"))?;
+    if ownership == mir::MixedOwnership::ShellOnly {
+        lower_free_mixed_shell(builder, value, resources)?;
+    }
+    Ok(owned)
+}
+
+fn lower_own_nullable_mixed_value(
+    builder: &mut FunctionBuilder,
+    value: Value,
+    ownership: mir::MixedOwnership,
+    resources: &mut LoweringResources<'_, '_>,
+) -> Result<Value, BackendError> {
+    if ownership == mir::MixedOwnership::Owned {
+        return Ok(value);
+    }
+    let pointer = resources.module.target_config().pointer_type();
+    let null = builder.ins().iconst(pointer, 0);
+    let present = builder.ins().icmp(IntCC::NotEqual, value, null);
+    let own = builder.create_block();
+    let done = builder.create_block();
+    let result = builder.append_block_param(done, pointer);
+    builder.ins().brif(present, own, &[], done, &[null.into()]);
+    builder.switch_to_block(own);
+    let owned = lower_own_mixed_value(builder, value, ownership, resources)?;
+    builder.ins().jump(done, &[owned.into()]);
+    builder.switch_to_block(done);
+    Ok(result)
 }
 
 fn mixed_tag_value(tag: mir::MixedTag) -> (u8, u32) {
@@ -3050,6 +3273,7 @@ fn lower_mixed_box(
     builder: &mut FunctionBuilder,
     tag: mir::MixedTag,
     payload: Value,
+    payload_owned: bool,
     resources: &mut LoweringResources<'_, '_>,
 ) -> Result<Value, BackendError> {
     let pointer = resources.module.target_config().pointer_type();
@@ -3060,7 +3284,11 @@ fn lower_mixed_box(
     let payload = value_to_collection_word(builder, payload, payload_ty, pointer)?;
     runtime_call(
         builder,
-        MIXED_NEW,
+        if payload_owned {
+            MIXED_NEW
+        } else {
+            MIXED_NEW_BORROWED
+        },
         &[types::I8, types::I32, types::I64],
         Some(pointer),
         &[tag, type_id, payload],
@@ -3104,22 +3332,51 @@ fn lower_mixed_expression(
                 mir::ScalarType::Float(ty) => mir::MixedTag::Float(ty),
             };
             let payload = lower_value_expression(builder, value, resources)?;
-            lower_mixed_box(builder, tag, payload, resources)
+            lower_mixed_box(builder, tag, payload, false, resources)
         }
-        mir::MixedExpression::BoxString(value) => {
+        mir::MixedExpression::BoxString {
+            value,
+            payload_owned,
+        } => {
             let payload = lower_string_expression(builder, value, resources)?;
-            lower_mixed_box(builder, mir::MixedTag::String, payload, resources)
+            let mixed = lower_mixed_box(
+                builder,
+                mir::MixedTag::String,
+                payload,
+                *payload_owned,
+                resources,
+            )?;
+            if !payload_owned {
+                release_string(builder, payload, resources)?;
+            }
+            Ok(mixed)
         }
-        mir::MixedExpression::BoxClass(value) => {
+        mir::MixedExpression::BoxClass {
+            value,
+            payload_owned,
+        } => {
             let class = value.class();
             let payload = lower_class_expression(builder, value, resources)?;
-            lower_mixed_box(builder, mir::MixedTag::Class(class), payload, resources)
+            lower_mixed_box(
+                builder,
+                mir::MixedTag::Class(class),
+                payload,
+                *payload_owned,
+                resources,
+            )
         }
         mir::MixedExpression::CollectionIndex {
             collection,
             index,
             transfer,
-        } => lower_collection_index(builder, *collection, index, *transfer, resources),
+        } => {
+            let value = lower_collection_index(builder, *collection, index, false, resources)?;
+            if *transfer {
+                lower_own_mixed_value(builder, value, mir::MixedOwnership::None, resources)
+            } else {
+                Ok(value)
+            }
+        }
     }
 }
 
@@ -3158,8 +3415,15 @@ fn lower_nullable_mixed_expression(
                 })
                 .and_then(LoweredValue::single)
         }
-        mir::NullableMixedExpression::Coalesce { left, right, .. } => {
+        mir::NullableMixedExpression::Coalesce {
+            left,
+            right,
+            transfer,
+        } => {
+            let left_ownership = left.ownership();
+            let right_ownership = right.ownership();
             let left = lower_nullable_mixed_expression(builder, left, resources)?;
+            let left_block = builder.create_block();
             let fallback_block = builder.create_block();
             let done_block = builder.create_block();
             let result = builder.append_block_param(done_block, pointer);
@@ -3167,9 +3431,21 @@ fn lower_nullable_mixed_expression(
             let present = builder.ins().icmp(IntCC::NotEqual, left, zero);
             builder
                 .ins()
-                .brif(present, done_block, &[left.into()], fallback_block, &[]);
+                .brif(present, left_block, &[], fallback_block, &[]);
+            builder.switch_to_block(left_block);
+            let left = if *transfer {
+                left
+            } else {
+                lower_own_mixed_value(builder, left, left_ownership, resources)?
+            };
+            builder.ins().jump(done_block, &[left.into()]);
             builder.switch_to_block(fallback_block);
             let right = lower_nullable_mixed_expression(builder, right, resources)?;
+            let right = if *transfer {
+                right
+            } else {
+                lower_own_nullable_mixed_value(builder, right, right_ownership, resources)?
+            };
             builder.ins().jump(done_block, &[right.into()]);
             builder.switch_to_block(done_block);
             Ok(result)
@@ -3221,6 +3497,15 @@ fn lower_take_mixed_payload(
     builder.ins().stack_store(zero, slot, 0);
     runtime_call(
         builder,
+        MIXED_RELEASE_OWNED,
+        &[pointer],
+        Some(types::I8),
+        &[mixed_value],
+        resources,
+    )?
+    .ok_or_else(|| backend_failure("mixed payload take released no ownership claim"))?;
+    runtime_call(
+        builder,
         MIXED_FREE,
         &[pointer],
         None,
@@ -3237,38 +3522,42 @@ fn lower_mixed_is(
     resources: &mut LoweringResources<'_, '_>,
 ) -> Result<Value, BackendError> {
     let pointer = resources.module.target_config().pointer_type();
-    let mixed = lower_mixed_expression(builder, mixed, resources)?;
+    let ownership = mixed.ownership();
+    let mixed_value = lower_mixed_expression(builder, mixed, resources)?;
     let actual_tag = runtime_call(
         builder,
         MIXED_TAG,
         &[pointer],
         Some(types::I8),
-        &[mixed],
+        &[mixed_value],
         resources,
     )?
     .ok_or_else(|| backend_failure("mixed tag read produced no result"))?;
     let (expected_tag, expected_type_id) = mixed_tag_value(tag);
     let expected_tag = builder.ins().iconst(types::I8, i64::from(expected_tag));
     let tag_matches = builder.ins().icmp(IntCC::Equal, actual_tag, expected_tag);
-    if !matches!(tag, mir::MixedTag::Class(_)) {
-        return Ok(tag_matches);
-    }
-    let actual_type_id = runtime_call(
-        builder,
-        MIXED_TYPE_ID,
-        &[pointer],
-        Some(types::I32),
-        &[mixed],
-        resources,
-    )?
-    .ok_or_else(|| backend_failure("mixed type-id read produced no result"))?;
-    let expected_type_id = builder
-        .ins()
-        .iconst(types::I32, i64::from(expected_type_id));
-    let type_matches = builder
-        .ins()
-        .icmp(IntCC::Equal, actual_type_id, expected_type_id);
-    Ok(builder.ins().band(tag_matches, type_matches))
+    let result = if matches!(tag, mir::MixedTag::Class(_)) {
+        let actual_type_id = runtime_call(
+            builder,
+            MIXED_TYPE_ID,
+            &[pointer],
+            Some(types::I32),
+            &[mixed_value],
+            resources,
+        )?
+        .ok_or_else(|| backend_failure("mixed type-id read produced no result"))?;
+        let expected_type_id = builder
+            .ins()
+            .iconst(types::I32, i64::from(expected_type_id));
+        let type_matches = builder
+            .ins()
+            .icmp(IntCC::Equal, actual_type_id, expected_type_id);
+        builder.ins().band(tag_matches, type_matches)
+    } else {
+        tag_matches
+    };
+    lower_cleanup_mixed_temporary(builder, mixed_value, ownership, resources)?;
+    Ok(result)
 }
 
 fn lower_string_expression(
@@ -4667,7 +4956,7 @@ struct LoweredCallArgs {
     arguments: Vec<LoweredValue>,
     abi_values: Vec<Value>,
     owned_strings: Vec<(usize, Value)>,
-    owned_mixed: Vec<(usize, Value)>,
+    temporary_mixed: Vec<(usize, Value, mir::MixedOwnership)>,
 }
 
 fn lower_call_args(
@@ -4678,7 +4967,7 @@ fn lower_call_args(
     let mut arguments = Vec::with_capacity(args.len());
     let mut abi_values = Vec::with_capacity(args.len() * 2);
     let mut owned_strings = Vec::new();
-    let mut owned_mixed = Vec::new();
+    let mut temporary_mixed = Vec::new();
     for (index, argument) in args.iter().enumerate() {
         let value = lower_rvalue(builder, argument, resources)?;
         if matches!(argument.ty(), mir::Type::String | mir::Type::NullableString) {
@@ -4688,8 +4977,9 @@ fn lower_call_args(
             };
             owned_strings.push((index, string));
         }
-        if argument.owned_temporary_mixed() {
-            owned_mixed.push((index, value.single()?));
+        let ownership = argument.mixed_ownership();
+        if ownership.has_shell() {
+            temporary_mixed.push((index, value.single()?, ownership));
         }
         value.append_to(&mut abi_values);
         arguments.push(value);
@@ -4698,7 +4988,7 @@ fn lower_call_args(
         arguments,
         abi_values,
         owned_strings,
-        owned_mixed,
+        temporary_mixed,
     })
 }
 
@@ -4736,7 +5026,7 @@ fn lower_function_call(
     for (_, string) in lowered.owned_strings {
         release_string(builder, string, resources)?;
     }
-    for (index, value) in &lowered.owned_mixed {
+    for (index, value, ownership) in &lowered.temporary_mixed {
         let parameter = *callee_definition.params.get(*index).ok_or_else(|| {
             malformed_mir(format!(
                 "function{} is missing parameter {index}",
@@ -4744,7 +5034,7 @@ fn lower_function_call(
             ))
         })?;
         if !local_in(callee_definition, parameter)?.owned {
-            lower_drop_mixed_value(builder, *value, resources)?;
+            lower_cleanup_mixed_temporary(builder, *value, *ownership, resources)?;
         }
     }
     for (index, argument) in args.iter().enumerate() {
@@ -4800,7 +5090,7 @@ fn lower_method_call_with_receiver(
     for (_, string) in lowered.owned_strings {
         release_string(builder, string, resources)?;
     }
-    for (index, value) in &lowered.owned_mixed {
+    for (index, value, ownership) in &lowered.temporary_mixed {
         let parameter = *definition.params.get(index + 1).ok_or_else(|| {
             malformed_mir(format!(
                 "method function{} is missing parameter {}",
@@ -4809,7 +5099,7 @@ fn lower_method_call_with_receiver(
             ))
         })?;
         if !local_in(definition, parameter)?.owned {
-            lower_drop_mixed_value(builder, *value, resources)?;
+            lower_cleanup_mixed_temporary(builder, *value, *ownership, resources)?;
         }
     }
     for (index, argument) in args.iter().enumerate() {
@@ -5006,10 +5296,12 @@ fn lower_condition_to_branch(
                 .brif(present, then_block, &[], else_block, &[]);
         }
         mir::BoolExpression::NullableMixedIsPresent(value) => {
+            let ownership = value.ownership();
             let value = lower_nullable_mixed_expression(builder, value, resources)?;
             let pointer = resources.module.target_config().pointer_type();
             let zero = builder.ins().iconst(pointer, 0);
             let present = builder.ins().icmp(IntCC::NotEqual, value, zero);
+            lower_cleanup_mixed_temporary(builder, value, ownership, resources)?;
             builder
                 .ins()
                 .brif(present, then_block, &[], else_block, &[]);
@@ -5046,6 +5338,7 @@ fn lower_condition_to_branch(
             };
             let definition = collection_definition(resources.program, collection_type)?.clone();
             let needle_type = definition.key.unwrap_or(definition.value);
+            let mixed_ownership = value.mixed_ownership();
             let needle = lower_rvalue(builder, value, resources)?.single()?;
             let needle_word = value_to_collection_word(builder, needle, needle_type, pointer)?;
             let collection_value = lower_collection_pointer(builder, *collection, resources)?;
@@ -5068,7 +5361,11 @@ fn lower_condition_to_branch(
                         resources,
                     )?
                     .ok_or_else(|| backend_failure("collection membership produced no result"))?;
-                    lower_drop_stored_value(builder, needle, needle_type, resources)?;
+                    if matches!(needle_type, mir::Type::Mixed | mir::Type::NullableMixed) {
+                        lower_cleanup_mixed_temporary(builder, needle, mixed_ownership, resources)?;
+                    } else {
+                        lower_drop_stored_value(builder, needle, needle_type, resources)?;
+                    }
                     found
                 }
                 mir::CollectionMembershipOp::Add => {
@@ -5081,7 +5378,19 @@ fn lower_condition_to_branch(
                         resources,
                     )?
                     .ok_or_else(|| backend_failure("set insertion produced no result"))?;
-                    lower_drop_value_unless(builder, inserted, needle, needle_type, resources)?;
+                    if matches!(needle_type, mir::Type::Mixed | mir::Type::NullableMixed) {
+                        let zero = builder.ins().iconst(types::I8, 0);
+                        let rejected = builder.ins().icmp(IntCC::Equal, inserted, zero);
+                        lower_cleanup_mixed_temporary_if(
+                            builder,
+                            rejected,
+                            needle,
+                            mixed_ownership,
+                            resources,
+                        )?;
+                    } else {
+                        lower_drop_value_unless(builder, inserted, needle, needle_type, resources)?;
+                    }
                     inserted
                 }
                 mir::CollectionMembershipOp::Remove => {
@@ -5104,7 +5413,11 @@ fn lower_condition_to_branch(
                     let removed_value =
                         collection_word_to_value(builder, removed_word, needle_type, pointer)?;
                     lower_drop_value_if(builder, removed, removed_value, needle_type, resources)?;
-                    lower_drop_stored_value(builder, needle, needle_type, resources)?;
+                    if matches!(needle_type, mir::Type::Mixed | mir::Type::NullableMixed) {
+                        lower_cleanup_mixed_temporary(builder, needle, mixed_ownership, resources)?;
+                    } else {
+                        lower_drop_stored_value(builder, needle, needle_type, resources)?;
+                    }
                     removed
                 }
             };
