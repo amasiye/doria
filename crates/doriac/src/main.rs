@@ -60,6 +60,13 @@ fn run() -> Result<ExitCode, String> {
         "mir" => mir_command(&args[1..]).map(|()| ExitCode::SUCCESS),
         "compile" => compile_command(&args[1..]).map(|()| ExitCode::SUCCESS),
         "run" => run_command(&args[1..]),
+        command if command.ends_with(".doria") || Path::new(command).is_file() => Err(format!(
+            "unknown command `{command}`\n\n\
+             `{command}` looks like a source file, and the command comes first. Did you mean:\n    \
+             doriac compile {command} --out <file>   # build a native executable\n    \
+             doriac run {command}                    # compile and run it\n\n\
+             Run `doriac --help` for all commands."
+        )),
         command => Err(format!(
             "unknown command `{command}`\n\nRun `doriac --help`."
         )),
